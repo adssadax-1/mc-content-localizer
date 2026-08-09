@@ -26,7 +26,7 @@
 
 ![软件主界面](docs/软件的主页面.png)
 
-1. **下载**：从 [Releases](https://github.com/你的用户名/mod-translator/releases) 下载安装包，或 clone 源码自行构建（见下文）。
+1. **下载**：从 [Releases](https://github.com/adssadax-1/Minecraft-mod-translator/releases) 下载安装包，或 clone 源码自行构建（见下文）。
 2. **配置 API Key**：打开程序 → 右上角「设置」→ 选择服务商 → 填入 API Key → 点「获取模型列表」选择模型 → 保存。
 3. **拖入模组**：把模组 `.jar` 拖进窗口，自动解析出全部语言条目。
 4. **开始翻译**：点「开始 AI 翻译」，观察进度（可暂停/取消）。
