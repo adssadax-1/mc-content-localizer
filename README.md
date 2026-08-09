@@ -24,6 +24,8 @@
 
 ## 🚀 快速开始
 
+![软件主界面](docs/软件的主页面.png)
+
 1. **下载**：从 [Releases](https://github.com/你的用户名/mod-translator/releases) 下载安装包，或 clone 源码自行构建（见下文）。
 2. **配置 API Key**：打开程序 → 右上角「设置」→ 选择服务商 → 填入 API Key → 点「获取模型列表」选择模型 → 保存。
 3. **拖入模组**：把模组 `.jar` 拖进窗口，自动解析出全部语言条目。
@@ -38,6 +40,10 @@
 ---
 
 ## 🔑 如何获取 API Key
+
+在程序右上角「设置」中配置翻译服务，各服务商独立保存 Key 与模型选择：
+
+![设置界面](docs/设置的主界面.png)
 
 ### 智谱 GLM（推荐：有免费模型，国内直连）
 
@@ -57,9 +63,17 @@
 
 ### DeepSeek（低价）
 
-1. 打开 [platform.deepseek.com](https://platform.deepseek.com/) 注册并充值（最低 10 元）
+1. 打开 [platform.deepseek.com](https://platform.deepseek.com/) 注册并充值
 2. 左侧「API Keys」→「创建 API Key」
 3. 程序设置中选择「DeepSeek」粘贴
+
+#### DeepSeek 实测成本
+
+实测（`deepseek-chat`，即 DeepSeek V4-flash 系列）：翻译 40 条模组汉化内容，消耗 **9,710 tokens，费用约 ¥0.01 元**，成本极低。
+
+![翻译结果展示](docs/翻译结果展示.png)
+
+![API 消耗展示](docs/耗费token展示.png)
 
 ### 阿里百炼 Qwen（低价）
 
