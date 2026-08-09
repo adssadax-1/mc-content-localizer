@@ -1,0 +1,199 @@
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use tauri::{AppHandle, Emitter, Manager};
+
+use crate::core::model::{LangEntry, LangFormat, ModFile};
+use crate::settings::Settings;
+use crate::translate::pipeline::{self, BatchItem, TranslateContext, TranslatedItem};
+use crate::translate::provider::{OpenAiProvider, ProviderConfig};
+
+fn settings_path(app: &AppHandle) -> PathBuf {
+    app.path()
+        .app_config_dir()
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join("settings.json")
+}
+
+/// 翻译取消标志：前端调用 cancel_translation 置位，翻译循环每批检查
+static CANCEL_TRANSLATION: AtomicBool = AtomicBool::new(false);
+/// 翻译暂停标志：置位后翻译循环在批次间等待，直到恢复或取消
+static PAUSE_TRANSLATION: AtomicBool = AtomicBool::new(false);
+
+/// 取消当前翻译任务
+#[tauri::command]
+pub fn cancel_translation() {
+    CANCEL_TRANSLATION.store(true, Ordering::Relaxed);
+}
+
+/// 暂停当前翻译（当前批次完成后暂停）
+#[tauri::command]
+pub fn pause_translation() {
+    PAUSE_TRANSLATION.store(true, Ordering::Relaxed);
+}
+
+/// 继续被暂停的翻译
+#[tauri::command]
+pub fn resume_translation() {
+    PAUSE_TRANSLATION.store(false, Ordering::Relaxed);
+}
+
+/// 解析模组 jar，返回模组信息与全部语言条目
+#[tauri::command]
+pub fn parse_jar(path: String) -> Result<ModFile, String> {
+    crate::core::jar::parse_jar(std::path::Path::new(&path)).map_err(|e| e.to_string())
+}
+
+/// 执行 AI 翻译：提取术语表 → 分批翻译 → 占位符校验。
+/// 进度通过 "translate-progress" / "glossary-done" 事件推送到前端。
+#[tauri::command]
+pub async fn run_translation(
+    app: AppHandle,
+    config: ProviderConfig,
+    ctx: TranslateContext,
+    items: Vec<BatchItem>,
+    batch_size: Option<usize>,
+    extract_glossary: Option<bool>,
+) -> Result<Vec<TranslatedItem>, String> {
+    let provider = OpenAiProvider::new(config);
+    // 诊断信息：报错时附上实际请求参数，方便定位
+    let diag = format!(
+        "model={}, temperature={}",
+        provider.config.resolve_endpoint().1,
+        provider.config.temperature()
+    );
+    let batch_size = batch_size.unwrap_or(40).clamp(5, 200);
+    let mut glossary: Vec<(String, String)> = Vec::new();
+
+    // 第一轮：提取术语表
+    if extract_glossary.unwrap_or(true) {
+        let samples = pipeline::pick_glossary_samples(&items, 120);
+        if !samples.is_empty() {
+            match pipeline::extract_glossary(&provider, &samples).await {
+                Ok(g) => {
+                    glossary = g;
+                    let _ = app.emit(
+                        "glossary-done",
+                        serde_json::json!({ "count": glossary.len() }),
+                    );
+                }
+                Err(_) => {}
+            }
+        }
+    }
+
+    let total = items.len();
+    let batch_count = items.chunks(batch_size).count();
+    let mut results: Vec<TranslatedItem> = Vec::with_capacity(total);
+    let mut done = 0;
+
+    // 开始翻译前重置取消/暂停标志
+    CANCEL_TRANSLATION.store(false, Ordering::Relaxed);
+    PAUSE_TRANSLATION.store(false, Ordering::Relaxed);
+
+    for (idx, chunk) in items.chunks(batch_size).enumerate() {
+        // 暂停：在批次间等待，直到继续或取消
+        while PAUSE_TRANSLATION.load(Ordering::Relaxed) {
+            if CANCEL_TRANSLATION.load(Ordering::Relaxed) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+        // 用户取消：停止后续批次，保留已翻译部分
+        if CANCEL_TRANSLATION.load(Ordering::Relaxed) {
+            break;
+        }
+        match pipeline::translate_batch(&provider, &ctx, &glossary, chunk).await {
+            Ok(res) => {
+                done += res.translated.len();
+                results.extend(res.translated);
+                for key in res.missing {
+                    done += 1;
+                    results.push(TranslatedItem {
+                        key,
+                        translation: String::new(),
+                        notes: vec!["AI 未返回该条目".to_string()],
+                    });
+                }
+            }
+            Err(e) => {
+                done += chunk.len();
+                results.extend(chunk.iter().map(|i| TranslatedItem {
+                    key: i.key.clone(),
+                    translation: String::new(),
+                    notes: vec![format!("翻译失败：{}（请求参数：{}）", e, diag)],
+                }));
+            }
+        }
+        let _ = app.emit(
+            "translate-progress",
+            serde_json::json!({
+                "batchIndex": idx + 1,
+                "batchTotal": batch_count,
+                "doneCount": done,
+                "totalCount": total,
+            }),
+        );
+    }
+    // 结束（完成/取消/暂停遗留）后复位标志
+    CANCEL_TRANSLATION.store(false, Ordering::Relaxed);
+    PAUSE_TRANSLATION.store(false, Ordering::Relaxed);
+    Ok(results)
+}
+
+/// 导出汉化资源包 zip，返回生成的文件路径
+#[tauri::command]
+pub fn export_resource_pack(
+    dest_dir: String,
+    modid: String,
+    mod_name: String,
+    entries: Vec<LangEntry>,
+    lang_format: LangFormat,
+    pack_format: u32,
+) -> Result<String, String> {
+    crate::export::export_resource_pack(
+        std::path::Path::new(&dest_dir),
+        &modid,
+        &mod_name,
+        &entries,
+        lang_format,
+        pack_format,
+    )
+}
+
+#[tauri::command]
+pub fn load_settings(app: AppHandle) -> Settings {
+    let path = settings_path(&app);
+    Settings::load(&path)
+}
+
+#[tauri::command]
+pub fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
+    let path = settings_path(&app);
+    settings.save(&path)
+}
+
+/// 拉取所选 provider 的可用模型列表
+#[tauri::command]
+pub async fn list_models(config: ProviderConfig) -> Result<Vec<crate::translate::provider::ModelInfo>, String> {
+    let provider = OpenAiProvider::new(config);
+    provider.list_models().await.map_err(|e| e.to_string())
+}
+
+/// 生成汉化后的模组 jar（复制原 jar + 写入 zh_cn，不覆盖原文件）
+#[tauri::command]
+pub fn export_mod_jar(
+    source: String,
+    dest: String,
+    modid: String,
+    entries: Vec<LangEntry>,
+    lang_format: LangFormat,
+) -> Result<String, String> {
+    crate::export::export_mod_jar(
+        std::path::Path::new(&source),
+        std::path::Path::new(&dest),
+        &modid,
+        &entries,
+        lang_format,
+    )
+}
