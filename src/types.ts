@@ -3,6 +3,7 @@
 export type EntryStatus =
   | "untranslated"
   | "tmHit"
+  | "existingZh"
   | "aiTranslated"
   | "userConfirmed"
   | "placeholderError";
@@ -16,6 +17,8 @@ export interface LangEntry {
   filePath: string;
   modid: string;
   translation: string | null;
+  /** 是否为硬编码文本（非 lang 文件，如 advancements/config） */
+  hardcoded?: boolean;
   status: EntryStatus;
   placeholders: string[];
   notes: string[];
@@ -29,7 +32,19 @@ export interface ModFile {
   loader: Loader;
   mcVersion: string | null;
   langFormat: LangFormat;
+  /** 是否自带中文（zh_cn） */
+  hasZh?: boolean;
+  /** 自带中文条数 */
+  zhCount?: number;
   entries: LangEntry[];
+}
+
+/** 多模组合并导出资源包时的单模组数据 */
+export interface ResourcePackBundle {
+  modid: string;
+  modName: string;
+  entries: LangEntry[];
+  langFormat: LangFormat;
 }
 
 export interface BatchItem {
@@ -87,9 +102,11 @@ export interface ProgressPayload {
 }
 
 // 翻译状态的中文标签
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const STATUS_LABEL: Record<EntryStatus, string> = {
   untranslated: "未翻译",
   tmHit: "TM 命中",
+  existingZh: "自带中文",
   aiTranslated: "AI 翻译",
   userConfirmed: "人工确认",
   placeholderError: "占位符异常",
@@ -98,6 +115,7 @@ export const STATUS_LABEL: Record<EntryStatus, string> = {
 export const STATUS_COLOR: Record<EntryStatus, string> = {
   untranslated: "default",
   tmHit: "geekblue",
+  existingZh: "cyan",
   aiTranslated: "green",
   userConfirmed: "purple",
   placeholderError: "volcano",

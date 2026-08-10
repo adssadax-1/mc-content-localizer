@@ -180,6 +180,20 @@ pub async fn list_models(config: ProviderConfig) -> Result<Vec<crate::translate:
     provider.list_models().await.map_err(|e| e.to_string())
 }
 
+/// 多模组合并导出汉化资源包（一个 zip 管所有模组），返回生成的文件路径
+#[tauri::command]
+pub fn export_resource_pack_multi(
+    dest_dir: String,
+    bundles: Vec<crate::export::ResourcePackBundle>,
+    pack_format: u32,
+) -> Result<String, String> {
+    crate::export::export_resource_pack_multi(
+        std::path::Path::new(&dest_dir),
+        &bundles,
+        pack_format,
+    )
+}
+
 /// 生成汉化后的模组 jar（复制原 jar + 写入 zh_cn，不覆盖原文件）
 #[tauri::command]
 pub fn export_mod_jar(

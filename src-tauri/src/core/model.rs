@@ -8,6 +8,8 @@ pub enum EntryStatus {
     Untranslated,
     /// 翻译记忆库命中（CFPA 对照库，二期启用）
     TmHit,
+    /// 模组自带中文（zh_cn），直接采用
+    ExistingZh,
     /// AI 翻译完成
     AiTranslated,
     /// 用户人工确认/编辑
@@ -30,6 +32,9 @@ pub struct LangEntry {
     pub modid: String,
     /// 译文（未翻译为 None）
     pub translation: Option<String>,
+    /// 是否为硬编码文本（非 lang 文件，如 advancements/config 中的英文）
+    #[serde(default)]
+    pub hardcoded: bool,
     /// 状态
     pub status: EntryStatus,
     /// 提取出的占位符（%s、%1$s、\n、§颜色码等），用于校验
@@ -77,6 +82,12 @@ pub struct ModFile {
     pub mc_version: Option<String>,
     /// 语言文件格式
     pub lang_format: LangFormat,
+    /// 模组是否自带中文（zh_cn）
+    #[serde(default)]
+    pub has_zh: bool,
+    /// 模组自带中文的条数
+    #[serde(default)]
+    pub zh_count: usize,
     /// 全部语言条目
     pub entries: Vec<LangEntry>,
 }

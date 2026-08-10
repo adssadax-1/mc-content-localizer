@@ -8,6 +8,7 @@ import type {
   ModFile,
   ProgressPayload,
   ProviderConfig,
+  ResourcePackBundle,
   Settings,
   TranslateContext,
   TranslatedItem,
@@ -45,6 +46,18 @@ export const api = {
       modName,
       entries,
       langFormat,
+      packFormat,
+    }),
+
+  /** 多模组合并导出资源包（一个 zip 管所有模组） */
+  exportResourcePackMulti: (
+    destDir: string,
+    bundles: ResourcePackBundle[],
+    packFormat: number,
+  ) =>
+    invoke<string>("export_resource_pack_multi", {
+      destDir,
+      bundles,
       packFormat,
     }),
 

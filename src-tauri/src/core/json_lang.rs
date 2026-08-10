@@ -11,11 +11,85 @@ pub enum JsonLangError {
 ///
 /// 标准格式是扁平的 { "key": "value" }，
 /// 但对嵌套结构做容错处理：递归收集字符串叶子，key 用 "." 连接。
+/// 同时兼容 JSONC（剥离 // 与 /* */ 注释，部分模组如 Carpet 使用）。
 pub fn parse_json_lang(text: &str) -> Result<Vec<(String, String)>, JsonLangError> {
-    let value: Value = serde_json::from_str(text)?;
+    let cleaned = strip_json_comments(text);
+    let value: Value = serde_json::from_str(&cleaned)?;
     let mut entries = Vec::new();
     collect_strings(&value, "", &mut entries);
     Ok(entries)
+}
+
+/// 剥离 JSON 中的注释（// 行注释与 /* */ 块注释），忽略字符串内的内容。
+fn strip_json_comments(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    let mut in_string = false;
+    let mut in_block = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_block {
+            if c == '*' && i + 1 < chars.len() && chars[i + 1] == '/' {
+                in_block = false;
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if in_string {
+            out.push(c);
+            if c == '\\' && i + 1 < chars.len() {
+                out.push(chars[i + 1]);
+                i += 2;
+                continue;
+            }
+            if c == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        // 非字符串状态
+        if c == '"' {
+            in_string = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == ',' {
+            // 跳过尾逗号：后面（忽略空白）紧跟 } 或 ]
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < chars.len() && (chars[j] == '}' || chars[j] == ']') {
+                i += 1;
+                continue;
+            }
+        }
+        if c == '/' && i + 1 < chars.len() {
+            match chars[i + 1] {
+                '/' => {
+                    // 行注释：跳过到换行
+                    while i < chars.len() && chars[i] != '\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                '*' => {
+                    in_block = true;
+                    i += 2;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
 }
 
 fn collect_strings(value: &Value, prefix: &str, out: &mut Vec<(String, String)>) {
@@ -70,6 +144,16 @@ mod tests {
         let entries = parse_json_lang(text).unwrap();
         assert_eq!(entries[0], ("a.b".to_string(), "nested".to_string()));
         assert_eq!(entries[1], ("c".to_string(), "plain".to_string()));
+    }
+
+    #[test]
+    fn parses_jsonc_with_comments() {
+        let text = "{\n  // TODO\n  /* block */\n  \"a\": \"hello\",\n  \"b\": \"http://example.com/x\",\n}";
+        let entries = parse_json_lang(text).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].1, "hello");
+        // 字符串内的 // 不应被剥离
+        assert_eq!(entries[1].1, "http://example.com/x");
     }
 
     #[test]

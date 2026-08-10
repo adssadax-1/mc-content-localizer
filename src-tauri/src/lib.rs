@@ -25,6 +25,7 @@ pub fn run() {
             commands::parse_jar,
             commands::run_translation,
             commands::export_resource_pack,
+            commands::export_resource_pack_multi,
             commands::load_settings,
             commands::save_settings,
             commands::list_models,

@@ -1,11 +1,89 @@
+use std::collections::HashMap;
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
 use zip::write::SimpleFileOptions;
 use zip::CompressionMethod;
 
 use crate::core::model::{LangEntry, LangFormat};
+
+/// 单个模组的导出数据（合并资源包用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourcePackBundle {
+    pub modid: String,
+    pub mod_name: String,
+    pub entries: Vec<LangEntry>,
+    pub lang_format: LangFormat,
+}
+
+/// 多模组合并导出汉化资源包 zip（一个资源包管所有模组中文）。
+/// 只包含 lang 条目（硬编码文本无法通过资源包覆盖，需回写 jar）。
+pub fn export_resource_pack_multi(
+    dest_dir: &Path,
+    bundles: &[ResourcePackBundle],
+    pack_format: u32,
+) -> Result<String, String> {
+    let file_name = "mods_zh_cn.zip".to_string();
+    let zip_path = dest_dir.join(&file_name);
+    let file = File::create(&zip_path).map_err(|e| format!("无法创建文件: {}", e))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+
+    let description = format!("§a[模组汉化] §r共 {} 个模组的中文汉化包", bundles.len());
+    let pack_obj = if pack_format > 64 {
+        serde_json::json!({
+            "min_format": [pack_format, 0],
+            "max_format": [pack_format, 0],
+            "description": description,
+        })
+    } else {
+        serde_json::json!({
+            "pack_format": pack_format,
+            "description": description,
+        })
+    };
+    let mcmeta = serde_json::json!({ "pack": pack_obj });
+    zip.start_file("pack.mcmeta", options).map_err(|e| e.to_string())?;
+    zip.write_all(serde_json::to_string_pretty(&mcmeta).unwrap().as_bytes())
+        .map_err(|e| e.to_string())?;
+
+    let mut wrote_any = false;
+    for b in bundles {
+        let translated: Vec<&LangEntry> = b
+            .entries
+            .iter()
+            .filter(|e| !e.hardcoded && e.translation.as_ref().is_some_and(|t| !t.is_empty()))
+            .collect();
+        if translated.is_empty() {
+            continue;
+        }
+        let pairs: Vec<(String, String)> = translated
+            .iter()
+            .map(|e| (e.key.clone(), e.translation.clone().unwrap()))
+            .collect();
+        if b.lang_format == LangFormat::LegacyLang {
+            let bytes = crate::core::lang::encode_lang(&pairs);
+            zip.start_file(format!("assets/{}/lang/zh_cn.lang", b.modid), options)
+                .map_err(|e| e.to_string())?;
+            zip.write_all(&bytes).map_err(|e| e.to_string())?;
+        } else {
+            let text =
+                crate::core::json_lang::encode_json_lang(&pairs).map_err(|e| e.to_string())?;
+            zip.start_file(format!("assets/{}/lang/zh_cn.json", b.modid), options)
+                .map_err(|e| e.to_string())?;
+            zip.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+        }
+        wrote_any = true;
+    }
+
+    if !wrote_any {
+        return Err("没有已翻译的条目可导出".to_string());
+    }
+    zip.finish().map_err(|e| e.to_string())?;
+    Ok(zip_path.to_string_lossy().to_string())
+}
 
 /// 将已翻译条目导出为汉化资源包 zip（可直接放入 resourcepacks 目录）
 ///
@@ -106,6 +184,22 @@ pub fn export_mod_jar(
         }
     );
 
+    // 硬编码条目：按 (文件路径 -> [(json路径, 译文)]) 组织，写 jar 时替换原 json 值
+    let mut hardcoded_changes: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for e in translated.iter() {
+        if !e.hardcoded {
+            continue;
+        }
+        let Some((path, json_path)) = e.key.split_once('#') else {
+            continue;
+        };
+        let tr = e.translation.clone().unwrap();
+        hardcoded_changes
+            .entry(path.to_string())
+            .or_default()
+            .push((json_path.to_string(), tr));
+    }
+
     let src_file = File::open(source).map_err(|e| format!("无法打开源 jar: {}", e))?;
     let mut src = zip::ZipArchive::new(src_file).map_err(|e| e.to_string())?;
     let dest_file = File::create(dest).map_err(|e| format!("无法创建文件: {}", e))?;
@@ -119,8 +213,29 @@ pub fn export_mod_jar(
             continue;
         }
         let opts = SimpleFileOptions::default().compression_method(f.compression());
-        out.start_file(name, opts).map_err(|e| e.to_string())?;
-        std::io::copy(&mut f, &mut out).map_err(|e| e.to_string())?;
+        out.start_file(name.clone(), opts).map_err(|e| e.to_string())?;
+        // 硬编码目标 json：应用替换后写回
+        if let Some(changes) = hardcoded_changes.get(&name) {
+            let mut buf = Vec::new();
+            f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+            if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&buf) {
+                let mut modified = false;
+                for (jp, tr) in changes {
+                    if set_json_path(&mut value, jp, tr) {
+                        modified = true;
+                    }
+                }
+                if modified {
+                    let text = serde_json::to_string_pretty(&value)
+                        .map_err(|e| e.to_string())?;
+                    out.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+                    continue;
+                }
+            }
+            out.write_all(&buf).map_err(|e| e.to_string())?;
+        } else {
+            std::io::copy(&mut f, &mut out).map_err(|e| e.to_string())?;
+        }
     }
 
     // 写入 zh_cn 语言文件
@@ -142,6 +257,46 @@ pub fn export_mod_jar(
     Ok(dest.to_string_lossy().to_string())
 }
 
+/// 按 json 路径（"." 分隔，数组下标为数字）设置字符串值，成功返回 true
+fn set_json_path(value: &mut serde_json::Value, path: &str, new_val: &str) -> bool {
+    let parts: Vec<&str> = path.split('.').collect();
+    let mut cur = value;
+    for (i, part) in parts.iter().enumerate() {
+        if i == parts.len() - 1 {
+            // 最后一段：设置叶子值
+            if let Some(obj) = cur.as_object_mut() {
+                obj.insert(
+                    part.to_string(),
+                    serde_json::Value::String(new_val.to_string()),
+                );
+                return true;
+            }
+            if let Ok(idx) = part.parse::<usize>() {
+                if let Some(arr) = cur.as_array_mut() {
+                    if idx < arr.len() {
+                        arr[idx] = serde_json::Value::String(new_val.to_string());
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+        // 中间段下钻
+        let found: Option<&mut serde_json::Value> = match cur {
+            serde_json::Value::Object(m) => m.get_mut(*part),
+            serde_json::Value::Array(a) => {
+                part.parse::<usize>().ok().and_then(|idx| a.get_mut(idx))
+            }
+            _ => None,
+        };
+        match found {
+            Some(next) => cur = next,
+            None => return false,
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,6 +309,7 @@ mod tests {
             file_path: "assets/testmod/lang/en_us.json".to_string(),
             modid: "testmod".to_string(),
             translation: translation.map(String::from),
+            hardcoded: false,
             status: crate::core::model::EntryStatus::AiTranslated,
             placeholders: Vec::new(),
             notes: Vec::new(),
@@ -268,6 +424,84 @@ mod tests {
         assert!(zh.contains("钻石剑"));
         assert!(!zh.contains("旧翻译"));
 
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    #[test]
+    fn exports_multi_mod_resource_pack() {
+        let b1 = ResourcePackBundle {
+            modid: "moda".into(),
+            mod_name: "Mod A".into(),
+            entries: vec![sample_entry("item.a.name", "Diamond", Some("钻石"))],
+            lang_format: LangFormat::Json,
+        };
+        let b2 = ResourcePackBundle {
+            modid: "modb".into(),
+            mod_name: "Mod B".into(),
+            entries: vec![sample_entry("item.b.name", "Ruby", Some("红宝石"))],
+            lang_format: LangFormat::LegacyLang,
+        };
+        let out = export_resource_pack_multi(&std::env::temp_dir(), &[b1, b2], 15).unwrap();
+        let f = File::open(&out).unwrap();
+        let mut archive = zip::ZipArchive::new(f).unwrap();
+        assert_eq!(archive.len(), 3);
+        let mut zh = String::new();
+        archive.by_name("assets/moda/lang/zh_cn.json").unwrap().read_to_string(&mut zh).unwrap();
+        assert!(zh.contains("钻石"));
+        let mut lang2 = Vec::new();
+        archive.by_name("assets/modb/lang/zh_cn.lang").unwrap().read_to_end(&mut lang2).unwrap();
+        assert!(crate::core::lang::decode_lang(&lang2).unwrap().contains("红宝石"));
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn set_json_path_works() {
+        let mut v = serde_json::json!({"a": {"b": ["x", "y"]}, "c": "old"});
+        assert!(set_json_path(&mut v, "a.b.1", "新值"));
+        assert!(set_json_path(&mut v, "c", "new"));
+        assert_eq!(v["a"]["b"][1], "新值");
+        assert_eq!(v["c"], "new");
+        // 不存在的路径返回 false
+        assert!(!set_json_path(&mut v, "nope.deep", "x"));
+    }
+
+    #[test]
+    fn exports_mod_jar_with_hardcoded() {
+        let src = std::env::temp_dir().join("hc_source.jar");
+        {
+            let f = File::create(&src).unwrap();
+            let mut w = zip::ZipWriter::new(f);
+            let opts = SimpleFileOptions::default();
+            w.start_file("config/demo.json", opts).unwrap();
+            w.write_all(br#"{"message":"Welcome","tip":"Be careful"}"#).unwrap();
+            w.start_file("assets/hcmod/lang/en_us.json", opts).unwrap();
+            w.write_all(br#"{"item.x.name":"Sword"}"#).unwrap();
+            w.finish().unwrap();
+        }
+        let mut e1 = sample_entry("item.x.name", "Sword", Some("剑"));
+        let e2 = LangEntry {
+            key: "config/demo.json#message".into(),
+            source: "Welcome".into(),
+            file_path: "config/demo.json".into(),
+            modid: "hcmod".into(),
+            translation: Some("欢迎".into()),
+            hardcoded: true,
+            status: crate::core::model::EntryStatus::AiTranslated,
+            placeholders: vec![],
+            notes: vec![],
+        };
+        let dest = std::env::temp_dir().join("hc_dest.jar");
+        export_mod_jar(&src, &dest, "hcmod", &[e1, e2], LangFormat::Json).unwrap();
+        let f = File::open(&dest).unwrap();
+        let mut archive = zip::ZipArchive::new(f).unwrap();
+        let mut cfg = String::new();
+        archive.by_name("config/demo.json").unwrap().read_to_string(&mut cfg).unwrap();
+        assert!(cfg.contains("欢迎"), "硬编码 json 应被替换: {}", cfg);
+        assert!(!cfg.contains("\"Welcome\""));
+        let mut en = String::new();
+        archive.by_name("assets/hcmod/lang/en_us.json").unwrap().read_to_string(&mut en).unwrap();
+        assert!(en.contains("Sword"));
         let _ = std::fs::remove_file(&src);
         let _ = std::fs::remove_file(&dest);
     }

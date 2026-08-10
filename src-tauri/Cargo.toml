@@ -1,6 +1,6 @@
 [package]
 name = "mod-translator"
-version = "0.1.0"
+version = "0.2.0"
 description = "Minecraft 模组 AI 汉化工具"
 authors = ["you"]
 edition = "2021"
@@ -26,3 +26,4 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 thiserror = "2"
 regex = "1"
 tokio = { version = "1", features = ["time"] }
+zhconv = "0.3"

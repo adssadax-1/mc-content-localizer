@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { CloseCircleOutlined } from "@ant-design/icons";
 import { Input, Table, Tag, Tooltip, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { LangEntry } from "../types";
@@ -8,10 +9,12 @@ interface Props {
   entries: LangEntry[];
   onEdit: (key: string, value: string) => void;
   onSelect: (key: string) => void;
+  /** 单条清除译文（重新加入汉化队列） */
+  onClear?: (key: string) => void;
 }
 
 /** 翻译主表格：状态 / key / 原文 / 可编辑译文 / 备注 */
-export function EntryTable({ entries, onEdit, onSelect }: Props) {
+export function EntryTable({ entries, onEdit, onSelect, onClear }: Props) {
   const [filter, setFilter] = useState("");
 
   const data = useMemo(() => {
@@ -33,6 +36,7 @@ export function EntryTable({ entries, onEdit, onSelect }: Props) {
       ),
       filters: [
         { text: "未翻译", value: "untranslated" },
+        { text: "自带中文", value: "existingZh" },
         { text: "AI 翻译", value: "aiTranslated" },
         { text: "人工确认", value: "userConfirmed" },
         { text: "占位符异常", value: "placeholderError" },
@@ -62,6 +66,16 @@ export function EntryTable({ entries, onEdit, onSelect }: Props) {
           value={record.translation ?? ""}
           placeholder="（未翻译）"
           onChange={(e) => onEdit(record.key, e.target.value)}
+          suffix={
+            record.translation && onClear ? (
+              <Tooltip title="清除此条译文，重新加入汉化队列">
+                <CloseCircleOutlined
+                  style={{ cursor: "pointer", color: "#ff4d4f" }}
+                  onClick={() => onClear(record.key)}
+                />
+              </Tooltip>
+            ) : undefined
+          }
         />
       ),
     },
@@ -89,7 +103,7 @@ export function EntryTable({ entries, onEdit, onSelect }: Props) {
   ];
 
   return (
-    <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+    <div style={{ display: "flex", flexDirection: "column" }}>
       <Input.Search
         placeholder="搜索 key 或原文..."
         allowClear
@@ -102,8 +116,6 @@ export function EntryTable({ entries, onEdit, onSelect }: Props) {
         dataSource={data}
         rowKey="key"
         pagination={false}
-        scroll={{ y: "calc(100vh - 260px)", x: 1200 }}
-        virtual
         onRow={(record) => ({
           onClick: () => onSelect(record.key),
           style: { cursor: "pointer" },
