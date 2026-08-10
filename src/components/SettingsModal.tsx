@@ -15,6 +15,7 @@ import {
 } from "antd";
 import { DownOutlined, MinusCircleOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import { api } from "../api";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import type { ModelInfo, ProviderConfig, Settings } from "../types";
 import { PROVIDER_PRESETS } from "../types";
 
@@ -345,6 +346,22 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
             </div>
           )}
         </Form.List>
+
+        {/* 关于：版本 / 开源免费 / GitHub */}
+        <Divider style={{ margin: "16px 0 8px" }} />
+        <div style={{ textAlign: "center" }}>
+          <Typography.Text strong>模组 AI 汉化工具 v0.2.0</Typography.Text>
+          <br />
+          <Typography.Text type="secondary">
+            💝 完全开源免费 · MIT 协议
+          </Typography.Text>
+          <br />
+          <Typography.Link
+            onClick={() => void openUrl("https://github.com/adssadax-1/Minecraft-mod-translator")}
+          >
+            ⭐ GitHub：github.com/adssadax-1/Minecraft-mod-translator
+          </Typography.Link>
+        </div>
       </Form>
     </Modal>
   );

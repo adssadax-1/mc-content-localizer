@@ -19,6 +19,7 @@ import {
   DeleteOutlined,
   DownOutlined,
   ExportOutlined,
+  GithubOutlined,
   PauseOutlined,
   PlayCircleOutlined,
   RightOutlined,
@@ -28,6 +29,7 @@ import {
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 import { api, onFileDropped, onGlossaryDone, onTranslateProgress } from "./api";
 import { DropZone } from "./components/DropZone";
@@ -45,6 +47,14 @@ import type {
 } from "./types";
 
 const { Header, Content, Footer } = Layout;
+
+/** 项目 GitHub 地址 */
+const GITHUB_URL = "https://github.com/adssadax-1/Minecraft-mod-translator";
+
+/** 打开 GitHub 项目页 */
+function openGithub() {
+  void openUrl(GITHUB_URL);
+}
 
 /** 队列中的单个模组 */
 interface QueueItem {
@@ -543,9 +553,19 @@ function App() {
             <Tag color="blue">{queue.length} 个模组</Tag>
           )}
         </Space>
-        <Button icon={<SettingOutlined />} onClick={() => setSettingsOpen(true)}>
-          设置
-        </Button>
+        <Space>
+          <Button
+            type="text"
+            icon={<GithubOutlined />}
+            onClick={openGithub}
+            style={{ color: "#fff" }}
+          >
+            GitHub 开源
+          </Button>
+          <Button icon={<SettingOutlined />} onClick={() => setSettingsOpen(true)}>
+            设置
+          </Button>
+        </Space>
       </Header>
 
       <Content style={{ padding: 12, overflow: "auto" }}>
@@ -720,9 +740,14 @@ function App() {
       </Content>
 
       <Footer style={{ padding: "6px 12px", textAlign: "center" }}>
-        <Typography.Text type="secondary">
-          点击中央区域或拖入 jar 导入模组 · 勾选要翻译/导出的模组 · 自带中文自动填入，未翻译部分可继续汉化
-        </Typography.Text>
+        <Space size="middle" wrap>
+          <Typography.Text type="secondary">
+            点击中央区域或拖入 jar 导入模组 · 勾选要翻译/导出的模组
+          </Typography.Text>
+          <Typography.Link onClick={openGithub} style={{ fontWeight: 600 }}>
+            ⭐ 完全开源免费 · GitHub 项目地址
+          </Typography.Link>
+        </Space>
       </Footer>
 
       <Drawer
