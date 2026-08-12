@@ -11,6 +11,7 @@ use crate::core::model::{LangEntry, LangFormat};
 
 /// 单个模组的导出数据（合并资源包用）
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResourcePackBundle {
     pub modid: String,
     pub mod_name: String,
@@ -509,5 +510,33 @@ mod tests {
         assert!(en.contains("Sword"));
         let _ = std::fs::remove_file(&src);
         let _ = std::fs::remove_file(&dest);
+    }
+}
+
+#[cfg(test)]
+mod serde_tests {
+    use super::*;
+    use crate::core::model::{EntryStatus, LangEntry};
+
+    #[test]
+    fn deserializes_bundle_camel_case() {
+        // 前端传 camelCase（modName/langFormat）
+        let json = r#"{"modid":"testmod","modName":"测试模组","langFormat":"json","entries":[]}"#;
+        let b: ResourcePackBundle = serde_json::from_str(json).unwrap();
+        assert_eq!(b.mod_name, "测试模组");
+        assert_eq!(b.lang_format, LangFormat::Json);
+        // 序列化回来也是 camelCase
+        let out = serde_json::to_string(&b).unwrap();
+        assert!(out.contains("modName"));
+        assert!(out.contains("langFormat"));
+    }
+
+    #[test]
+    fn deserializes_bundle_with_entries() {
+        let json = r#"{"modid":"m","modName":"M","langFormat":"legacyLang","entries":[{"key":"a","source":"Hello","filePath":"f","modid":"m","translation":"你好","status":"aiTranslated","placeholders":[],"notes":[]}]}"#;
+        let b: ResourcePackBundle = serde_json::from_str(json).unwrap();
+        assert_eq!(b.entries.len(), 1);
+        assert_eq!(b.entries[0].translation.as_deref(), Some("你好"));
+        assert_eq!(b.lang_format, LangFormat::LegacyLang);
     }
 }
