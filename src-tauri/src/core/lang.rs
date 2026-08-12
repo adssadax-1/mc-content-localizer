@@ -18,6 +18,16 @@ pub fn decode_lang(bytes: &[u8]) -> Result<String, LangError> {
 /// 解析 .lang 内容，返回 (key, value) 列表（保持文件顺序）
 pub fn parse_lang(bytes: &[u8]) -> Result<Vec<(String, String)>, LangError> {
     let text = decode_lang(bytes)?;
+    parse_properties_lines(&text)
+}
+
+/// 解析 UTF-8 编码的 properties 文本（光影包 shaders.properties / zh_CN.lang 使用 UTF-8）
+pub fn parse_properties_utf8(text: &str) -> Result<Vec<(String, String)>, LangError> {
+    parse_properties_lines(text)
+}
+
+/// properties 逐行解析核心（输入为已解码文本）
+fn parse_properties_lines(text: &str) -> Result<Vec<(String, String)>, LangError> {
     let mut entries = Vec::new();
 
     // 先按原始行切分，处理续行

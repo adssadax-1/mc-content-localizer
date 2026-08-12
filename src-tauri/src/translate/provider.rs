@@ -95,6 +95,7 @@ pub struct ModelInfo {
 }
 
 /// OpenAI 兼容 chat completions 客户端
+#[derive(Clone)]
 pub struct OpenAiProvider {
     pub config: ProviderConfig,
     client: reqwest::Client,

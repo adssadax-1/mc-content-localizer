@@ -254,6 +254,11 @@ pub fn export_mod_jar(
     }
 
     out.finish().map_err(|e| e.to_string())?;
+    // 验证文件真实生成，避免静默失败
+    let meta = std::fs::metadata(dest).map_err(|e| format!("导出文件写入后无法读取: {}", e))?;
+    if meta.len() == 0 {
+        return Err("导出文件为空（写入异常）".to_string());
+    }
     Ok(dest.to_string_lossy().to_string())
 }
 

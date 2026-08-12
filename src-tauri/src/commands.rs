@@ -1,10 +1,11 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::core::model::{LangEntry, LangFormat, ModFile};
-use crate::settings::Settings;
+use crate::settings::{Settings, ThreadingConfig};
 use crate::translate::pipeline::{self, BatchItem, TranslateContext, TranslatedItem};
 use crate::translate::provider::{OpenAiProvider, ProviderConfig};
 
@@ -45,6 +46,7 @@ pub fn parse_jar(path: String) -> Result<ModFile, String> {
 }
 
 /// 执行 AI 翻译：提取术语表 → 分批翻译 → 占位符校验。
+/// 支持多线程并行（实验性，见 Settings.threading）。
 /// 进度通过 "translate-progress" / "glossary-done" 事件推送到前端。
 #[tauri::command]
 pub async fn run_translation(
@@ -54,6 +56,7 @@ pub async fn run_translation(
     items: Vec<BatchItem>,
     batch_size: Option<usize>,
     extract_glossary: Option<bool>,
+    threading: Option<ThreadingConfig>,
 ) -> Result<Vec<TranslatedItem>, String> {
     let provider = OpenAiProvider::new(config);
     // 诊断信息：报错时附上实际请求参数，方便定位
@@ -63,6 +66,12 @@ pub async fn run_translation(
         provider.config.temperature()
     );
     let batch_size = batch_size.unwrap_or(40).clamp(5, 200);
+    let threading = threading.unwrap_or_default();
+    let threads = if threading.enabled {
+        threading.thread_count.max(1)
+    } else {
+        1
+    };
     let mut glossary: Vec<(String, String)> = Vec::new();
 
     // 第一轮：提取术语表
@@ -84,61 +93,144 @@ pub async fn run_translation(
 
     let total = items.len();
     let batch_count = items.chunks(batch_size).count();
-    let mut results: Vec<TranslatedItem> = Vec::with_capacity(total);
-    let mut done = 0;
-
     // 开始翻译前重置取消/暂停标志
     CANCEL_TRANSLATION.store(false, Ordering::Relaxed);
     PAUSE_TRANSLATION.store(false, Ordering::Relaxed);
 
-    for (idx, chunk) in items.chunks(batch_size).enumerate() {
-        // 暂停：在批次间等待，直到继续或取消
-        while PAUSE_TRANSLATION.load(Ordering::Relaxed) {
+    // 单线程：串行批处理（保持原有行为）
+    if threads <= 1 {
+        let mut results: Vec<TranslatedItem> = Vec::with_capacity(total);
+        let mut done = 0;
+        for (idx, chunk) in items.chunks(batch_size).enumerate() {
+            // 暂停：在批次间等待，直到继续或取消
+            wait_pause().await;
+            // 用户取消：停止后续批次，保留已翻译部分
             if CANCEL_TRANSLATION.load(Ordering::Relaxed) {
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let translated = process_chunk(&provider, &ctx, &glossary, chunk, &diag).await;
+            done += chunk.len();
+            results.extend(translated);
+            let _ = app.emit(
+                "translate-progress",
+                serde_json::json!({
+                    "batchIndex": idx + 1,
+                    "batchTotal": batch_count,
+                    "doneCount": done,
+                    "totalCount": total,
+                }),
+            );
         }
-        // 用户取消：停止后续批次，保留已翻译部分
+        // 结束（完成/取消/暂停遗留）后复位标志
+        CANCEL_TRANSLATION.store(false, Ordering::Relaxed);
+        PAUSE_TRANSLATION.store(false, Ordering::Relaxed);
+        return Ok(results);
+    }
+
+    // 多线程并行（实验性）：把批次分给 N 个 worker，每个 worker 独立请求模型
+    let chunks: Vec<Vec<BatchItem>> = items.chunks(batch_size).map(|c| c.to_vec()).collect();
+    let mut worker_chunks = vec![Vec::new(); threads];
+    for (i, ch) in chunks.into_iter().enumerate() {
+        worker_chunks[i % threads].push(ch);
+    }
+
+    let results: Arc<Mutex<Vec<TranslatedItem>>> = Arc::new(Mutex::new(Vec::new()));
+    let done_count = Arc::new(AtomicUsize::new(0));
+    let interval = std::time::Duration::from_secs(threading.request_interval_sec.max(1));
+
+    let mut handles = Vec::new();
+    for wchunks in worker_chunks {
+        if wchunks.is_empty() {
+            continue;
+        }
+        let provider = provider.clone();
+        let ctx = ctx.clone();
+        let glossary = glossary.clone();
+        let app = app.clone();
+        let results = results.clone();
+        let done_count = done_count.clone();
+        let diag = diag.clone();
+        let total = total;
+        let batch_count = batch_count;
+        handles.push(tokio::spawn(async move {
+            let mut processed = 0usize;
+            for chunk in wchunks {
+                wait_pause().await;
+                if CANCEL_TRANSLATION.load(Ordering::Relaxed) {
+                    return;
+                }
+                let translated = process_chunk(&provider, &ctx, &glossary, &chunk, &diag).await;
+                {
+                    let mut lock = results.lock().unwrap();
+                    lock.extend(translated);
+                }
+                let done = done_count.fetch_add(chunk.len(), Ordering::Relaxed) + chunk.len();
+                processed += 1;
+                let _ = app.emit(
+                    "translate-progress",
+                    serde_json::json!({
+                        "batchIndex": processed,
+                        "batchTotal": batch_count,
+                        "doneCount": done,
+                        "totalCount": total,
+                    }),
+                );
+                // 线程间请求间隔：降低限流概率
+                tokio::time::sleep(interval).await;
+            }
+        }));
+    }
+    for h in handles {
+        let _ = h.await;
+    }
+    CANCEL_TRANSLATION.store(false, Ordering::Relaxed);
+    PAUSE_TRANSLATION.store(false, Ordering::Relaxed);
+    let final_results = Arc::try_unwrap(results)
+        .map_err(|_| "并发结果收集失败".to_string())?
+        .into_inner()
+        .map_err(|_| "并发结果锁失败".to_string())?;
+    Ok(final_results)
+}
+
+/// 等待暂停解除（暂停期间每 300ms 检查一次取消）
+async fn wait_pause() {
+    while PAUSE_TRANSLATION.load(Ordering::Relaxed) {
         if CANCEL_TRANSLATION.load(Ordering::Relaxed) {
             break;
         }
-        match pipeline::translate_batch(&provider, &ctx, &glossary, chunk).await {
-            Ok(res) => {
-                done += res.translated.len();
-                results.extend(res.translated);
-                for key in res.missing {
-                    done += 1;
-                    results.push(TranslatedItem {
-                        key,
-                        translation: String::new(),
-                        notes: vec!["AI 未返回该条目".to_string()],
-                    });
-                }
-            }
-            Err(e) => {
-                done += chunk.len();
-                results.extend(chunk.iter().map(|i| TranslatedItem {
-                    key: i.key.clone(),
-                    translation: String::new(),
-                    notes: vec![format!("翻译失败：{}（请求参数：{}）", e, diag)],
-                }));
-            }
-        }
-        let _ = app.emit(
-            "translate-progress",
-            serde_json::json!({
-                "batchIndex": idx + 1,
-                "batchTotal": batch_count,
-                "doneCount": done,
-                "totalCount": total,
-            }),
-        );
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
-    // 结束（完成/取消/暂停遗留）后复位标志
-    CANCEL_TRANSLATION.store(false, Ordering::Relaxed);
-    PAUSE_TRANSLATION.store(false, Ordering::Relaxed);
-    Ok(results)
+}
+
+/// 翻译单个批次并合并结果（成功 / 缺失 / 失败）
+async fn process_chunk(
+    provider: &OpenAiProvider,
+    ctx: &TranslateContext,
+    glossary: &[(String, String)],
+    chunk: &[BatchItem],
+    diag: &str,
+) -> Vec<TranslatedItem> {
+    match pipeline::translate_batch(provider, ctx, glossary, chunk).await {
+        Ok(res) => {
+            let mut out = res.translated;
+            for key in res.missing {
+                out.push(TranslatedItem {
+                    key,
+                    translation: String::new(),
+                    notes: vec!["AI 未返回该条目".to_string()],
+                });
+            }
+            out
+        }
+        Err(e) => chunk
+            .iter()
+            .map(|i| TranslatedItem {
+                key: i.key.clone(),
+                translation: String::new(),
+                notes: vec![format!("翻译失败：{}（请求参数：{}）", e, diag)],
+            })
+            .collect(),
+    }
 }
 
 /// 导出汉化资源包 zip，返回生成的文件路径
@@ -209,5 +301,51 @@ pub fn export_mod_jar(
         &modid,
         &entries,
         lang_format,
+    )
+}
+
+/// 扫描 zip 判定内容包类型（mod/shader/resourcepack）
+#[tauri::command]
+pub fn detect_pack_type(path: String) -> Result<crate::core::pack::PackType, String> {
+    crate::core::pack::detect_pack_type(std::path::Path::new(&path)).map_err(|e| e.to_string())
+}
+
+/// 解析光影包（shaders.properties / shaders/lang/en_US.lang + zh_CN.lang）
+#[tauri::command]
+pub fn parse_shader_pack(path: String) -> Result<crate::core::pack::ShaderPack, String> {
+    crate::core::pack::parse_shader_pack(std::path::Path::new(&path)).map_err(|e| e.to_string())
+}
+
+/// 解析资源包（pack.mcmeta description）
+#[tauri::command]
+pub fn parse_resource_pack(path: String) -> Result<crate::core::pack::ResourcePackInfo, String> {
+    crate::core::pack::parse_resource_pack(std::path::Path::new(&path)).map_err(|e| e.to_string())
+}
+
+/// 导出汉化光影包（复制原 zip + 写入 shaders/lang/zh_CN.lang）
+#[tauri::command]
+pub fn export_shader_zh(
+    source: String,
+    dest: String,
+    entries: Vec<LangEntry>,
+) -> Result<String, String> {
+    crate::core::pack::export_shader_zh(
+        std::path::Path::new(&source),
+        std::path::Path::new(&dest),
+        &entries,
+    )
+}
+
+/// 导出改描述后的资源包（更新 pack.mcmeta description）
+#[tauri::command]
+pub fn export_resource_pack_desc(
+    source: String,
+    dest: String,
+    entries: Vec<LangEntry>,
+) -> Result<String, String> {
+    crate::core::pack::export_resource_pack_desc(
+        std::path::Path::new(&source),
+        std::path::Path::new(&dest),
+        &entries,
     )
 }

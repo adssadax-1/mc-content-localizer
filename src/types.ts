@@ -19,14 +19,18 @@ export interface LangEntry {
   translation: string | null;
   /** 是否为硬编码文本（非 lang 文件，如 advancements/config） */
   hardcoded?: boolean;
+  /** 是否参与汉化（前端勾选，默认 true；导出时未选中的条目不导出） */
+  selected?: boolean;
   status: EntryStatus;
   placeholders: string[];
   notes: string[];
 }
 
+/** 内容包类型 */
+export type PackType = "mod" | "shader" | "resourcepack";
+
 export interface ModFile {
-  fileName: string;
-  modName: string;
+  fileName: string;  modName: string;
   modid: string;
   version: string | null;
   loader: Loader;
@@ -47,6 +51,22 @@ export interface ResourcePackBundle {
   langFormat: LangFormat;
 }
 
+/** 光影包解析结果 */
+export interface ShaderPack {
+  fileName: string;
+  name: string;
+  hasZh: boolean;
+  zhCount: number;
+  entries: LangEntry[];
+}
+
+/** 资源包解析结果 */
+export interface ResourcePackInfo {
+  fileName: string;
+  name: string;
+  entries: LangEntry[];
+}
+
 export interface BatchItem {
   key: string;
   source: string;
@@ -57,6 +77,8 @@ export interface TranslateContext {
   modid: string;
   mcVersion: string | null;
   loader: string;
+  /** 内容包类型：mod / shader / resourcepack（决定翻译提示词） */
+  packType: "mod" | "shader" | "resourcepack";
   userGlossary: [string, string][];
 }
 
@@ -92,6 +114,15 @@ export interface Settings {
   userGlossary: [string, string][];
   batchSize: number;
   extractGlossary: boolean;
+  /** 多线程翻译配置（实验性） */
+  threading: ThreadingConfig;
+}
+
+/** 多线程翻译配置（实验性） */
+export interface ThreadingConfig {
+  enabled: boolean;
+  threadCount: number;
+  requestIntervalSec: number;
 }
 
 export interface ProgressPayload {

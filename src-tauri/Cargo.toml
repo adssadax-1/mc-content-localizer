@@ -1,6 +1,6 @@
 [package]
 name = "mod-translator"
-version = "0.2.0"
+version = "1.0.0"
 description = "Minecraft 模组 AI 汉化工具"
 authors = ["you"]
 edition = "2021"

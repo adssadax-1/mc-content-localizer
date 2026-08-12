@@ -10,6 +10,8 @@ pub struct TranslateContext {
     pub modid: String,
     pub mc_version: Option<String>,
     pub loader: String,
+    /// 内容包类型：mod / shader / resourcepack（决定使用哪套提示词）
+    pub pack_type: String,
     /// 用户自定义术语表（来自设置），始终合并进 prompt
     pub user_glossary: Vec<(String, String)>,
 }
@@ -173,6 +175,46 @@ pub fn pick_glossary_samples(entries: &[BatchItem], max: usize) -> Vec<GlossaryS
         .collect()
 }
 
+const SHADER_SYSTEM_TEMPLATE: &str = r#"你是一位资深的《我的世界》(Minecraft) 光影包（Shader Pack）本地化翻译专家，任务是把光影包的界面文本从英文翻译成简体中文。
+
+这些文本来自光影包「{mod_name}」的 shaders.properties / shaders/lang 语言文件，是游戏内光影设置界面的文案（屏幕标题、选项名、选项说明、按钮、配置档名等）。
+
+严格规则：
+1. 结合图形设置界面的语境自然表达，要像官方汉化的光影设置一样，禁止机翻腔（例如 "Blur" 在图形语境下是"动态模糊"而不是"模糊"）。
+2. 图形术语使用社区通用译名并全文一致：Shader 着色器 / Profile 配置档 / Bloom 泛光 / SSAO 环境光遮蔽 / Anti-aliasing 抗锯齿 / FXAA 快速近似抗锯齿 / Motion Blur 动态模糊 / Depth of Field 景深 / Volumetric Fog 体积雾 / Volumetric Clouds 体积云 / Tone Mapping 色调映射 / Exposure 曝光 / Gamma 伽马 / Shadow 阴影 / Reflection 反射 / Refraction 折射 / Vignette 暗角 / Specular 高光 / Ambient 环境光 / Upscaling 超采样 / Render Distance 渲染距离 / Quality 质量 / Performance 性能 / Visuals 视觉 / Toggles 开关 / Utilities 工具 / Wetness 潮湿 / Hand 手持视角。
+3. profile. 开头的 key 是配置档（预设方案）名，意译为简洁中文（如 Potato→土豆画质、Very Low→极低、Ultra→极高）。
+4. 保留所有占位符与格式码原样：§ 后跟颜色/格式码（§a、§e、§4、§l、§o、§n 等）、%s、\n、\t，绝不能增删改。
+5. key（profile.、screen.、option.、value. 等前缀）与内部 ID 一律不翻译。
+6. 同一英文词在全文译名必须一致，严格遵循术语表。
+7. 只输出一个 JSON 对象，键为输入的 key，值为对应译文。不要输出任何多余文字、不要使用 markdown 代码块。
+
+光影包信息：
+- 光影包名：{mod_name}
+
+术语表（必须遵守，如与规则冲突以术语表为准）：
+{glossary}
+
+待翻译条目如下（JSON 数组，每个元素含 key 与 source），请逐条翻译："#;
+
+const RESOURCE_SYSTEM_TEMPLATE: &str = r#"你是一位《我的世界》(Minecraft) 资源包（材质包）描述翻译专家，任务是把资源包描述文本从英文翻译成简体中文。
+
+这些文本来自资源包「{mod_name}」的 pack.mcmeta 描述（description），是资源包在游戏中选择界面显示的介绍文字。
+
+严格规则：
+1. 描述通常介绍资源包风格、适用版本、特性与作者信息，翻译要自然流畅、像官方资源包的中文描述。
+2. 保留 § 格式码原样（§a、§8 等颜色码，\n 换行），绝不能增删改。
+3. 版本号、日期、作者名、网站、URL、@ 等专有信息一律保留不翻译。
+4. 材质/视觉风格相关词用社区通用表达或保留原词：PBR、Ray Tracing 光线追踪、Realistic 写实、Faithful 原版风格、Xray 透视、Texture 材质、Shader 着色器、Pack 资源包/材质包。
+5. 只输出一个 JSON 对象，键为输入的 key，值为对应译文。不要输出任何多余文字、不要使用 markdown 代码块。
+
+资源包信息：
+- 资源包名：{mod_name}
+
+术语表（必须遵守，如与规则冲突以术语表为准）：
+{glossary}
+
+待翻译条目如下（JSON 数组，每个元素含 key 与 source），请逐条翻译："#;
+
 fn build_translate_system(ctx: &TranslateContext, glossary: &[(String, String)]) -> String {
     let mut glossary_lines: Vec<String> = ctx
         .user_glossary
@@ -186,7 +228,14 @@ fn build_translate_system(ctx: &TranslateContext, glossary: &[(String, String)])
         glossary_lines.push("（无）".to_string());
     }
 
-    TRANSLATE_SYSTEM_TEMPLATE
+    // 按内容包类型选择差异化提示词：模组 / 光影包 / 资源包
+    let template = match ctx.pack_type.as_str() {
+        "shader" => SHADER_SYSTEM_TEMPLATE,
+        "resourcepack" => RESOURCE_SYSTEM_TEMPLATE,
+        _ => TRANSLATE_SYSTEM_TEMPLATE,
+    };
+
+    template
         .replace("{mod_name}", &ctx.mod_name)
         .replace("{modid}", &ctx.modid)
         .replace("{mc_version}", ctx.mc_version.as_deref().unwrap_or("未知"))
@@ -247,6 +296,39 @@ fn parse_batch_response(raw: &str, items: &[BatchItem]) -> BatchResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ctx_with_type(pack_type: &str) -> TranslateContext {
+        TranslateContext {
+            mod_name: "Test".into(),
+            modid: "test".into(),
+            mc_version: None,
+            loader: "".into(),
+            pack_type: pack_type.into(),
+            user_glossary: vec![],
+        }
+    }
+
+    #[test]
+    fn picks_template_by_pack_type() {
+        // 模组模板：模组语境 + 物品/方块术语
+        let sys = build_translate_system(&ctx_with_type("mod"), &[]);
+        assert!(sys.contains("模组"));
+        assert!(sys.contains("钻石"));
+        // 光影模板：图形术语 + 光影语境，不含模组物品术语
+        let sys = build_translate_system(&ctx_with_type("shader"), &[]);
+        assert!(sys.contains("光影包"));
+        assert!(sys.contains("SSAO"));
+        assert!(sys.contains("shaders.properties"));
+        assert!(!sys.contains("钻石"));
+        // 资源包模板：描述语境
+        let sys = build_translate_system(&ctx_with_type("resourcepack"), &[]);
+        assert!(sys.contains("pack.mcmeta"));
+        assert!(sys.contains("资源包"));
+        assert!(!sys.contains("SSAO"));
+        // 未知类型回退模组模板
+        let sys = build_translate_system(&ctx_with_type("unknown"), &[]);
+        assert!(sys.contains("模组"));
+    }
 
     #[test]
     fn parses_valid_response() {

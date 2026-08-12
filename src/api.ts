@@ -8,8 +8,12 @@ import type {
   ModFile,
   ProgressPayload,
   ProviderConfig,
+  PackType,
   ResourcePackBundle,
+  ResourcePackInfo,
   Settings,
+  ShaderPack,
+  ThreadingConfig,
   TranslateContext,
   TranslatedItem,
 } from "./types";
@@ -23,6 +27,7 @@ export const api = {
     items: BatchItem[],
     batchSize?: number,
     extractGlossary?: boolean,
+    threading?: ThreadingConfig,
   ) =>
     invoke<TranslatedItem[]>("run_translation", {
       config,
@@ -30,6 +35,7 @@ export const api = {
       items,
       batchSize,
       extractGlossary,
+      threading,
     }),
 
   exportResourcePack: (
@@ -63,6 +69,20 @@ export const api = {
 
   loadSettings: () => invoke<Settings>("load_settings"),
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
+
+  /** 判定内容包类型（mod/shader/resourcepack） */
+  detectPackType: (path: string) => invoke<PackType>("detect_pack_type", { path }),
+  /** 解析光影包（shaders.properties + zh_CN.lang） */
+  parseShaderPack: (path: string) => invoke<ShaderPack>("parse_shader_pack", { path }),
+  /** 解析资源包（pack.mcmeta description） */
+  parseResourcePack: (path: string) =>
+    invoke<ResourcePackInfo>("parse_resource_pack", { path }),
+  /** 导出汉化光影包（写入 shaders/lang/zh_CN.lang） */
+  exportShaderZh: (source: string, dest: string, entries: LangEntry[]) =>
+    invoke<string>("export_shader_zh", { source, dest, entries }),
+  /** 导出改描述后的资源包 */
+  exportResourcePackDesc: (source: string, dest: string, entries: LangEntry[]) =>
+    invoke<string>("export_resource_pack_desc", { source, dest, entries }),
 
   listModels: (config: ProviderConfig) => invoke<ModelInfo[]>("list_models", { config }),
 

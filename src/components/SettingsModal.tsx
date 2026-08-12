@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  Alert,
   AutoComplete,
   Button,
   Divider,
@@ -11,6 +12,7 @@ import {
   Select,
   Space,
   Switch,
+  Tag,
   Typography,
 } from "antd";
 import { DownOutlined, MinusCircleOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
@@ -42,6 +44,10 @@ interface FormValues {
   providerModels?: Record<string, string>;
   /** 各服务商缓存的模型列表（隐藏字段） */
   providerModelOptions?: Record<string, ModelInfo[]>;
+  /** 多线程翻译（实验性） */
+  threadingEnabled?: boolean;
+  threadCount?: number;
+  requestIntervalSec?: number;
 }
 
 export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
@@ -61,6 +67,9 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
         temperature: settings.provider.temperature ?? 0.7,
         batchSize: settings.batchSize,
         extractGlossary: settings.extractGlossary,
+        threadingEnabled: settings.threading?.enabled ?? false,
+        threadCount: settings.threading?.threadCount ?? 2,
+        requestIntervalSec: settings.threading?.requestIntervalSec ?? 4,
         userGlossary: settings.userGlossary.length ? settings.userGlossary : [],
         providerApiKeys: settings.providerApiKeys ?? {},
         providerModels: settings.providerModels ?? {},
@@ -148,6 +157,11 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
         .map(([en, zh]) => [en.trim(), zh.trim()] as [string, string]),
       batchSize: v.batchSize,
       extractGlossary: v.extractGlossary,
+      threading: {
+        enabled: v.threadingEnabled ?? false,
+        threadCount: Math.min(Math.max(v.threadCount ?? 1, 1), 8),
+        requestIntervalSec: Math.min(Math.max(v.requestIntervalSec ?? 4, 1), 60),
+      },
     };
     try {
       await api.saveSettings(next);
@@ -313,6 +327,78 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
 
         <Divider style={{ margin: "8px 0" }} />
 
+        {/* 翻译加速（实验性）：多线程并行 */}
+        <div style={{ marginBottom: 12 }}>
+          <Space align="center" style={{ marginBottom: 4 }}>
+            <Typography.Text strong style={{ color: "#D97706" }}>
+              ⚡ 翻译加速（实验性）
+            </Typography.Text>
+            <Tag color="volcano">实验性</Tag>
+          </Space>
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 8 }}
+            message={
+              <div style={{ fontSize: 12, lineHeight: 1.7 }}>
+                多线程并行会同时向模型发送多个翻译请求以提升速度，但存在以下风险与限制：
+                <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+                  <li>
+                    免费模型（glm-4-flash / 4.7-flash）有<b>账号级速率限制</b>
+                    （实测约 15~30 请求/分钟），多线程容易触发限流（429），程序会自动退避重试；
+                  </li>
+                  <li>
+                    <b>免费模型建议 1-2 线程</b>，付费模型（glm-4.5 等）可开 4-8 线程提速明显；
+                  </li>
+                  <li>线程之间按「请求间隔」错开发送，降低限流概率，间隔越大越稳（推荐 ≥ 4 秒）；</li>
+                  <li>不同模型同时翻译时，译名风格可能不完全一致，建议用同一模型。</li>
+                </ul>
+              </div>
+            }
+          />
+          <Space size="large" wrap align="start">
+            <Form.Item
+              name="threadingEnabled"
+              label="启用并行翻译"
+              valuePropName="checked"
+              style={{ marginBottom: 4 }}
+            >
+              <Switch />
+            </Form.Item>
+            <Form.Item
+              name="threadCount"
+              label="线程数"
+              style={{ marginBottom: 4 }}
+              dependencies={["threadingEnabled"]}
+            >
+              <Select
+                style={{ width: 120 }}
+                options={[1, 2, 3, 4, 5, 6, 7, 8].map((n) => ({
+                  value: n,
+                  label: `${n} 线程${n === 1 ? "（=不并行）" : ""}`,
+                }))}
+                disabled={!Form.useWatch("threadingEnabled", form)}
+              />
+            </Form.Item>
+            <Form.Item
+              name="requestIntervalSec"
+              label="请求间隔（秒）"
+              style={{ marginBottom: 4 }}
+              tooltip="每个线程每次请求之间的间隔，间隔越大越不容易触发限流"
+            >
+              <InputNumber
+                min={1}
+                max={60}
+                step={1}
+                addonAfter="秒"
+                disabled={!Form.useWatch("threadingEnabled", form)}
+              />
+            </Form.Item>
+          </Space>
+        </div>
+
+        <Divider style={{ margin: "8px 0" }} />
+
         <Typography.Text type="secondary">
           自定义术语表（统一译名，如 Diamond → 钻石；格式：英文 → 中文）
         </Typography.Text>
@@ -350,7 +436,7 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
         {/* 关于：版本 / 开源免费 / GitHub */}
         <Divider style={{ margin: "16px 0 8px" }} />
         <div style={{ textAlign: "center" }}>
-          <Typography.Text strong>模组 AI 汉化工具 v0.2.0</Typography.Text>
+          <Typography.Text strong>模组 AI 汉化工具 v1.0.0</Typography.Text>
           <br />
           <Typography.Text type="secondary">
             💝 完全开源免费 · MIT 协议

@@ -6,6 +6,39 @@ use serde::{Deserialize, Serialize};
 
 use crate::translate::provider::{ModelInfo, ProviderConfig};
 
+/// 多线程翻译配置（实验性功能）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadingConfig {
+    /// 是否启用多线程并行翻译
+    #[serde(default)]
+    pub enabled: bool,
+    /// 线程数（1-8，免费模型建议 1-2，付费模型 4-8）
+    #[serde(default = "default_thread_count")]
+    pub thread_count: usize,
+    /// 每个线程请求之间的间隔秒数（默认 4s，保险防限流）
+    #[serde(default = "default_request_interval")]
+    pub request_interval_sec: u64,
+}
+
+fn default_thread_count() -> usize {
+    2
+}
+
+fn default_request_interval() -> u64 {
+    4
+}
+
+impl Default for ThreadingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            thread_count: 2,
+            request_interval_sec: 4,
+        }
+    }
+}
+
 /// 应用设置（本地持久化到 app_config_dir/settings.json）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +60,9 @@ pub struct Settings {
     pub batch_size: usize,
     /// 是否先让 AI 提取模组术语表
     pub extract_glossary: bool,
+    /// 多线程翻译配置（实验性）
+    #[serde(default)]
+    pub threading: ThreadingConfig,
 }
 
 impl Default for Settings {
@@ -39,6 +75,7 @@ impl Default for Settings {
             user_glossary: Vec::new(),
             batch_size: 40,
             extract_glossary: true,
+            threading: ThreadingConfig::default(),
         }
     }
 }

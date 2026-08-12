@@ -33,6 +33,11 @@ pub fn run() {
             commands::cancel_translation,
             commands::pause_translation,
             commands::resume_translation,
+            commands::parse_shader_pack,
+            commands::parse_resource_pack,
+            commands::detect_pack_type,
+            commands::export_shader_zh,
+            commands::export_resource_pack_desc,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
