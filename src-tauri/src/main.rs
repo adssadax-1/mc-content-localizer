@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    mod_translator_lib::run()
+    mc_content_localizer_lib::run()
 }

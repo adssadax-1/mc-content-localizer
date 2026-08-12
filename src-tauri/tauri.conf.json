@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "mod-translator",
+  "productName": "mc-content-localizer",
   "version": "1.0.0",
   "identifier": "com.administrator.mod-translator",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "mod-translator",
+        "title": "MC 汉化工坊",
         "width": 800,
         "height": 600
       }

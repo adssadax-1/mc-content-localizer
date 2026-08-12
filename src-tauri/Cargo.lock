@@ -2249,6 +2249,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "mc-content-localizer"
+version = "1.0.0"
+dependencies = [
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
+ "thiserror 2.0.20",
+ "tokio",
+ "zhconv",
+ "zip",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2288,24 +2306,6 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "mod-translator"
-version = "1.0.0"
-dependencies = [
- "regex",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
- "thiserror 2.0.20",
- "tokio",
- "zhconv",
- "zip",
 ]
 
 [[package]]

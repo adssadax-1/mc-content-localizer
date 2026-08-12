@@ -1,7 +1,7 @@
 [package]
-name = "mod-translator"
+name = "mc-content-localizer"
 version = "1.0.0"
-description = "Minecraft 模组 AI 汉化工具"
+description = "MC 汉化工坊：Minecraft 模组/光影包/资源包 AI 汉化工具"
 authors = ["you"]
 edition = "2021"
 
@@ -9,7 +9,7 @@ edition = "2021"
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "mod_translator_lib"
+name = "mc_content_localizer_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

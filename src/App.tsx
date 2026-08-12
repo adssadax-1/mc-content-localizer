@@ -54,7 +54,7 @@ import type {
 const { Header, Content, Footer, Sider } = Layout;
 
 /** 项目 GitHub 地址 */
-const GITHUB_URL = "https://github.com/adssadax-1/Minecraft-mod-translator";
+const GITHUB_URL = "https://github.com/adssadax-1/mc-content-localizer";
 
 /** 打开 GitHub 项目页 */
 function openGithub() {
@@ -861,7 +861,7 @@ function App() {
       >
         <Space size="middle">
           <Typography.Title level={4} style={{ margin: 0, color: "#1F2937" }}>
-            ⛏ 模组 AI 汉化工具
+            ⛏ MC 汉化工坊
           </Typography.Title>
           {queue.length > 0 && <Tag color="blue">{queue.length} 个内容包</Tag>}
         </Space>

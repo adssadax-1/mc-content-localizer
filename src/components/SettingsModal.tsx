@@ -436,16 +436,16 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
         {/* 关于：版本 / 开源免费 / GitHub */}
         <Divider style={{ margin: "16px 0 8px" }} />
         <div style={{ textAlign: "center" }}>
-          <Typography.Text strong>模组 AI 汉化工具 v1.0.0</Typography.Text>
+          <Typography.Text strong>MC 汉化工坊 v1.0.0</Typography.Text>
           <br />
           <Typography.Text type="secondary">
             💝 完全开源免费 · MIT 协议
           </Typography.Text>
           <br />
           <Typography.Link
-            onClick={() => void openUrl("https://github.com/adssadax-1/Minecraft-mod-translator")}
+            onClick={() => void openUrl("https://github.com/adssadax-1/mc-content-localizer")}
           >
-            ⭐ GitHub：github.com/adssadax-1/Minecraft-mod-translator
+            ⭐ GitHub：github.com/adssadax-1/mc-content-localizer
           </Typography.Link>
         </div>
       </Form>

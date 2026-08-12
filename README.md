@@ -1,6 +1,6 @@
-# ⛏ 模组 AI 汉化工具 (Mod Translator)
+# ⛏ MC 汉化工坊 (MC Content Localizer)
 
-一个面向《我的世界》(Minecraft) Java 版的 **AI 汉化桌面工具**：把模组 jar、光影包、资源包拖进窗口，自动解析其中可翻译的文本，结合内容上下文用 AI 翻译成简体中文，导出为汉化资源包、汉化后的模组 jar、汉化光影包或改描述的资源包。
+一个面向《我的世界》(Minecraft) 的 **AI 汉化桌面工具**：把模组 jar、光影包、资源包拖进窗口，自动解析其中可翻译的文本，结合内容上下文用 AI 翻译成简体中文，导出为汉化资源包、汉化后的模组 jar、汉化光影包或改描述的资源包。
 
 **完全开源免费** · 支持免费 AI 模型（不限次数）· 基于 **Tauri v2 + React + TypeScript + Rust** 构建（Windows / macOS / Linux）。
 
@@ -38,7 +38,7 @@
 
 ## 🚀 快速开始
 
-1. **下载**：从 [Releases](https://github.com/adssadax-1/Minecraft-mod-translator/releases) 下载安装包（或 clone 源码自行构建，见下文）。
+1. **下载**：从 [Releases](https://github.com/adssadax-1/mc-content-localizer/releases) 下载安装包（或 clone 源码自行构建，见下文）。
 2. **配置 API Key**：打开程序 → 右上角「设置」→ 选择服务商 → 填入 API Key → 点「获取模型列表」选择模型 → 保存。
 3. **导入内容包**：点击中央区域或拖入文件（模组 `.jar` / 光影包 / 资源包 `.zip`，可多选），自动识别类型并解析全部可翻译条目；自带中文自动填入。
 4. **开始翻译**：勾选要翻译的内容包 → 点「开始 AI 翻译」，观察进度（可暂停/取消）。
