@@ -63,6 +63,9 @@ pub struct Settings {
     /// 多线程翻译配置（实验性）
     #[serde(default)]
     pub threading: ThreadingConfig,
+    /// 自定义提示词（key: mod / shader / resourcepack → 用户自定义的可编辑段）
+    #[serde(default)]
+    pub custom_prompts: HashMap<String, String>,
 }
 
 impl Default for Settings {
@@ -76,6 +79,7 @@ impl Default for Settings {
             batch_size: 40,
             extract_glossary: true,
             threading: ThreadingConfig::default(),
+            custom_prompts: HashMap::new(),
         }
     }
 }

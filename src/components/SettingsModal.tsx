@@ -15,11 +15,12 @@ import {
   Tag,
   Typography,
 } from "antd";
-import { DownOutlined, MinusCircleOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
+import { DownOutlined, EditOutlined, MinusCircleOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons";
 import { api } from "../api";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { ModelInfo, ProviderConfig, Settings } from "../types";
 import { PROVIDER_PRESETS } from "../types";
+import { PromptEditorModal } from "./PromptEditorModal";
 
 interface Props {
   open: boolean;
@@ -50,12 +51,39 @@ interface FormValues {
   requestIntervalSec?: number;
 }
 
-export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
-  const [form] = Form.useForm<FormValues>();
+/** 当前版本号（与 package.json / tauri.conf.json 一致） */
+const CURRENT_VERSION = "1.1.0";
+
+export function SettingsModal({ open, settings, onClose, onSaved }: Props) {  const [form] = Form.useForm<FormValues>();
   const provider = Form.useWatch("provider", form);
   const [modelOptions, setModelOptions] = useState<ModelInfo[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
+  const [promptEditorOpen, setPromptEditorOpen] = useState(false);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+
+  /** 手动检查更新：有新版 → 确认跳转 Release；已最新 → 提示；连不上 → 明确报错 */
+  async function handleCheckUpdate() {
+    setCheckingUpdate(true);
+    try {
+      const info = await api.checkUpdate();
+      if (info) {
+        Modal.confirm({
+          title: "发现新版本",
+          content: `当前 v${CURRENT_VERSION}，最新 v${info.latestVersion}。是否前往 GitHub 下载更新？`,
+          okText: "前往下载",
+          cancelText: "取消",
+          onOk: () => void openUrl(info.url),
+        });
+      } else {
+        message.success(`已是最新版本（v${CURRENT_VERSION}）`);
+      }
+    } catch (e) {
+      message.error(String(e) || "连接不到 GitHub，无法检查更新");
+    } finally {
+      setCheckingUpdate(false);
+    }
+  }
 
   useEffect(() => {
     if (open && settings) {
@@ -162,6 +190,7 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
         threadCount: Math.min(Math.max(v.threadCount ?? 1, 1), 8),
         requestIntervalSec: Math.min(Math.max(v.requestIntervalSec ?? 4, 1), 60),
       },
+      customPrompts: settings?.customPrompts ?? {},
     };
     try {
       await api.saveSettings(next);
@@ -433,10 +462,21 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
           )}
         </Form.List>
 
+        {/* 自定义提示词入口 */}
+        <Divider style={{ margin: "12px 0 8px" }} />
+        <Button
+          block
+          icon={<EditOutlined />}
+          onClick={() => setPromptEditorOpen(true)}
+          style={{ marginBottom: 8 }}
+        >
+          自定义提示词（模组 / 光影包 / 资源包）
+        </Button>
+
         {/* 关于：版本 / 开源免费 / GitHub */}
         <Divider style={{ margin: "16px 0 8px" }} />
         <div style={{ textAlign: "center" }}>
-          <Typography.Text strong>MC 汉化工坊 v1.0.0</Typography.Text>
+          <Typography.Text strong>MC 汉化工坊 v1.1.0</Typography.Text>
           <br />
           <Typography.Text type="secondary">
             💝 完全开源免费 · MIT 协议
@@ -447,8 +487,27 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
           >
             ⭐ GitHub：github.com/adssadax-1/mc-content-localizer
           </Typography.Link>
+          <br />
+          <Button
+            size="small"
+            type="link"
+            loading={checkingUpdate}
+            style={{ marginTop: 4 }}
+            onClick={() => void handleCheckUpdate()}
+          >
+            🔄 检查更新
+          </Button>
         </div>
       </Form>
+      <PromptEditorModal
+        open={promptEditorOpen}
+        settings={settings}
+        onClose={() => setPromptEditorOpen(false)}
+        onSaved={(s) => {
+          onSaved(s);
+          setPromptEditorOpen(false);
+        }}
+      />
     </Modal>
   );
 }

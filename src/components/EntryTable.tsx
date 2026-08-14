@@ -23,6 +23,55 @@ interface Props {
   scrollY?: number;
 }
 
+/** § 格式码配色表（Minecraft 颜色码） */
+const MC_COLORS: Record<string, string> = {
+  "0": "#000000", "1": "#0000AA", "2": "#00AA00", "3": "#00AAAA",
+  "4": "#AA0000", "5": "#AA00AA", "6": "#FFAA00", "7": "#AAAAAA",
+  "8": "#555555", "9": "#5555FF", a: "#55FF55", b: "#55FFFF",
+  c: "#FF5555", d: "#FF55FF", e: "#FFFF55", f: "#FFFFFF",
+};
+
+/** 按 § 格式码渲染文本效果（颜色/粗体/斜体/下划线/删除线），深色背景便于预览 */
+function McFormatPreview({ text }: { text: string }) {
+  const nodes: React.ReactNode[] = [];
+  const tokens = text.split(/(§[0-9a-fklmnor])/i);
+  let style: React.CSSProperties = { color: "#FFFFFF" };
+  let key = 0;
+  for (const tok of tokens) {
+    const m = /^§([0-9a-fklmnor])$/i.exec(tok);
+    if (m) {
+      const c = m[1].toLowerCase();
+      if (MC_COLORS[c]) {
+        style = { ...style, color: MC_COLORS[c], fontWeight: "normal", fontStyle: "normal", textDecoration: "none" };
+      } else if (c === "l") style = { ...style, fontWeight: "bold" };
+      else if (c === "o") style = { ...style, fontStyle: "italic" };
+      else if (c === "n") style = { ...style, textDecoration: "underline" };
+      else if (c === "m") style = { ...style, textDecoration: "line-through" };
+      else if (c === "k") style = { ...style, opacity: 0.4 };
+      else if (c === "r") style = { color: "#FFFFFF", fontWeight: "normal", fontStyle: "normal", textDecoration: "none" };
+    } else if (tok) {
+      nodes.push(
+        <span key={key++} style={style}>
+          {tok}
+        </span>,
+      );
+    }
+  }
+  return (
+    <div
+      style={{
+        background: "#1a1a1a",
+        padding: "6px 10px",
+        borderRadius: 6,
+        fontSize: 13,
+        minWidth: 140,
+      }}
+    >
+      {nodes.length ? nodes : text}
+    </div>
+  );
+}
+
 /** 翻译主表格：汉化勾选 / 状态 / key / 原文 / 可编辑译文 / 备注 */
 export const EntryTable = memo(function EntryTable({
   entries,
@@ -251,8 +300,9 @@ export const EntryTable = memo(function EntryTable({
       title: "译文 (zh_cn)",
       dataIndex: "translation",
       width: 340,
-      render: (_, record) => (
-        <span onClick={(e) => e.stopPropagation()}>
+      render: (_, record) => {
+        const hasFormat = (record.translation ?? "").includes("§");
+        const input = (
           <Input
             value={record.translation ?? ""}
             placeholder="（未翻译）"
@@ -271,8 +321,24 @@ export const EntryTable = memo(function EntryTable({
               ) : undefined
             }
           />
-        </span>
-      ),
+        );
+        return (
+          <span onClick={(e) => e.stopPropagation()}>
+            {hasFormat ? (
+              <Tooltip
+                title={
+                  <McFormatPreview text={record.translation ?? ""} />
+                }
+                placement="topLeft"
+              >
+                {input}
+              </Tooltip>
+            ) : (
+              input
+            )}
+          </span>
+        );
+      },
     },
     {
       title: "备注",

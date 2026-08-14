@@ -12,6 +12,9 @@ pub struct TranslateContext {
     pub loader: String,
     /// 内容包类型：mod / shader / resourcepack（决定使用哪套提示词）
     pub pack_type: String,
+    /// 用户自定义的可编辑提示词段（覆盖默认角色/规则；核心段固定不可改）
+    #[serde(default)]
+    pub custom_prompt: Option<String>,
     /// 用户自定义术语表（来自设置），始终合并进 prompt
     pub user_glossary: Vec<(String, String)>,
 }
@@ -49,17 +52,15 @@ pub struct BatchResult {
     pub missing: Vec<String>,
 }
 
-const TRANSLATE_SYSTEM_TEMPLATE: &str = r#"你是一位资深的《我的世界》(Minecraft) Java 版模组本地化翻译专家。
+/// 模组可编辑段（默认；用户可自定义覆盖，含程序注入的变量）
+const EDITABLE_MOD_DEFAULT: &str = r#"你是一位资深的《我的世界》(Minecraft) Java 版模组本地化翻译专家。
 
 下面这份英文语言文件来自《我的世界》模组「{mod_name}」（modid: {modid}），运行于 Minecraft {mc_version}（{loader} 加载器）。请将其完整翻译为简体中文。
 
 翻译要求：
-1. 结合模组所处的游戏语境自然表达——物品、方块、生物、生物群系、成就、进度、GUI、音效字幕、指令等各有其语言习惯，读起来要像模组自带的中文，严禁机翻腔。
-2. 优先使用 Minecraft 官方中文译名与社区通用译名（见下方参考术语表）；专有名词保持全文一致。
-3. 保持所有占位符与格式码原样不变：%s、%1$s、%d、%f、%%、\n、\t、§ 后跟颜色码（如 §a）等，绝不能增删改，也不能改变 %1$s 这类带编号占位符的顺序。
-4. key 本身、模组内部 ID、游戏指令、@ 符号、URL、文件路径一律不翻译。
-5. 同一英文词在本模组内译名必须一致，严格遵循术语表。
-6. 只输出一个 JSON 对象，键为输入的 key，值为对应译文。不要输出任何多余文字、不要使用 markdown 代码块。
+- 结合模组所处的游戏语境自然表达——物品、方块、生物、生物群系、成就、进度、GUI、音效字幕、指令等各有其语言习惯，读起来要像模组自带的中文，严禁机翻腔。
+- 优先使用 Minecraft 官方中文译名与社区通用译名（见下方参考术语表）；专有名词保持全文一致。
+- 同一英文词在本模组内译名必须一致。
 
 模组信息：
 - 模组名：{mod_name}
@@ -73,12 +74,7 @@ Minecraft 官方译名参考（按语境取用）：
 - 方块：Enchanting Table 附魔台 / Anvil 铁砧 / Crafting Table 工作台 / Furnace 熔炉 / Chest 箱子 / Beacon 信标
 - 生物：Zombie 僵尸 / Skeleton 骷髅 / Creeper 苦力怕 / Enderman 末影人 / Villager 村民 / Wither 凋灵
 - 武器工具：Sword 剑 / Pickaxe 镐 / Axe 斧 / Shovel 锹 / Hoe 锄 / Bow 弓 / Armor 盔甲
-- 通用：XP 经验 / Level 等级 / Damage 伤害 / Durability 耐久 / Cooldown 冷却 / Spawn 生成 / Enchanting 附魔
-
-术语表（必须遵守，如与规则冲突以术语表为准）：
-{glossary}
-
-待翻译条目如下（JSON 数组，每个元素含 key 与 source），请逐条翻译："#;
+- 通用：XP 经验 / Level 等级 / Damage 伤害 / Durability 耐久 / Cooldown 冷却 / Spawn 生成 / Enchanting 附魔"#;
 
 const GLOSSARY_SYSTEM: &str = r#"你是《我的世界》(Minecraft) 模组本地化专家。下面是一个模组语言文件的部分条目，包含物品、方块、生物、结构、附魔、指令等专有名词。
 请提取其中需要统一译名的专有名词，给出 Minecraft 官方或社区通用中文译名；没有公认译名的给出你推荐的译名。
@@ -175,45 +171,67 @@ pub fn pick_glossary_samples(entries: &[BatchItem], max: usize) -> Vec<GlossaryS
         .collect()
 }
 
-const SHADER_SYSTEM_TEMPLATE: &str = r#"你是一位资深的《我的世界》(Minecraft) 光影包（Shader Pack）本地化翻译专家，任务是把光影包的界面文本从英文翻译成简体中文。
+/// 光影包可编辑段（默认；用户可自定义覆盖）
+const EDITABLE_SHADER_DEFAULT: &str = r#"你是一位资深的《我的世界》(Minecraft) 光影包（Shader Pack）本地化翻译专家，任务是把光影包的界面文本从英文翻译成简体中文。
 
 这些文本来自光影包「{mod_name}」的 shaders.properties / shaders/lang 语言文件，是游戏内光影设置界面的文案（屏幕标题、选项名、选项说明、按钮、配置档名等）。
 
-严格规则：
-1. 结合图形设置界面的语境自然表达，要像官方汉化的光影设置一样，禁止机翻腔（例如 "Blur" 在图形语境下是"动态模糊"而不是"模糊"）。
-2. 图形术语使用社区通用译名并全文一致：Shader 着色器 / Profile 配置档 / Bloom 泛光 / SSAO 环境光遮蔽 / Anti-aliasing 抗锯齿 / FXAA 快速近似抗锯齿 / Motion Blur 动态模糊 / Depth of Field 景深 / Volumetric Fog 体积雾 / Volumetric Clouds 体积云 / Tone Mapping 色调映射 / Exposure 曝光 / Gamma 伽马 / Shadow 阴影 / Reflection 反射 / Refraction 折射 / Vignette 暗角 / Specular 高光 / Ambient 环境光 / Upscaling 超采样 / Render Distance 渲染距离 / Quality 质量 / Performance 性能 / Visuals 视觉 / Toggles 开关 / Utilities 工具 / Wetness 潮湿 / Hand 手持视角。
-3. profile. 开头的 key 是配置档（预设方案）名，意译为简洁中文（如 Potato→土豆画质、Very Low→极低、Ultra→极高）。
-4. 保留所有占位符与格式码原样：§ 后跟颜色/格式码（§a、§e、§4、§l、§o、§n 等）、%s、\n、\t，绝不能增删改。
-5. key（profile.、screen.、option.、value. 等前缀）与内部 ID 一律不翻译。
-6. 同一英文词在全文译名必须一致，严格遵循术语表。
-7. 只输出一个 JSON 对象，键为输入的 key，值为对应译文。不要输出任何多余文字、不要使用 markdown 代码块。
+翻译要求：
+- 结合图形设置界面的语境自然表达，要像官方汉化的光影设置一样，禁止机翻腔（例如 "Blur" 在图形语境下是"动态模糊"而不是"模糊"）。
+- 图形术语使用社区通用译名并全文一致：Shader 着色器 / Profile 配置档 / Bloom 泛光 / SSAO 环境光遮蔽 / Anti-aliasing 抗锯齿 / FXAA 快速近似抗锯齿 / Motion Blur 动态模糊 / Depth of Field 景深 / Volumetric Fog 体积雾 / Volumetric Clouds 体积云 / Tone Mapping 色调映射 / Exposure 曝光 / Gamma 伽马 / Shadow 阴影 / Reflection 反射 / Refraction 折射 / Vignette 暗角 / Specular 高光 / Ambient 环境光 / Upscaling 超采样 / Render Distance 渲染距离 / Quality 质量 / Performance 性能 / Visuals 视觉 / Toggles 开关 / Utilities 工具 / Wetness 潮湿 / Hand 手持视角。
+- profile. 开头的 key 是配置档（预设方案）名，意译为简洁中文（如 Potato→土豆画质、Very Low→极低、Ultra→极高）。
+- 同一英文词在全文译名必须一致。
 
 光影包信息：
-- 光影包名：{mod_name}
+- 光影包名：{mod_name}"#;
 
-术语表（必须遵守，如与规则冲突以术语表为准）：
-{glossary}
-
-待翻译条目如下（JSON 数组，每个元素含 key 与 source），请逐条翻译："#;
-
-const RESOURCE_SYSTEM_TEMPLATE: &str = r#"你是一位《我的世界》(Minecraft) 资源包（材质包）描述翻译专家，任务是把资源包描述文本从英文翻译成简体中文。
+/// 资源包可编辑段（默认；用户可自定义覆盖）
+const EDITABLE_RESOURCE_DEFAULT: &str = r#"你是一位《我的世界》(Minecraft) 资源包（材质包）描述翻译专家，任务是把资源包描述文本从英文翻译成简体中文。
 
 这些文本来自资源包「{mod_name}」的 pack.mcmeta 描述（description），是资源包在游戏中选择界面显示的介绍文字。
 
-严格规则：
-1. 描述通常介绍资源包风格、适用版本、特性与作者信息，翻译要自然流畅、像官方资源包的中文描述。
-2. 保留 § 格式码原样（§a、§8 等颜色码，\n 换行），绝不能增删改。
-3. 版本号、日期、作者名、网站、URL、@ 等专有信息一律保留不翻译。
-4. 材质/视觉风格相关词用社区通用表达或保留原词：PBR、Ray Tracing 光线追踪、Realistic 写实、Faithful 原版风格、Xray 透视、Texture 材质、Shader 着色器、Pack 资源包/材质包。
-5. 只输出一个 JSON 对象，键为输入的 key，值为对应译文。不要输出任何多余文字、不要使用 markdown 代码块。
+翻译要求：
+- 描述通常介绍资源包风格、适用版本、特性与作者信息，翻译要自然流畅、像官方资源包的中文描述。
+- 材质/视觉风格相关词用社区通用表达或保留原词：PBR、Ray Tracing 光线追踪、Realistic 写实、Faithful 原版风格、Xray 透视、Texture 材质、Shader 着色器、Pack 资源包/材质包。
 
 资源包信息：
-- 资源包名：{mod_name}
+- 资源包名：{mod_name}"#;
+
+/// 核心段（系统保留，不可修改；所有类型共用，含自动注入的术语表）
+const CORE_RULES_TEMPLATE: &str = r#"技术规则（必须遵守）：
+- 保持所有占位符与格式码原样：%s、%1$s、%d、%f、%%、\n、\t、§ 后跟颜色/格式码（如 §a）等，绝不能增删改，也不能改变 %1$s 这类带编号占位符的顺序。
+- key 本身、内部 ID、游戏指令、@ 符号、URL、文件路径一律不翻译。
+- 同一英文词在全文译名必须一致，严格遵循术语表。
 
 术语表（必须遵守，如与规则冲突以术语表为准）：
 {glossary}
 
+只输出一个 JSON 对象，键为输入的 key，值为对应译文。不要输出任何多余文字、不要使用 markdown 代码块。
+
 待翻译条目如下（JSON 数组，每个元素含 key 与 source），请逐条翻译："#;
+
+/// 提示词模板信息（供前端「自定义提示词」编辑器展示）
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptTemplate {
+    /// 该类型的默认可编辑段（含 {mod_name} 等变量占位符）
+    pub editable_default: String,
+    /// 系统保留的核心段（不可修改）
+    pub core_rules: String,
+}
+
+/// 获取某类型提示词模板（默认可编辑段 + 核心段）
+pub fn prompt_template(pack_type: &str) -> PromptTemplate {
+    let editable_default = match pack_type {
+        "shader" => EDITABLE_SHADER_DEFAULT.to_string(),
+        "resourcepack" => EDITABLE_RESOURCE_DEFAULT.to_string(),
+        _ => EDITABLE_MOD_DEFAULT.to_string(),
+    };
+    PromptTemplate {
+        editable_default,
+        core_rules: CORE_RULES_TEMPLATE.to_string(),
+    }
+}
 
 fn build_translate_system(ctx: &TranslateContext, glossary: &[(String, String)]) -> String {
     let mut glossary_lines: Vec<String> = ctx
@@ -228,19 +246,23 @@ fn build_translate_system(ctx: &TranslateContext, glossary: &[(String, String)])
         glossary_lines.push("（无）".to_string());
     }
 
-    // 按内容包类型选择差异化提示词：模组 / 光影包 / 资源包
-    let template = match ctx.pack_type.as_str() {
-        "shader" => SHADER_SYSTEM_TEMPLATE,
-        "resourcepack" => RESOURCE_SYSTEM_TEMPLATE,
-        _ => TRANSLATE_SYSTEM_TEMPLATE,
+    // 可编辑段：用户自定义优先，否则按类型用默认；核心段固定拼接
+    let default_editable = match ctx.pack_type.as_str() {
+        "shader" => EDITABLE_SHADER_DEFAULT,
+        "resourcepack" => EDITABLE_RESOURCE_DEFAULT,
+        _ => EDITABLE_MOD_DEFAULT,
     };
+    let editable = match ctx.custom_prompt.as_deref() {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => default_editable,
+    };
+    let core = CORE_RULES_TEMPLATE.replace("{glossary}", &glossary_lines.join("\n"));
+    let full = format!("{}\n\n{}", editable, core);
 
-    template
-        .replace("{mod_name}", &ctx.mod_name)
+    full.replace("{mod_name}", &ctx.mod_name)
         .replace("{modid}", &ctx.modid)
         .replace("{mc_version}", ctx.mc_version.as_deref().unwrap_or("未知"))
         .replace("{loader}", &ctx.loader)
-        .replace("{glossary}", &glossary_lines.join("\n"))
 }
 
 /// 解析模型返回的 {key: translation} JSON，过滤幻觉 key，并做占位符校验
@@ -304,6 +326,7 @@ mod tests {
             mc_version: None,
             loader: "".into(),
             pack_type: pack_type.into(),
+            custom_prompt: None,
             user_glossary: vec![],
         }
     }
@@ -328,6 +351,36 @@ mod tests {
         // 未知类型回退模组模板
         let sys = build_translate_system(&ctx_with_type("unknown"), &[]);
         assert!(sys.contains("模组"));
+    }
+
+    #[test]
+    fn custom_prompt_overrides_editable_section() {
+        // 自定义可编辑段生效（角色被替换），核心段仍保留（占位符规则/JSON 输出）
+        let mut ctx = ctx_with_type("mod");
+        ctx.custom_prompt = Some("你是我的御用翻译，语气要俏皮。模组名：{mod_name}".into());
+        let sys = build_translate_system(&ctx, &[]);
+        assert!(sys.contains("御用翻译"));
+        assert!(sys.contains("俏皮"));
+        assert!(!sys.contains("模组本地化翻译专家"));
+        // 核心段必须保留
+        assert!(sys.contains("%s"));
+        assert!(sys.contains("只输出一个 JSON 对象"));
+        assert!(sys.contains("待翻译条目如下"));
+        // 变量替换仍然生效
+        assert!(sys.contains("Test"));
+    }
+
+    #[test]
+    fn prompt_template_returns_sections() {
+        let t = prompt_template("shader");
+        assert!(t.editable_default.contains("光影包"));
+        assert!(t.editable_default.contains("SSAO"));
+        assert!(t.core_rules.contains("占位符"));
+        assert!(t.core_rules.contains("{glossary}"));
+        let t2 = prompt_template("mod");
+        assert!(t2.editable_default.contains("钻石"));
+        let t3 = prompt_template("resourcepack");
+        assert!(t3.editable_default.contains("pack.mcmeta"));
     }
 
     #[test]

@@ -83,7 +83,10 @@ pub async fn run_translation(
                     glossary = g;
                     let _ = app.emit(
                         "glossary-done",
-                        serde_json::json!({ "count": glossary.len() }),
+                        serde_json::json!({
+                            "count": glossary.len(),
+                            "glossary": glossary,
+                        }),
                     );
                 }
                 Err(_) => {}
@@ -302,6 +305,69 @@ pub fn export_mod_jar(
         &entries,
         lang_format,
     )
+}
+
+/// 更新信息（供前端检查更新提示）
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateInfo {
+    pub latest_version: String,
+    pub url: String,
+}
+
+/// 静默检查 GitHub 最新 Release：
+/// - Ok(Some) 有新版本
+/// - Ok(None) 已是最新
+/// - Err(消息) 网络失败/访问不了 GitHub
+#[tauri::command]
+pub async fn check_update() -> Result<Option<UpdateInfo>, String> {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return Err("无法初始化网络请求".to_string()),
+    };
+    let resp = match client
+        .get("https://api.github.com/repos/adssadax-1/mc-content-localizer/releases/latest")
+        .header("User-Agent", "mc-content-localizer")
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Err("连接不到 GitHub，无法检查更新".to_string()),
+    };
+    let json: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return Err("GitHub 响应解析失败".to_string()),
+    };
+    let tag = json
+        .get("tag_name")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .trim_start_matches('v')
+        .to_string();
+    let url = json
+        .get("html_url")
+        .and_then(|u| u.as_str())
+        .unwrap_or("https://github.com/adssadax-1/mc-content-localizer/releases")
+        .to_string();
+    let current = env!("CARGO_PKG_VERSION");
+    if tag.is_empty() || tag == current {
+        return Ok(None);
+    }
+    Ok(Some(UpdateInfo {
+        latest_version: tag,
+        url,
+    }))
+}
+
+/// 获取某类型提示词模板（默认可编辑段 + 系统保留核心段），供前端编辑器展示
+#[tauri::command]
+pub fn get_prompt_template(
+    pack_type: String,
+) -> Result<crate::translate::pipeline::PromptTemplate, String> {
+    Ok(crate::translate::pipeline::prompt_template(&pack_type))
 }
 
 /// 扫描 zip 判定内容包类型（mod/shader/resourcepack）

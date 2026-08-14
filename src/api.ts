@@ -9,6 +9,7 @@ import type {
   ProgressPayload,
   ProviderConfig,
   PackType,
+  PromptTemplate,
   ResourcePackBundle,
   ResourcePackInfo,
   Settings,
@@ -16,6 +17,7 @@ import type {
   ThreadingConfig,
   TranslateContext,
   TranslatedItem,
+  UpdateInfo,
 } from "./types";
 
 export const api = {
@@ -72,6 +74,13 @@ export const api = {
 
   /** 判定内容包类型（mod/shader/resourcepack） */
   detectPackType: (path: string) => invoke<PackType>("detect_pack_type", { path }),
+  /** 静默检查 GitHub 最新版本（网络失败返回 null，不打扰） */
+  checkUpdate: () => invoke<UpdateInfo | null>("check_update"),
+
+  /** 获取某类型提示词模板（默认可编辑段 + 核心段） */
+  getPromptTemplate: (packType: string) =>
+    invoke<PromptTemplate>("get_prompt_template", { packType }),
+
   /** 解析光影包（shaders.properties + zh_CN.lang） */
   parseShaderPack: (path: string) => invoke<ShaderPack>("parse_shader_pack", { path }),
   /** 解析资源包（pack.mcmeta description） */
@@ -115,9 +124,12 @@ export async function onTranslateProgress(
 
 /** 监听术语表提取完成事件 */
 export async function onGlossaryDone(
-  handler: (count: number) => void,
+  handler: (payload: { count: number; glossary: [string, string][] }) => void,
 ): Promise<UnlistenFn> {
-  return listen<{ count: number }>("glossary-done", (e) => handler(e.payload.count));
+  return listen<{ count: number; glossary: [string, string][] }>(
+    "glossary-done",
+    (e) => handler(e.payload),
+  );
 }
 
 /** 监听拖入文件事件（Rust 侧转发路径） */

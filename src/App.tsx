@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Button,
   Checkbox,
@@ -7,6 +7,7 @@ import {
   Layout,
   message,
   Modal,
+  notification,
   Progress,
   Radio,
   Space,
@@ -32,7 +33,7 @@ import {
   ThunderboltOutlined,
 } from "@ant-design/icons";
 import { open } from "@tauri-apps/plugin-dialog";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 
 import { api, onFileDropped, onGlossaryDone, onTranslateProgress } from "./api";
 import { DropZone } from "./components/DropZone";
@@ -69,6 +70,35 @@ function asDir(dir: string | string[] | null): string | null {
 
 /** 内容包类型 */
 type PackKind = "mod" | "shader" | "resourcepack";
+
+/**
+ * 术语表建议：收集出现 ≥3 次且已翻译的英文短语（未在现有术语表中）
+ */
+function collectSuggestions(
+  entries: LangEntry[],
+  existing: [string, string][],
+): [string, string][] {
+  const count = new Map<string, number>();
+  const zh = new Map<string, string>();
+  for (const e of entries) {
+    const src = e.source?.trim() ?? "";
+    const tr = e.translation?.trim() ?? "";
+    if (!src || !tr || src.length < 3 || src.length > 60 || !/[a-zA-Z]/.test(src)) {
+      continue;
+    }
+    count.set(src, (count.get(src) ?? 0) + 1);
+    if (!zh.has(src)) zh.set(src, tr);
+  }
+  const skip = new Set(existing.map(([en]) => en.toLowerCase()));
+  const out: [string, string][] = [];
+  for (const [src, c] of count) {
+    if (c >= 3 && !skip.has(src.toLowerCase()) && zh.get(src)) {
+      out.push([src, zh.get(src)!]);
+    }
+  }
+  out.sort((a, b) => (count.get(b[0]) ?? 0) - (count.get(a[0]) ?? 0));
+  return out.slice(0, 20);
+}
 
 const KIND_META: Record<PackKind, { label: string; icon: React.ReactNode; color: string }> = {
   mod: { label: "模组", icon: <AppstoreOutlined />, color: "#4A90D9" },
@@ -221,6 +251,14 @@ function App() {
   const [parsing, setParsing] = useState(false);
   const [translating, setTranslating] = useState(false);
   const [progress, setProgress] = useState<ProgressPayload | null>(null);
+  // 翻译开始时间（剩余时间估算用）
+  const translateStartRef = useRef(0);
+  // 术语表建议候选（翻译完成后一次性弹出）
+  const [glossarySuggest, setGlossarySuggest] = useState<[string, string][] | null>(null);
+  const [suggestChecked, setSuggestChecked] = useState<string[]>([]);
+  // 本次提取的术语（en→zh），弹窗可勾选加入用户术语表
+  const [extractedGlossary, setExtractedGlossary] = useState<[string, string][] | null>(null);
+  const [extractedChecked, setExtractedChecked] = useState<string[]>([]);
   const [currentPackName, setCurrentPackName] = useState("");
   const [settings, setSettings] = useState<Settings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -232,7 +270,7 @@ function App() {
   const [cancelRequested, setCancelRequested] = useState(false);
   const [paused, setPaused] = useState(false);
 
-  // 初始化：加载设置
+  // 初始化：加载设置（兼容旧配置：补齐 threading / customPrompts 默认值）
   useEffect(() => {
     api
       .loadSettings()
@@ -244,10 +282,61 @@ function App() {
             threadCount: 2,
             requestIntervalSec: 4,
           },
+          customPrompts: s.customPrompts ?? {},
         }),
       )
       .catch(() => setSettings(null));
   }, []);
+
+  // 静默检查更新：失败无感；同一版本只提示一次
+  useEffect(() => {
+    api
+      .checkUpdate()
+      .then((u) => {
+        if (!u) return;
+        const key = `mt-update-notified-${u.latestVersion}`;
+        if (localStorage.getItem(key)) return;
+        localStorage.setItem(key, "1");
+        notification.info({
+          message: "发现新版本",
+          description: `v${u.latestVersion} 已发布，是否前往下载？`,
+          duration: 0,
+          placement: "bottomRight",
+          btn: (
+            <Button
+              size="small"
+              type="primary"
+              onClick={() => void openUrl(u.url)}
+            >
+              前往下载
+            </Button>
+          ),
+        });
+      })
+      .catch(() => {
+        /* 网络失败静默 */
+      });
+  }, []);
+
+  /** 导出成功提示 + 「打开所在文件夹」按钮 */
+  function notifyExport(title: string, paths: string[]) {
+    notification.success({
+      message: title,
+      description: paths[0] ?? "",
+      placement: "bottomRight",
+      duration: 6,
+      btn:
+        paths.length > 0 ? (
+          <Button
+            size="small"
+            type="primary"
+            onClick={() => void revealItemInDir(paths[0])}
+          >
+            打开所在文件夹
+          </Button>
+        ) : undefined,
+    });
+  }
 
   // 监听拖入文件
   useEffect(() => {
@@ -289,8 +378,23 @@ function App() {
     };
   }, []);
   useEffect(() => {
-    const unlisten = onGlossaryDone((count) => {
+    const unlisten = onGlossaryDone(({ count, glossary }) => {
       if (count > 0) message.info(`已提取 ${count} 条术语，用于统一译名`);
+      if (glossary && glossary.length > 0) {
+        setExtractedGlossary((prev) => {
+          const map = new Map<string, string>();
+          (prev ?? []).forEach(([en, zh]) => map.set(en, zh));
+          glossary.forEach(([en, zh]) => {
+            if (!map.has(en)) map.set(en, zh);
+          });
+          return [...map.entries()];
+        });
+        setExtractedChecked((prev) => {
+          const set = new Set(prev);
+          glossary.forEach(([en]) => set.add(en));
+          return [...set];
+        });
+      }
     });
     return () => {
       unlisten.then((f) => f());
@@ -547,6 +651,7 @@ function App() {
     setTranslating(true);
     setCancelRequested(false);
     setPaused(false);
+    translateStartRef.current = Date.now();
     let doneAny = false;
     try {
       for (const item of targets) {
@@ -567,6 +672,7 @@ function App() {
           mcVersion: item.modFile?.mcVersion ?? null,
           loader: item.modFile ? LOADER_LABEL[item.modFile.loader] : KIND_META[item.kind].label,
           packType: item.kind,
+          customPrompt: settings.customPrompts?.[item.kind] ?? null,
           userGlossary: settings.userGlossary,
         };
         setProgress({
@@ -608,6 +714,15 @@ function App() {
         message.info("已取消，已翻译部分已保留");
       } else if (doneAny) {
         message.success("翻译完成");
+        // 术语表建议：高频已翻译短语一次性提示（不打断）
+        const sugg = collectSuggestions(
+          queue.flatMap((q) => q.entries),
+          settings.userGlossary ?? [],
+        );
+        if (sugg.length > 0) {
+          setGlossarySuggest(sugg);
+          setSuggestChecked(sugg.map(([en]) => en));
+        }
       } else {
         message.info("勾选的内容包没有需要翻译的条目（可能已全部翻译）");
       }
@@ -714,7 +829,7 @@ function App() {
           message.error(`「${it.name}」导出失败：${String(e)}`);
         }
       }
-      if (ok > 0) message.success(`已生成 ${ok} 个汉化光影包：\n${generated.join("\n")}`);
+      if (ok > 0) notifyExport(`已生成 ${ok} 个汉化光影包`, generated);
       if (skipped > 0)
         message.warning(`${skipped} 个光影包没有可导出的译文（请先翻译，或检查条目勾选状态）`);
       if (ok === 0 && skipped === 0)
@@ -745,7 +860,7 @@ function App() {
           message.error(`「${it.name}」导出失败：${String(e)}`);
         }
       }
-      if (ok > 0) message.success(`已生成 ${ok} 个资源包：\n${generated.join("\n")}`);
+      if (ok > 0) notifyExport(`已生成 ${ok} 个资源包`, generated);
       if (skipped > 0)
         message.warning(`${skipped} 个资源包没有可导出的译文（请先翻译，或检查条目勾选状态）`);
       if (ok === 0 && skipped === 0)
@@ -785,7 +900,7 @@ function App() {
     }));
     try {
       const path = await api.exportResourcePackMulti(dir, bundles, packFormat);
-      message.success(`已导出合并汉化资源包（${checked.length} 个模组）：${path}`);
+      notifyExport(`已导出合并汉化资源包（${checked.length} 个模组）`, [path]);
       setExportSettingsOpen(false);
       setExportOpen(false);
     } catch (e) {
@@ -827,7 +942,7 @@ function App() {
       }
     }
     if (ok > 0) {
-      message.success(`已生成 ${ok} 个汉化 jar：\n${generated.join("\n")}`);
+      if (ok > 0) notifyExport(`已生成 ${ok} 个汉化 jar`, generated);
       setExportOpen(false);
     } else {
       message.warning("没有可导出的译文（请先翻译，或检查条目勾选状态）");
@@ -962,11 +1077,22 @@ function App() {
                     size="small"
                     style={{ width: 320 }}
                     status={paused ? "active" : undefined}
-                    format={() =>
-                      paused
+                    format={() => {
+                      const elapsed = (Date.now() - translateStartRef.current) / 1000;
+                      const rate =
+                        elapsed > 1 && progress.doneCount > 0
+                          ? progress.doneCount / elapsed
+                          : 0;
+                      const remain =
+                        rate > 0 ? (progress.totalCount - progress.doneCount) / rate : 0;
+                      const remainText =
+                        remain > 0
+                          ? ` 剩余约 ${remain < 60 ? `${Math.ceil(remain)}s` : `${Math.floor(remain / 60)}m${Math.ceil(remain % 60)}s`}`
+                          : "";
+                      return paused
                         ? `已暂停 ${progress.doneCount}/${progress.totalCount}`
-                        : `${progress.doneCount}/${progress.totalCount}`
-                    }
+                        : `${progress.doneCount}/${progress.totalCount}${remainText}`;
+                    }}
                   />
                 </Space>
               )}
@@ -1067,6 +1193,130 @@ function App() {
         onClose={() => setSettingsOpen(false)}
         onSaved={setSettings}
       />
+
+      {/* 提取到的术语：弹窗勾选加入用户术语表（不阻塞翻译） */}
+      <Modal
+        title="提取到的术语"
+        open={!!extractedGlossary}
+        onCancel={() => setExtractedGlossary(null)}
+        onOk={async () => {
+          if (!extractedGlossary || !settings) return;
+          const checkedSet = new Set(extractedChecked);
+          const selected = extractedGlossary.filter(([en]) => checkedSet.has(en));
+          if (selected.length === 0) {
+            message.info("未选择任何术语");
+            return;
+          }
+          const next = {
+            ...settings,
+            userGlossary: [...(settings.userGlossary ?? []), ...selected],
+          };
+          try {
+            await api.saveSettings(next);
+            setSettings(next);
+            message.success(`已加入 ${selected.length} 条术语到用户术语表`);
+          } catch (e) {
+            message.error(String(e));
+          }
+          setExtractedGlossary(null);
+        }}
+        okText="加入用户术语表"
+        cancelText="仅本次使用"
+        width={520}
+      >
+        <Typography.Paragraph type="secondary">
+          以下术语已自动提取并用于本次翻译。勾选可**加入用户术语表**（全局生效，后续翻译统一译名）；不勾选的仅本次使用：
+        </Typography.Paragraph>
+        <div style={{ maxHeight: 300, overflow: "auto", border: "1px solid #F0F2F5", borderRadius: 8, padding: 8 }}>
+          {extractedGlossary?.map(([en, zh]) => (
+            <div
+              key={en}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "4px 0",
+                borderBottom: "1px solid #F5F6F8",
+              }}
+            >
+              <Checkbox
+                checked={extractedChecked.includes(en)}
+                onChange={(e) =>
+                  setExtractedChecked((prev) =>
+                    e.target.checked
+                      ? [...prev, en]
+                      : prev.filter((x) => x !== en),
+                  )
+                }
+              />
+              <Typography.Text code style={{ flex: 1 }}>{en}</Typography.Text>
+              <Typography.Text>→ {zh}</Typography.Text>
+            </div>
+          ))}
+        </div>
+      </Modal>
+
+      {/* 术语表建议：翻译完成后一次性弹出，勾选加入术语表 */}
+      <Modal
+        title="术语表建议"
+        open={!!glossarySuggest}
+        onCancel={() => setGlossarySuggest(null)}
+        onOk={async () => {
+          if (!glossarySuggest || !settings) return;
+          const checkedSet = new Set(suggestChecked);
+          const selected = glossarySuggest.filter(([en]) => checkedSet.has(en));
+          if (selected.length === 0) {
+            message.info("未选择任何术语");
+            return;
+          }
+          const next = {
+            ...settings,
+            userGlossary: [...(settings.userGlossary ?? []), ...selected],
+          };
+          try {
+            await api.saveSettings(next);
+            setSettings(next);
+            message.success(`已加入 ${selected.length} 条术语`);
+          } catch (e) {
+            message.error(String(e));
+          }
+          setGlossarySuggest(null);
+        }}
+        okText="加入术语表"
+        cancelText="暂不"
+        width={520}
+      >
+        <Typography.Paragraph type="secondary">
+          以下高频词汇在本次翻译中出现多次，加入术语表可让后续翻译译名更统一（可取消不需要的）：
+        </Typography.Paragraph>
+        <div style={{ maxHeight: 320, overflow: "auto", border: "1px solid #F0F2F5", borderRadius: 8, padding: 8 }}>
+          {glossarySuggest?.map(([en, zh]) => (
+            <div
+              key={en}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "4px 0",
+                borderBottom: "1px solid #F5F6F8",
+              }}
+            >
+              <Checkbox
+                checked={suggestChecked.includes(en)}
+                onChange={(e) =>
+                  setSuggestChecked((prev) =>
+                    e.target.checked
+                      ? [...prev, en]
+                      : prev.filter((x) => x !== en),
+                  )
+                }
+              />
+              <Typography.Text code style={{ flex: 1 }}>{en}</Typography.Text>
+              <Typography.Text>→ {zh}</Typography.Text>
+            </div>
+          ))}
+        </div>
+      </Modal>
     </Layout>
   );
 }

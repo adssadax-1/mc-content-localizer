@@ -79,7 +79,21 @@ export interface TranslateContext {
   loader: string;
   /** 内容包类型：mod / shader / resourcepack（决定翻译提示词） */
   packType: "mod" | "shader" | "resourcepack";
+  /** 用户自定义可编辑提示词段（null = 用默认） */
+  customPrompt: string | null;
   userGlossary: [string, string][];
+}
+
+/** 提示词模板（供自定义提示词编辑器展示） */
+export interface PromptTemplate {
+  editableDefault: string;
+  coreRules: string;
+}
+
+/** 更新信息（静默检查 GitHub Release） */
+export interface UpdateInfo {
+  latestVersion: string;
+  url: string;
 }
 
 export interface TranslatedItem {
@@ -116,6 +130,8 @@ export interface Settings {
   extractGlossary: boolean;
   /** 多线程翻译配置（实验性） */
   threading: ThreadingConfig;
+  /** 自定义提示词（key: mod/shader/resourcepack → 用户自定义的可编辑段） */
+  customPrompts: Record<string, string>;
 }
 
 /** 多线程翻译配置（实验性） */

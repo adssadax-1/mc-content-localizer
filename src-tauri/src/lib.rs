@@ -36,6 +36,8 @@ pub fn run() {
             commands::parse_shader_pack,
             commands::parse_resource_pack,
             commands::detect_pack_type,
+            commands::get_prompt_template,
+            commands::check_update,
             commands::export_shader_zh,
             commands::export_resource_pack_desc,
         ])
