@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Alert,
   Button,
   Checkbox,
   Drawer,
@@ -12,6 +13,7 @@ import {
   Radio,
   Space,
   Tag,
+  Tooltip,
   Typography,
 } from "antd";
 import {
@@ -118,6 +120,12 @@ interface PackCardProps {
   onToggleAllSelected: (packKey: string, selected: boolean) => void;
   onToggleManySelected: (packKey: string, keys: string[], selected: boolean) => void;
   onResize: (key: string, e: React.MouseEvent) => void;
+  /** 手动深度扫描 */
+  onDeepScan?: (key: string) => void;
+  /** 切换深度扫描分组勾选 */
+  onToggleDeepGroup?: (packKey: string, label: string, checked: boolean) => void;
+  /** 正在深度扫描的卡片 key */
+  deepScanningKey?: string | null;
 }
 
 /** 单个内容包卡片（memo 化：只有自己的数据/回调变化才重渲染） */
@@ -133,6 +141,9 @@ const PackCard = memo(function PackCard({
   onToggleAllSelected,
   onToggleManySelected,
   onResize,
+  onDeepScan,
+  onToggleDeepGroup,
+  deepScanningKey,
 }: PackCardProps) {
   const total = item.entries.length;
   const translated = item.entries.filter((e) => e.translation).length;
@@ -176,9 +187,45 @@ const PackCard = memo(function PackCard({
         <Typography.Text type="secondary" style={{ marginLeft: "auto" }}>
           {translated}/{total} 条已翻译
         </Typography.Text>
+        {item.kind === "mod" && onDeepScan && (
+          <Tooltip title="若认为文本解析不全，可点击进行模组深度扫描（扫描全部文本文件，耗时略增；已编译的 .class 代码内文本暂不支持）">
+            <Button
+              size="small"
+              type={item.deepScanGroups ? "default" : "dashed"}
+              loading={deepScanningKey === item.key}
+              onClick={(e) => {
+                e.stopPropagation();
+                onDeepScan(item.key);
+              }}
+            >
+              {item.deepScanGroups
+                ? `模组深度扫描 ${item.deepScanGroups.reduce((a, g) => a + g.count, 0)} 条`
+                : "模组深度扫描"}
+            </Button>
+          </Tooltip>
+        )}
       </div>
       {item.expanded && (
         <div style={{ padding: "0 12px 12px" }}>
+          {item.deepScanGroups && item.deepScanGroups.length > 0 && (
+            <Space style={{ marginBottom: 6 }} wrap align="center">
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                模组深度扫描文本（默认未勾选，勾选后才参与翻译/导出）：
+              </Typography.Text>
+              {item.deepScanGroups.map((g) => (
+                <Checkbox
+                  key={g.label}
+                  checked={g.checked}
+                  onChange={(e) =>
+                    onToggleDeepGroup?.(item.key, g.label, e.target.checked)
+                  }
+                  style={{ fontSize: 12 }}
+                >
+                  {g.label}({g.count})
+                </Checkbox>
+              ))}
+            </Space>
+          )}
           <div
             style={{
               height: item.height,
@@ -226,6 +273,14 @@ const PackCard = memo(function PackCard({
   );
 });
 
+const DEEP_PREFIX = "模组深度扫描·";
+
+/** 判断条目是否为深度扫描条目，返回其分组名 */
+function deepEntryGroup(e: LangEntry): string | null {
+  const n = e.notes?.[0];
+  return n?.startsWith(DEEP_PREFIX) ? n.slice(DEEP_PREFIX.length) : null;
+}
+
 /** 队列中的单个内容包（模组 / 光影包 / 资源包统一结构） */
 interface PackItem {
   key: string;
@@ -237,6 +292,8 @@ interface PackItem {
   checked: boolean;
   height: number;
   entries: LangEntry[];
+  /** 深度扫描分组状态（{label,count,checked}） */
+  deepScanGroups?: { label: string; count: number; checked: boolean }[];
   // 模组额外信息
   modFile?: ModFile;
   langFormat?: LangFormat;
@@ -268,6 +325,9 @@ function App() {
   const [packMode, setPackMode] = useState<"auto" | "custom">("auto");
   const [customPackFormat, setCustomPackFormat] = useState(15);
   const [cancelRequested, setCancelRequested] = useState(false);
+  const [deepScanningKey, setDeepScanningKey] = useState<string | null>(null);
+  const [exportRiskOpen, setExportRiskOpen] = useState(false);
+  const [exportRiskChecked, setExportRiskChecked] = useState<PackItem[]>([]);
   const [paused, setPaused] = useState(false);
 
   // 初始化：加载设置（兼容旧配置：补齐 threading / customPrompts 默认值）
@@ -283,6 +343,7 @@ function App() {
             requestIntervalSec: 4,
           },
           customPrompts: s.customPrompts ?? {},
+          deepScan: s.deepScan ?? false,
         }),
       )
       .catch(() => setSettings(null));
@@ -467,6 +528,22 @@ function App() {
   }
 
   /** 导入文件到队列 */
+  /** 执行深度扫描：合并条目（默认不勾选）+ 设置分组状态；返回发现条数 */
+  async function applyDeepScan(item: PackItem): Promise<number> {
+    const res = await api.deepScanJar(item.sourcePath, item.modFile?.modid ?? "mod");
+    if (res.entries.length === 0) return 0;
+    item.entries = [
+      ...item.entries,
+      ...res.entries.map((e) => ({ ...e, selected: false as const })),
+    ];
+    item.deepScanGroups = res.groups.map((g) => ({
+      label: g.label,
+      count: g.count,
+      checked: g.defaultChecked ?? false,
+    }));
+    return res.entries.length;
+  }
+
   async function addFiles(paths: string[]) {
     const files = paths.filter(
       (p) => p.toLowerCase().endsWith(".jar") || p.toLowerCase().endsWith(".zip"),
@@ -493,10 +570,60 @@ function App() {
         message.error(`「${p.split(/[\\/]/).pop()}」解析失败：${String(e)}`);
       }
     }
+    // 自动深度扫描（设置开关开启时）：普通解析为空的模组
+    let deepFound = 0;
+    if (settings?.deepScan) {
+      for (const it of added) {
+        if (it.kind === "mod" && it.entries.length === 0) {
+          try {
+            deepFound += await applyDeepScan(it);
+          } catch {
+            /* 强扫失败不阻断 */
+          }
+        }
+      }
+    }
     setQueue((prev) => [...prev, ...added]);
     setParsing(false);
     if (added.length > 0) {
-      message.success(`已导入 ${added.length} 个内容包`);
+      message.success(
+        `已导入 ${added.length} 个内容包${deepFound > 0 ? `（模组深度扫描发现 ${deepFound} 条内嵌文本，默认未勾选）` : ""}`,
+      );
+    }
+    // 未开开关 + 普通解析为空 → 引导启用深度扫描
+    const emptyMods = added.filter(
+      (it) => it.kind === "mod" && it.entries.length === 0,
+    );
+    if (emptyMods.length > 0 && !settings?.deepScan && settings) {
+      Modal.confirm({
+        title: "未发现常规可翻译文本",
+        content: `${emptyMods.length} 个模组在常规位置（语言文件）未找到文本，可能将文本写在内嵌文件（成就/配置/嵌套 jar）中。是否启用模组深度扫描重试？也可在模组卡片上手动点击「模组深度扫描」。`,
+        okText: "启用并重新扫描",
+        cancelText: "暂不",
+        onOk: async () => {
+          const next = { ...settings, deepScan: true };
+          try {
+            await api.saveSettings(next);
+            setSettings(next);
+          } catch {
+            /* 忽略 */
+          }
+          let found = 0;
+          for (const it of emptyMods) {
+            try {
+              found += await applyDeepScan(it);
+            } catch {
+              /* 忽略 */
+            }
+          }
+          setQueue((prev) => [...prev]);
+          if (found > 0) {
+            message.success(`模组深度扫描发现 ${found} 条内嵌文本（默认未勾选，可在卡片上勾选组）`);
+          } else {
+            message.info("未发现额外可翻译文本（可能无内嵌文本，或文本在 .class 代码中）");
+          }
+        },
+      });
     }
     if (zhHits > 0) {
       Modal.confirm({
@@ -792,6 +919,45 @@ function App() {
     });
   }
 
+  /** 卡片「深度扫描」按钮：手动触发 */
+  const runDeepScanFromCard = useCallback(
+    async (key: string) => {
+      const item = queue.find((it) => it.key === key);
+      if (!item || item.kind !== "mod") return;
+      setDeepScanningKey(key);
+      try {
+        const n = await applyDeepScan(item);
+        setQueue((prev) => prev.map((it) => (it.key === key ? { ...item } : it)));
+        if (n > 0) {
+          message.success(`模组深度扫描发现 ${n} 条内嵌文本（默认未勾选，可在卡片上勾选分组）`);
+        } else {
+          message.info("未发现额外可翻译文本（可能无内嵌文本，或文本在 .class 代码中）");
+        }
+      } catch (e) {
+        message.error(`模组深度扫描失败：${String(e)}`);
+      }
+      setDeepScanningKey(null);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [queue],
+  );
+
+  /** 切换深度扫描分组勾选（勾选组 → 组内条目参与翻译/导出） */
+  const toggleDeepGroup = useCallback(
+    (packKey: string, label: string, checked: boolean) => {
+      patchPack(packKey, (it) => ({
+        ...it,
+        deepScanGroups: it.deepScanGroups?.map((g) =>
+          g.label === label ? { ...g, checked } : g,
+        ),
+        entries: it.entries.map((e) =>
+          deepEntryGroup(e) === label ? { ...e, selected: checked } : e,
+        ),
+      }));
+    },
+    [],
+  );
+
   /** 导出（按类型分流） */
   async function handleExport() {
     const checked = queue.filter((it) => it.checked);
@@ -911,6 +1077,20 @@ function App() {
   async function handleExportJar() {
     const checked = queue.filter((it) => it.checked && it.kind === "mod");
     if (checked.length === 0) return;
+    // 含深度扫描条目（已勾选）→ 弹风险确认
+    const hasDeep = checked.some((it) =>
+      it.entries.some((e) => (e.selected ?? false) && deepEntryGroup(e)),
+    );
+    if (hasDeep) {
+      setExportRiskChecked(checked);
+      setExportRiskOpen(true);
+      return;
+    }
+    await doExportJar(checked, true);
+  }
+
+  /** 导出汉化 jar（skipDeep = 跳过深度扫描内嵌文本，避免影响模组运行） */
+  async function doExportJar(checked: PackItem[], skipDeep: boolean) {
     const dir = asDir(await open({
       directory: true,
       title: `选择目录（将生成 ${checked.length} 个汉化 jar，不覆盖原文件）`,
@@ -919,9 +1099,10 @@ function App() {
     let ok = 0;
     const generated: string[] = [];
     for (const it of checked) {
-      const translated = it.entries.filter(
-        (e) => (e.selected ?? true) && e.translation,
-      );
+      const translated = it.entries.filter((e) => {
+        if (skipDeep && deepEntryGroup(e)) return false;
+        return (e.selected ?? true) && e.translation;
+      });
       if (translated.length === 0) {
         message.warning(`「${it.name}」没有译文，跳过`);
         continue;
@@ -942,7 +1123,7 @@ function App() {
       }
     }
     if (ok > 0) {
-      if (ok > 0) notifyExport(`已生成 ${ok} 个汉化 jar`, generated);
+      notifyExport(`已生成 ${ok} 个汉化 jar`, generated);
       setExportOpen(false);
     } else {
       message.warning("没有可导出的译文（请先翻译，或检查条目勾选状态）");
@@ -1113,6 +1294,9 @@ function App() {
                     onToggleAllSelected={toggleAllSelected}
                     onToggleManySelected={toggleManySelected}
                     onResize={startResize}
+                    onDeepScan={(k) => void runDeepScanFromCard(k)}
+                    onToggleDeepGroup={toggleDeepGroup}
+                    deepScanningKey={deepScanningKey}
                   />
                 ))}
               </div>
@@ -1254,6 +1438,50 @@ function App() {
             </div>
           ))}
         </div>
+      </Modal>
+
+      {/* 导出 jar 风险提示：含深度扫描内嵌文本 */}
+      <Modal
+        title="导出风险提示"
+        open={exportRiskOpen}
+        onCancel={() => setExportRiskOpen(false)}
+        footer={null}
+        width={520}
+      >
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="该模组包含深度扫描发现的内嵌文本（非语言文件，直接写在 json/配置文件中）。修改这些字段可能影响模组运行。"
+        />
+        <Typography.Paragraph type="secondary" style={{ fontSize: 13 }}>
+          已勾选 {exportRiskChecked.length} 个模组的深度扫描文本参与导出。请选择处理方式：
+        </Typography.Paragraph>
+        <Space direction="vertical" style={{ width: "100%" }}>
+          <Button
+            block
+            type="primary"
+            onClick={() => {
+              setExportRiskOpen(false);
+              void doExportJar(exportRiskChecked, true);
+            }}
+          >
+            跳过深度扫描文本，仅导出语言文件（推荐）
+          </Button>
+          <Button
+            block
+            danger
+            onClick={() => {
+              setExportRiskOpen(false);
+              void doExportJar(exportRiskChecked, false);
+            }}
+          >
+            仍导出全部（含内嵌文本，不推荐）
+          </Button>
+          <Button block onClick={() => setExportRiskOpen(false)}>
+            取消
+          </Button>
+        </Space>
       </Modal>
 
       {/* 术语表建议：翻译完成后一次性弹出，勾选加入术语表 */}

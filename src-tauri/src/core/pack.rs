@@ -73,6 +73,7 @@ pub fn detect_pack_type(path: &Path) -> Result<PackType, PackError> {
     let mut has_shader_props = false;
     let mut has_shader_lang = false;
     let mut has_mcmeta = false;
+    let mut has_mod_meta = false;
     let mut has_jar_assets = false;
 
     for i in 0..archive.len() {
@@ -83,6 +84,12 @@ pub fn detect_pack_type(path: &Path) -> Result<PackType, PackError> {
             has_shader_lang = true;
         } else if name == "pack.mcmeta" {
             has_mcmeta = true;
+        } else if name == "fabric.mod.json"
+            || name == "quilt.mod.json"
+            || name == "META-INF/mods.toml"
+            || name == "META-INF/neoforge.mods.toml"
+        {
+            has_mod_meta = true;
         } else if name.starts_with("META-INF/")
             || (name.starts_with("assets/") && name.contains("/lang/") && name.ends_with(".json"))
         {
@@ -90,9 +97,12 @@ pub fn detect_pack_type(path: &Path) -> Result<PackType, PackError> {
         }
     }
 
-    // 优先级：光影 > 资源包 > 模组（混搭包按更具体的 shaders 判定）
+    // 优先级：光影 > 模组（有 mod 元数据，即使带 pack.mcmeta 也是模组）> 资源包 > 模组（assets lang）
     if has_shader_props || has_shader_lang {
         return Ok(PackType::Shader);
+    }
+    if has_mod_meta {
+        return Ok(PackType::Mod);
     }
     if has_mcmeta {
         return Ok(PackType::ResourcePack);

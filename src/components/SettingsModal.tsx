@@ -49,10 +49,12 @@ interface FormValues {
   threadingEnabled?: boolean;
   threadCount?: number;
   requestIntervalSec?: number;
+  /** 深度文本扫描 */
+  deepScan?: boolean;
 }
 
 /** 当前版本号（与 package.json / tauri.conf.json 一致） */
-const CURRENT_VERSION = "1.1.0";
+const CURRENT_VERSION = "1.2.0";
 
 export function SettingsModal({ open, settings, onClose, onSaved }: Props) {  const [form] = Form.useForm<FormValues>();
   const provider = Form.useWatch("provider", form);
@@ -96,6 +98,7 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {  co
         batchSize: settings.batchSize,
         extractGlossary: settings.extractGlossary,
         threadingEnabled: settings.threading?.enabled ?? false,
+        deepScan: settings.deepScan ?? false,
         threadCount: settings.threading?.threadCount ?? 2,
         requestIntervalSec: settings.threading?.requestIntervalSec ?? 4,
         userGlossary: settings.userGlossary.length ? settings.userGlossary : [],
@@ -190,6 +193,7 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {  co
         threadCount: Math.min(Math.max(v.threadCount ?? 1, 1), 8),
         requestIntervalSec: Math.min(Math.max(v.requestIntervalSec ?? 4, 1), 60),
       },
+      deepScan: v.deepScan ?? false,
       customPrompts: settings?.customPrompts ?? {},
     };
     try {
@@ -352,6 +356,15 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {  co
           >
             <Switch />
           </Form.Item>
+          <Form.Item
+            name="deepScan"
+            label="模组深度扫描"
+            valuePropName="checked"
+            style={{ marginBottom: 8 }}
+            tooltip="解析模组中普通扫描可能遗漏的内嵌文本（配置文件/成就/手册/嵌套 jar 等）。已编译的 .class 代码内文本暂不支持。"
+          >
+            <Switch />
+          </Form.Item>
         </Space>
 
         <Divider style={{ margin: "8px 0" }} />
@@ -476,7 +489,7 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {  co
         {/* 关于：版本 / 开源免费 / GitHub */}
         <Divider style={{ margin: "16px 0 8px" }} />
         <div style={{ textAlign: "center" }}>
-          <Typography.Text strong>MC 汉化工坊 v1.1.0</Typography.Text>
+          <Typography.Text strong>MC 汉化工坊 v1.2.0</Typography.Text>
           <br />
           <Typography.Text type="secondary">
             💝 完全开源免费 · MIT 协议

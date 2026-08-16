@@ -96,6 +96,20 @@ export interface UpdateInfo {
   url: string;
 }
 
+/** 深度扫描分组（前端分组勾选视图） */
+export interface DeepGroup {
+  key: string;
+  label: string;
+  count: number;
+  defaultChecked: boolean;
+}
+
+/** 深度扫描结果 */
+export interface DeepScanResult {
+  entries: LangEntry[];
+  groups: DeepGroup[];
+}
+
 export interface TranslatedItem {
   key: string;
   translation: string;
@@ -132,6 +146,8 @@ export interface Settings {
   threading: ThreadingConfig;
   /** 自定义提示词（key: mod/shader/resourcepack → 用户自定义的可编辑段） */
   customPrompts: Record<string, string>;
+  /** 深度文本扫描：普通解析为空时自动启用强化扫描 */
+  deepScan: boolean;
 }
 
 /** 多线程翻译配置（实验性） */

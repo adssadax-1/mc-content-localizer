@@ -38,6 +38,7 @@ pub fn run() {
             commands::detect_pack_type,
             commands::get_prompt_template,
             commands::check_update,
+            commands::deep_scan_jar,
             commands::export_shader_zh,
             commands::export_resource_pack_desc,
         ])

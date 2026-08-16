@@ -370,6 +370,16 @@ pub fn get_prompt_template(
     Ok(crate::translate::pipeline::prompt_template(&pack_type))
 }
 
+/// 深度扫描 jar 内的所有可能文本（含嵌套 jar 递归）
+#[tauri::command]
+pub fn deep_scan_jar(
+    path: String,
+    modid: String,
+) -> Result<crate::core::deep_scan::DeepScanResult, String> {
+    crate::core::deep_scan::deep_scan_jar(std::path::Path::new(&path), &modid)
+        .map_err(|e| e.to_string())
+}
+
 /// 扫描 zip 判定内容包类型（mod/shader/resourcepack）
 #[tauri::command]
 pub fn detect_pack_type(path: String) -> Result<crate::core::pack::PackType, String> {

@@ -202,9 +202,28 @@ pub fn parse_jar(path: &Path) -> Result<ModFile, JarError> {
     )?;
 
     if entries.is_empty() {
-        return Err(JarError::NotAMod {
-            lang_count,
-            json_count,
+        // 有模组元数据但没有任何可翻译文本 → 返回空条目（交由深度扫描流程处理）
+        // 完全没有元数据才报错
+        if meta.modid.is_none() && meta.name.is_none() {
+            return Err(JarError::NotAMod {
+                lang_count,
+                json_count,
+            });
+        }
+        return Ok(ModFile {
+            file_name,
+            mod_name: meta
+                .name
+                .clone()
+                .unwrap_or_else(|| meta.modid.clone().unwrap_or_default()),
+            modid: meta.modid.clone().unwrap_or("unknown".to_string()),
+            loader: meta.loader,
+            version: meta.version,
+            mc_version: meta.mc_version,
+            lang_format,
+            has_zh: false,
+            zh_count: 0,
+            entries: Vec::new(),
         });
     }
 

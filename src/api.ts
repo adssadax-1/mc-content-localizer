@@ -10,6 +10,7 @@ import type {
   ProviderConfig,
   PackType,
   PromptTemplate,
+  DeepScanResult,
   ResourcePackBundle,
   ResourcePackInfo,
   Settings,
@@ -76,6 +77,10 @@ export const api = {
   detectPackType: (path: string) => invoke<PackType>("detect_pack_type", { path }),
   /** 静默检查 GitHub 最新版本（网络失败返回 null，不打扰） */
   checkUpdate: () => invoke<UpdateInfo | null>("check_update"),
+
+  /** 深度扫描 jar 内所有可能文本（含嵌套 jar 递归） */
+  deepScanJar: (path: string, modid: string) =>
+    invoke<DeepScanResult>("deep_scan_jar", { path, modid }),
 
   /** 获取某类型提示词模板（默认可编辑段 + 核心段） */
   getPromptTemplate: (packType: string) =>

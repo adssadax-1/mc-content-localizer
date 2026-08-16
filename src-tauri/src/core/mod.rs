@@ -1,3 +1,4 @@
+pub mod deep_scan;
 pub mod jar;
 pub mod json_lang;
 pub mod lang;
