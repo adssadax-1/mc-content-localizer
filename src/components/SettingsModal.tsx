@@ -54,7 +54,7 @@ interface FormValues {
 }
 
 /** 当前版本号（与 package.json / tauri.conf.json 一致） */
-const CURRENT_VERSION = "1.2.0";
+const CURRENT_VERSION = "1.3.0";
 
 export function SettingsModal({ open, settings, onClose, onSaved }: Props) {  const [form] = Form.useForm<FormValues>();
   const provider = Form.useWatch("provider", form);
@@ -489,7 +489,7 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {  co
         {/* 关于：版本 / 开源免费 / GitHub */}
         <Divider style={{ margin: "16px 0 8px" }} />
         <div style={{ textAlign: "center" }}>
-          <Typography.Text strong>MC 汉化工坊 v1.2.0</Typography.Text>
+          <Typography.Text strong>MC 汉化工坊 v1.3.0</Typography.Text>
           <br />
           <Typography.Text type="secondary">
             💝 完全开源免费 · MIT 协议

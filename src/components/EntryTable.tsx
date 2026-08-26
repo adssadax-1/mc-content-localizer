@@ -72,6 +72,93 @@ function McFormatPreview({ text }: { text: string }) {
   );
 }
 
+/**
+ * 可编辑译文输入框：本地 state 受控 + 防抖提交。
+ *
+ * 一处改动同时修复三类问题：
+ * 1) 长按退格卡顿：打字/删除/粘贴只更新本地 state，不触发全局 queue 重渲染，
+ *    避免整表随每个按键反复重渲染而"视觉卡顿"（单帧渲染虽快，但长按自动重复
+ *    约 30Hz 的连续重渲染会抢占输入绘制，造成输入滞后感）。
+ * 2) 空条目右键粘贴回顶 / 3) 编辑删除至空列表跳顶：因不再逐键提交全局 state，
+ *    编辑过程中 entries/dataSource 引用不变、虚拟列表不会因逐键重渲染而重置
+ *    scrollTop；清空按钮(×)显隐基于本地值，避免"变空/变非空"时行高变化引发滚动跳动。
+ */
+function TranslationInput({
+  value,
+  onChange,
+  onClear,
+}: {
+  value: string | null;
+  onChange: (v: string) => void;
+  onClear?: () => void;
+}) {
+  const [local, setLocal] = useState(value ?? "");
+  const timerRef = useRef<number | null>(null);
+  const focusedRef = useRef(false);
+
+  // 外部值变化（AI 翻译回填 / 列表重置 / 清空）时同步本地显示；
+  // 用户正在该框输入时不覆盖，避免打断输入。
+  useEffect(() => {
+    if (!focusedRef.current) {
+      setLocal(value ?? "");
+    }
+  }, [value]);
+
+  useEffect(
+    () => () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    },
+    [],
+  );
+
+  const commit = (v: string) => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(() => onChange(v), 250);
+  };
+
+  const input = (
+    <Input
+      value={local}
+      placeholder="（未翻译）"
+      onFocus={() => {
+        focusedRef.current = true;
+      }}
+      onBlur={() => {
+        focusedRef.current = false;
+      }}
+      onChange={(e) => {
+        const v = e.target.value;
+        setLocal(v);
+        commit(v);
+      }}
+      suffix={
+        (local || value) && onClear ? (
+          <Tooltip title="清除此条译文，重新加入汉化队列">
+            <CloseCircleOutlined
+              style={{ cursor: "pointer", color: "#ff4d4f" }}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (timerRef.current) clearTimeout(timerRef.current);
+                setLocal("");
+                onClear();
+              }}
+            />
+          </Tooltip>
+        ) : undefined
+      }
+    />
+  );
+
+  const hasFormat = local.includes("§");
+  return hasFormat ? (
+    <Tooltip title={<McFormatPreview text={local} />} placement="topLeft">
+      {input}
+    </Tooltip>
+  ) : (
+    input
+  );
+}
+
 /** 翻译主表格：汉化勾选 / 状态 / key / 原文 / 可编辑译文 / 备注 */
 export const EntryTable = memo(function EntryTable({
   entries,
@@ -111,6 +198,8 @@ export const EntryTable = memo(function EntryTable({
   const suppressClickRef = useRef(false);
   const autoScrollRafRef = useRef(0);
   const lastMouseYRef = useRef(0);
+  // 记录行内 mousedown 起点（用于区分"点击打开详情"与"拖拽/文本选择"）
+  const downInfoRef = useRef<{ x: number; y: number; inEditable: boolean } | null>(null);
 
   /** 清除全部行高亮 */
   const clearHighlight = useCallback(() => {
@@ -300,45 +389,15 @@ export const EntryTable = memo(function EntryTable({
       title: "译文 (zh_cn)",
       dataIndex: "translation",
       width: 340,
-      render: (_, record) => {
-        const hasFormat = (record.translation ?? "").includes("§");
-        const input = (
-          <Input
-            value={record.translation ?? ""}
-            placeholder="（未翻译）"
-            onChange={(e) => onEdit(record.key, e.target.value)}
-            suffix={
-              record.translation && onClear ? (
-                <Tooltip title="清除此条译文，重新加入汉化队列">
-                  <CloseCircleOutlined
-                    style={{ cursor: "pointer", color: "#ff4d4f" }}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onClear(record.key);
-                    }}
-                  />
-                </Tooltip>
-              ) : undefined
-            }
+      render: (_, record) => (
+        <span onClick={(e) => e.stopPropagation()}>
+          <TranslationInput
+            value={record.translation}
+            onChange={(v) => onEdit(record.key, v)}
+            onClear={onClear ? () => onClear(record.key) : undefined}
           />
-        );
-        return (
-          <span onClick={(e) => e.stopPropagation()}>
-            {hasFormat ? (
-              <Tooltip
-                title={
-                  <McFormatPreview text={record.translation ?? ""} />
-                }
-                placement="topLeft"
-              >
-                {input}
-              </Tooltip>
-            ) : (
-              input
-            )}
-          </span>
-        );
-      },
+        </span>
+      ),
     },
     {
       title: "备注",
@@ -393,12 +452,32 @@ export const EntryTable = memo(function EntryTable({
           onRow={(record) => ({
             // record 传给行组件供 memo 比较（渲染时被丢弃）
             record,
-            onClick: () => {
+            onMouseDown: (e) => {
+              const t = e.target as HTMLElement;
+              downInfoRef.current = {
+                x: e.clientX,
+                y: e.clientY,
+                // 起点在输入框/按钮/复选框等可编辑控件内 → 视为编辑操作，不弹详情
+                inEditable: !!t.closest(
+                  "input, textarea, .ant-input, .ant-btn, .ant-checkbox, .ant-select",
+                ),
+              };
+            },
+            onClick: (e) => {
               // 拖动框选结束时不弹详情；普通点击照常弹出上下文
               if (suppressClickRef.current) {
                 suppressClickRef.current = false;
                 return;
               }
+              const d = downInfoRef.current;
+              downInfoRef.current = null;
+              // 文本选择中（如在框内选词后松手）→ 不打开详情
+              const sel = window.getSelection?.();
+              if (sel && sel.toString().length > 0) return;
+              // 起点在可编辑控件内（编辑译文）→ 不打开详情
+              if (d && d.inEditable) return;
+              // 按下到松开位移过大（拖拽/选择衍生到外面）→ 不打开详情
+              if (d && Math.hypot(e.clientX - d.x, e.clientY - d.y) > 6) return;
               onSelect(record.key);
             },
             style: { cursor: "pointer", userSelect: "none" },

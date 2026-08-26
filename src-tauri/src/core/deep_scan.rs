@@ -165,7 +165,10 @@ fn walk_json(v: &serde_json::Value, path: &str, name: &str, out: &mut Vec<ScanIt
 }
 
 fn scan_file(name: &str, buf: &[u8], out: &mut Vec<ScanItem>) {
-    if name.ends_with(".json") {
+    if name.ends_with(".json")
+        || name.ends_with(".mcmeta")
+        || name.ends_with(".bbmodel")
+    {
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(buf) {
             walk_json(&v, "", name, out);
         }
@@ -182,7 +185,7 @@ fn scan_file(name: &str, buf: &[u8], out: &mut Vec<ScanItem>) {
                 consider(&v, &format!("line:{}", k), name, out);
             }
         }
-    } else if [".toml", ".cfg", ".conf", ".yaml", ".yml", ".txt", ".md"]
+    } else if [".toml", ".cfg", ".conf", ".ini", ".yaml", ".yml", ".txt", ".md"]
         .iter()
         .any(|s| name.ends_with(s))
     {
@@ -409,5 +412,47 @@ step one
             "嵌套 jar 内文本应被扫到"
         );
         assert!(res.groups.iter().any(|g| g.key == "nested"));
+    }
+
+    #[test]
+    fn scans_ini_mcmeta_bbmodel() {
+        let mut buf: Vec<u8> = Vec::new();
+        build_jar(
+            &mut buf,
+            &[
+                // .ini：键=值，含 [section] 头部与注释，应只取 value
+                (
+                    "config/mod.ini",
+                    b"[General]\n# comment\nDisplayName=Hello World\n",
+                ),
+                // .mcmeta：JSON 结构（如 pack.mcmeta 的描述）
+                (
+                    "pack.mcmeta",
+                    br#"{"pack":{"description":"Ancient Relics Pack"}}"#,
+                ),
+                // .bbmodel：BlockBench 模型 JSON
+                (
+                    "models/block.bbmodel",
+                    br#"{"name":"Magic Cube","elements":[{"name":"base"}]}"#,
+                ),
+            ],
+        );
+        let p = tmp(&buf, "fmts_test.jar");
+        let res = deep_scan_jar(&p, "testmod").unwrap();
+        let _ = std::fs::remove_file(&p);
+
+        let sources: Vec<&str> = res.entries.iter().map(|e| e.source.as_str()).collect();
+        assert!(
+            sources.contains(&"Hello World"),
+            ".ini 的 value 应被扫到"
+        );
+        assert!(
+            sources.contains(&"Ancient Relics Pack"),
+            ".mcmeta 的 JSON 文本应被扫到"
+        );
+        assert!(
+            sources.contains(&"Magic Cube"),
+            ".bbmodel 的 JSON 文本应被扫到"
+        );
     }
 }

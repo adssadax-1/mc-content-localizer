@@ -1,6 +1,6 @@
 [package]
 name = "mc-content-localizer"
-version = "1.2.0"
+version = "1.3.0"
 description = "MC 汉化工坊：Minecraft 模组/光影包/资源包 AI 汉化工具"
 authors = ["you"]
 edition = "2021"
