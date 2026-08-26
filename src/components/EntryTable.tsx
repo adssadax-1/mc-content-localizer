@@ -132,15 +132,26 @@ function TranslationInput({
         commit(v);
       }}
       suffix={
-        (local || value) && onClear ? (
+        onClear ? (
           <Tooltip title="清除此条译文，重新加入汉化队列">
             <CloseCircleOutlined
-              style={{ cursor: "pointer", color: "#ff4d4f" }}
+              style={{
+                cursor: local || value ? "pointer" : "default",
+                color: "#ff4d4f",
+                // 始终保留 suffix 占位（空时隐藏而非移除），避免「空→非空」时
+                // antd 在原生 <input> 与 <span.ant-input-affix-wrapper> 之间切换
+                // 根节点，从而卸载重建聚焦中的输入框、丢失焦点；右键粘贴时浏览器
+                // 会重新聚焦该节点，触发虚拟列表 scrollTop 归零、界面回顶。
+                // Ctrl+V 时输入框本就持有焦点，无此重建/重聚焦过程，故不回顶。
+                display: local || value ? "inline-block" : "none",
+              }}
               onClick={(e) => {
                 e.stopPropagation();
-                if (timerRef.current) clearTimeout(timerRef.current);
-                setLocal("");
-                onClear();
+                if (local || value) {
+                  if (timerRef.current) clearTimeout(timerRef.current);
+                  setLocal("");
+                  onClear();
+                }
               }}
             />
           </Tooltip>
