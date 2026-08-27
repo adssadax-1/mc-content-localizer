@@ -21,6 +21,43 @@ static CANCEL_TRANSLATION: AtomicBool = AtomicBool::new(false);
 /// 翻译暂停标志：置位后翻译循环在批次间等待，直到恢复或取消
 static PAUSE_TRANSLATION: AtomicBool = AtomicBool::new(false);
 
+/// 单条实时翻译结果事件（逐批推送到前端，供实时显示与存储）
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryTranslatedEvent {
+    pub key: String,
+    pub translation: String,
+    pub notes: Vec<String>,
+    /// 结果类型：ok 成功 / empty AI 未返回 / error 翻译失败
+    pub kind: String,
+}
+
+/// 将一批翻译结果推送到前端（实时写入，不等待全部完成）
+fn emit_batch(app: &AppHandle, pack_key: &str, results: &[TranslatedItem]) {
+    let items: Vec<EntryTranslatedEvent> = results
+        .iter()
+        .map(|t| {
+            let kind = if !t.translation.trim().is_empty() {
+                "ok".to_string()
+            } else if t.notes.iter().any(|n| n.starts_with("翻译失败")) {
+                "error".to_string()
+            } else {
+                "empty".to_string()
+            };
+            EntryTranslatedEvent {
+                key: t.key.clone(),
+                translation: t.translation.clone(),
+                notes: t.notes.clone(),
+                kind,
+            }
+        })
+        .collect();
+    let _ = app.emit(
+        "translation-batch",
+        serde_json::json!({ "packKey": pack_key, "items": items }),
+    );
+}
+
 /// 取消当前翻译任务
 #[tauri::command]
 pub fn cancel_translation() {
@@ -54,6 +91,7 @@ pub async fn run_translation(
     config: ProviderConfig,
     ctx: TranslateContext,
     items: Vec<BatchItem>,
+    pack_key: String,
     batch_size: Option<usize>,
     extract_glossary: Option<bool>,
     threading: Option<ThreadingConfig>,
@@ -112,6 +150,7 @@ pub async fn run_translation(
                 break;
             }
             let translated = process_chunk(&provider, &ctx, &glossary, chunk, &diag).await;
+            emit_batch(&app, &pack_key, &translated);
             done += chunk.len();
             results.extend(translated);
             let _ = app.emit(
@@ -153,6 +192,7 @@ pub async fn run_translation(
         let results = results.clone();
         let done_count = done_count.clone();
         let diag = diag.clone();
+        let pack_key = pack_key.clone();
         let total = total;
         let batch_count = batch_count;
         handles.push(tokio::spawn(async move {
@@ -163,6 +203,7 @@ pub async fn run_translation(
                     return;
                 }
                 let translated = process_chunk(&provider, &ctx, &glossary, &chunk, &diag).await;
+                emit_batch(&app, &pack_key, &translated);
                 {
                     let mut lock = results.lock().unwrap();
                     lock.extend(translated);

@@ -6,7 +6,9 @@ export type EntryStatus =
   | "existingZh"
   | "aiTranslated"
   | "userConfirmed"
-  | "placeholderError";
+  | "placeholderError"
+  | "aiEmpty"
+  | "aiFailed";
 
 export type LangFormat = "legacyLang" | "json";
 export type Loader = "forge" | "fabric" | "neoForge" | "unknown";
@@ -22,6 +24,8 @@ export interface LangEntry {
   /** 是否参与汉化（前端勾选，默认 true；导出时未选中的条目不导出） */
   selected?: boolean;
   status: EntryStatus;
+  /** 翻译进行中（前端实时着色用，仅运行期） */
+  translating?: boolean;
   placeholders: string[];
   notes: string[];
 }
@@ -116,6 +120,19 @@ export interface TranslatedItem {
   notes: string[];
 }
 
+/** 逐批实时推送的单条翻译结果事件（前端实时写入存储并显示） */
+export interface EntryTranslatedEvent {
+  /** 所属内容包 key（前端据此定位到具体队列项） */
+  packKey: string;
+  items: {
+    key: string;
+    translation: string;
+    notes: string[];
+    /** 结果类型：ok 成功 / empty AI 未返回 / error 翻译失败 */
+    kind: "ok" | "empty" | "error";
+  }[];
+}
+
 export interface ProviderConfig {
   provider: string;
   apiKey: string;
@@ -148,6 +165,10 @@ export interface Settings {
   customPrompts: Record<string, string>;
   /** 深度文本扫描：普通解析为空时自动启用强化扫描 */
   deepScan: boolean;
+  /** 主题模式：light（亮色）/ dark（暗色） */
+  theme: 'light' | 'dark';
+  /** 界面语言：zh（中文）/ en（英文） */
+  language: 'zh' | 'en';
 }
 
 /** 多线程翻译配置（实验性） */
@@ -173,6 +194,8 @@ export const STATUS_LABEL: Record<EntryStatus, string> = {
   aiTranslated: "AI 翻译",
   userConfirmed: "人工确认",
   placeholderError: "占位符异常",
+  aiEmpty: "AI 未返回",
+  aiFailed: "翻译失败",
 };
 
 export const STATUS_COLOR: Record<EntryStatus, string> = {
@@ -182,6 +205,8 @@ export const STATUS_COLOR: Record<EntryStatus, string> = {
   aiTranslated: "green",
   userConfirmed: "purple",
   placeholderError: "volcano",
+  aiEmpty: "gold",
+  aiFailed: "red",
 };
 
 export const LOADER_LABEL: Record<Loader, string> = {
@@ -191,29 +216,60 @@ export const LOADER_LABEL: Record<Loader, string> = {
   unknown: "未知",
 };
 
+/** 服务商预设（与 Rust 侧 PRESETS 一一对应；label 用于网格卡片展示） */
 export const PROVIDER_PRESETS: Record<string, { label: string; model: string; baseUrl: string }> = {
   zhipu: {
-    label: "智谱 GLM-4-Flash（免费）",
+    label: "智谱 GLM",
     model: "glm-4-flash-250414",
     baseUrl: "https://open.bigmodel.cn/api/paas/v4",
   },
-  gemini: {
-    label: "Google Gemini（免费层）",
-    model: "gemini-2.5-flash",
-    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
-  },
-  deepseek: {
-    label: "DeepSeek",
-    model: "deepseek-chat",
-    baseUrl: "https://api.deepseek.com/v1",
-  },
   qwen: {
-    label: "阿里百炼 Qwen",
+    label: "通义 Qwen",
     model: "qwen-flash",
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
   },
+  deepseek: {
+    label: "DeepSeek",
+    model: "deepseek-v4-flash",
+    baseUrl: "https://api.deepseek.com/v1",
+  },
+  doubao: {
+    label: "火山豆包",
+    model: "doubao-seed-1-8",
+    baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+  },
+  moonshot: {
+    label: "Kimi 月之暗面",
+    model: "kimi-k2",
+    baseUrl: "https://api.moonshot.cn/v1",
+  },
+  hunyuan: {
+    label: "腾讯混元",
+    model: "hunyuan-turbos-latest",
+    baseUrl: "https://api.hunyuan.cloud.tencent.com/v1",
+  },
+  siliconflow: {
+    label: "硅基流动",
+    model: "deepseek-ai/DeepSeek-V3.2",
+    baseUrl: "https://api.siliconflow.cn/v1",
+  },
+  gemini: {
+    label: "Google Gemini",
+    model: "gemini-2.5-flash",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+  },
+  openai: {
+    label: "OpenAI",
+    model: "gpt-5-mini",
+    baseUrl: "https://api.openai.com/v1",
+  },
+  openrouter: {
+    label: "OpenRouter",
+    model: "google/gemini-2.5-flash",
+    baseUrl: "https://openrouter.ai/api/v1",
+  },
   custom: {
-    label: "自定义（OpenAI 兼容）",
+    label: "自定义",
     model: "",
     baseUrl: "",
   },

@@ -16,6 +16,10 @@ pub enum EntryStatus {
     UserConfirmed,
     /// 占位符校验失败（需要人工处理）
     PlaceholderError,
+    /// AI 未返回译文（模型未产出，淡黄色）
+    AiEmpty,
+    /// 翻译失败（429 限流 / 网络 / 鉴权错误，淡红色）
+    AiFailed,
 }
 
 /// 一条语言条目
@@ -37,6 +41,9 @@ pub struct LangEntry {
     pub hardcoded: bool,
     /// 状态
     pub status: EntryStatus,
+    /// 翻译进行中（前端实时着色用，仅运行期，不参与导出筛选）
+    #[serde(default)]
+    pub translating: bool,
     /// 提取出的占位符（%s、%1$s、\n、§颜色码等），用于校验
     pub placeholders: Vec<String>,
     /// 备注（占位符警告、TM 来源等）

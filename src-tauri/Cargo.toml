@@ -1,6 +1,6 @@
 [package]
 name = "mc-content-localizer"
-version = "1.3.0"
+version = "2.0.0"
 description = "MC 汉化工坊：Minecraft 模组/光影包/资源包 AI 汉化工具"
 authors = ["you"]
 edition = "2021"
@@ -14,6 +14,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[features]
+# 生产构建必须启用（tauri build / cargo build --release --features custom-protocol）：
+# 启用后前端 dist/ 资源内嵌进 exe；不启用则应用会尝试加载 devUrl（localhost:1420）
+custom-protocol = ["tauri/custom-protocol"]
 
 [dependencies]
 tauri = { version = "2", features = [] }

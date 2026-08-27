@@ -1,7 +1,8 @@
 import { useMemo } from "react";
 import { Divider, Tag, Typography } from "antd";
+import { useTranslationContext } from "../i18n";
 import type { LangEntry } from "../types";
-import { STATUS_COLOR, STATUS_LABEL } from "../types";
+import { STATUS_COLOR } from "../types";
 
 interface Props {
   entry: LangEntry;
@@ -10,6 +11,7 @@ interface Props {
 
 /** 选中条目的上下文面板：模组信息、占位符、同前缀条目（帮助理解语境） */
 export function ContextPanel({ entry, allEntries }: Props) {
+  const { t } = useTranslationContext();
   // 同前缀条目：如 item.modid. 下的其他条目，帮助模型/用户理解语境
   const prefix = useMemo(() => {
     const parts = entry.key.split(".");
@@ -27,29 +29,29 @@ export function ContextPanel({ entry, allEntries }: Props) {
   return (
     <div>
       <Typography.Paragraph>
-        <Tag color={STATUS_COLOR[entry.status]}>{STATUS_LABEL[entry.status]}</Tag>
+        <Tag color={STATUS_COLOR[entry.status]}>{t(`status.${entry.status}`)}</Tag>
         <Typography.Text code>{entry.key}</Typography.Text>
       </Typography.Paragraph>
 
-      <Typography.Text type="secondary">来源文件</Typography.Text>
+      <Typography.Text type="secondary">{t("components.sourceFile")}</Typography.Text>
       <Typography.Paragraph>{entry.filePath}</Typography.Paragraph>
 
       <Divider style={{ margin: "12px 0" }} />
 
-      <Typography.Text type="secondary">原文</Typography.Text>
+      <Typography.Text type="secondary">{t("components.source")}</Typography.Text>
       <Typography.Paragraph style={{ whiteSpace: "pre-wrap" }}>
         {entry.source}
       </Typography.Paragraph>
 
-      <Typography.Text type="secondary">译文</Typography.Text>
+      <Typography.Text type="secondary">{t("components.translation")}</Typography.Text>
       <Typography.Paragraph style={{ whiteSpace: "pre-wrap" }}>
-        {entry.translation ?? "（未翻译）"}
+        {entry.translation ?? t("components.untranslatedText")}
       </Typography.Paragraph>
 
       {entry.placeholders.length > 0 && (
         <>
           <Divider style={{ margin: "12px 0" }} />
-          <Typography.Text type="secondary">占位符（翻译时必须保留）</Typography.Text>
+          <Typography.Text type="secondary">{t("components.placeholders")}</Typography.Text>
           <div style={{ marginTop: 4 }}>
             {entry.placeholders.map((p, i) => (
               <Tag key={i} color="geekblue">
@@ -63,7 +65,7 @@ export function ContextPanel({ entry, allEntries }: Props) {
       {entry.notes.length > 0 && (
         <>
           <Divider style={{ margin: "12px 0" }} />
-          <Typography.Text type="warning">注意事项</Typography.Text>
+          <Typography.Text type="warning">{t("components.notes")}</Typography.Text>
           {entry.notes.map((n, i) => (
             <Typography.Paragraph key={i} type="warning" style={{ marginBottom: 4 }}>
               • {n}
@@ -76,8 +78,7 @@ export function ContextPanel({ entry, allEntries }: Props) {
         <>
           <Divider style={{ margin: "12px 0" }} />
           <Typography.Text type="secondary">
-            同组条目（{prefix}.*，共 {siblings.length} 条，前 30 条）——
-            上下文语境
+            {t("components.sameGroup")}（{prefix}.*，{siblings.length}）—— {t("components.sameGroupSuffix")}
           </Typography.Text>
           {siblings.map((s) => (
             <div key={s.key} style={{ margin: "4px 0" }}>

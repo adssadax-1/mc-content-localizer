@@ -196,6 +196,7 @@ pub fn parse_shader_pack(path: &Path) -> Result<ShaderPack, PackError> {
             } else {
                 EntryStatus::Untranslated
             },
+            translating: false,
             placeholders,
             notes: if has_existing {
                 vec!["光影自带中文".to_string()]
@@ -263,6 +264,7 @@ pub fn parse_resource_pack(path: &Path) -> Result<ResourcePackInfo, PackError> {
             translation: None,
             hardcoded: false,
             status: EntryStatus::Untranslated,
+            translating: false,
             placeholders: placeholder::extract_placeholders(line),
             notes: vec!["资源包描述".to_string()],
         });
@@ -632,6 +634,7 @@ mod tests {
             translation: Some("标题".into()),
             hardcoded: false,
             status: EntryStatus::AiTranslated,
+            translating: false,
             placeholders: vec![],
             notes: vec![],
         };
@@ -677,6 +680,7 @@ mod tests {
             translation: Some("新描述".into()),
             hardcoded: false,
             status: EntryStatus::AiTranslated,
+            translating: false,
             placeholders: vec![],
             notes: vec![],
         };

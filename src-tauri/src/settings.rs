@@ -29,6 +29,14 @@ fn default_request_interval() -> u64 {
     4
 }
 
+fn default_theme() -> String {
+    "light".to_string()
+}
+
+fn default_language() -> String {
+    "zh".to_string()
+}
+
 impl Default for ThreadingConfig {
     fn default() -> Self {
         Self {
@@ -63,9 +71,15 @@ pub struct Settings {
     /// 多线程翻译配置（实验性）
     #[serde(default)]
     pub threading: ThreadingConfig,
-    /// 自定义提示词（key: mod / shader / resourcepack → 用户自定义的可编辑段）
-    #[serde(default)]
-    pub custom_prompts: HashMap<String, String>,
+  /// 自定义提示词（key: mod / shader / resourcepack → 用户自定义的可编辑段）
+  #[serde(default)]
+  pub custom_prompts: HashMap<String, String>,
+  /// 主题模式：light（亮色）/ dark（暗色）
+  #[serde(default = "default_theme")]
+  pub theme: String,
+  /// 界面语言：zh（中文）/ en（英文）
+  #[serde(default = "default_language")]
+  pub language: String,
 }
 
 impl Default for Settings {
@@ -80,6 +94,8 @@ impl Default for Settings {
             extract_glossary: true,
             threading: ThreadingConfig::default(),
             custom_prompts: HashMap::new(),
+            theme: default_theme(),
+            language: default_language(),
         }
     }
 }

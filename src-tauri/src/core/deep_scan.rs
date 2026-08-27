@@ -299,6 +299,7 @@ pub fn deep_scan_jar(path: &Path, default_modid: &str) -> Result<DeepScanResult,
             translation: None,
             hardcoded: true,
             status: EntryStatus::Untranslated,
+            translating: false,
             placeholders,
             notes,
         });

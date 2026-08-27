@@ -5,7 +5,8 @@ use thiserror::Error;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderConfig {
-    /// provider 标识：zhipu | gemini | deepseek | qwen | custom
+    /// provider 标识：zhipu | gemini | deepseek | qwen | doubao | moonshot | hunyuan
+    /// | siliconflow | openrouter | openai | custom
     pub provider: String,
     pub api_key: String,
     /// 自定义模型名（None 时用预设默认）
@@ -38,9 +39,21 @@ pub const PRESETS: &[(&str, &str, &str)] = &[
     // Google Gemini 免费层（OpenAI 兼容端点）
     ("gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.5-flash"),
     // DeepSeek：便宜，无免费层
-    ("deepseek", "https://api.deepseek.com/v1", "deepseek-chat"),
+    ("deepseek", "https://api.deepseek.com/v1", "deepseek-v4-flash"),
     // 阿里百炼 qwen-flash：极便宜
     ("qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-flash"),
+    // 火山方舟（豆包）：模型名可为具体模型 ID 或控制台创建的接入点 ID（ep- 开头）
+    ("doubao", "https://ark.cn-beijing.volces.com/api/v3", "doubao-seed-1-8"),
+    // 月之暗面 Kimi：256K 上下文
+    ("moonshot", "https://api.moonshot.cn/v1", "kimi-k2"),
+    // 腾讯混元
+    ("hunyuan", "https://api.hunyuan.cloud.tencent.com/v1", "hunyuan-turbos-latest"),
+    // 硅基流动：聚合 100+ 开源模型，部分永久免费，国内直连
+    ("siliconflow", "https://api.siliconflow.cn/v1", "deepseek-ai/DeepSeek-V3.2"),
+    // OpenRouter：聚合网关，一个 Key 调全平台（模型 ID 带 vendor 前缀）
+    ("openrouter", "https://openrouter.ai/api/v1", "google/gemini-2.5-flash"),
+    // OpenAI：国内访问不稳定
+    ("openai", "https://api.openai.com/v1", "gpt-5-mini"),
 ];
 
 impl ProviderConfig {

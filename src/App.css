@@ -18,24 +18,173 @@ body {
   background: #f5f6f8;
 }
 
+/* ===== 主题 CSS 变量（配合 antd ConfigProvider 算法，覆盖内联样式的固定色） ===== */
+:root {
+  --border-color: #e6e8eb;
+  --card-bg: #ffffff;
+  --row-translating: #e6f4ff;
+  --row-translated: #f6ffed;
+  --row-empty: #fffbe6;
+  --row-failed: #fff1f0;
+  --preview-bg: #1a1a1a;
+  --hover-shadow: rgba(74, 144, 217, 0.08);
+  --drag-highlight: rgba(74, 144, 217, 0.12);
+  --divider-soft: #f5f6f8;
+}
+
+[data-theme="dark"] {
+  --border-color: #303030;
+  --card-bg: #1f1f1f;
+  --row-translating: #11294d;
+  --row-translated: #10251a;
+  --row-empty: #2b230d;
+  --row-failed: #2d1214;
+  --preview-bg: #111111;
+  --hover-shadow: rgba(108, 179, 255, 0.1);
+  --drag-highlight: rgba(108, 179, 255, 0.18);
+  --divider-soft: #262626;
+}
+
+body {
+  background: var(--card-bg);
+  transition: background 0.25s ease;
+}
+
 /* 卡片式模组队列的悬浮效果 */
 .pack-card {
   transition:
     box-shadow 0.2s ease,
-    transform 0.15s ease;
+    transform 0.15s ease,
+    background 0.25s ease,
+    border-color 0.25s ease;
+  background: var(--card-bg);
+  border-color: var(--border-color);
 }
 
 .pack-card:hover {
-  box-shadow: 0 2px 10px rgba(74, 144, 217, 0.08);
+  box-shadow: 0 2px 10px var(--hover-shadow);
 }
 
 /* 拖动批量勾选时经过行的临时高亮 */
 .drag-highlight {
-  background: rgba(74, 144, 217, 0.12) !important;
+  background: var(--drag-highlight) !important;
 }
 
 /* 虚拟滚动表格：固定单元格高度，与 antd 计算的行高一致，防止滚动错位 */
 .ant-table-virtual .ant-table-cell {
   padding: 2px 8px !important;
   line-height: 1.4 !important;
+}
+
+/* ===== 全局过渡动画体系 =====
+   性能约束：
+   - 只动画 transform / opacity（GPU 合成层，不触发 layout/paint）
+   - 时长 0.2-0.32s，缓动统一 var(--ease-out)
+   - 注意：不要用 * 通配的 reduced-motion 覆盖——系统关动画时会连 antd
+     自带的弹窗/抽屉动画一起杀掉，表现为"所有动画消失"。
+*/
+:root {
+  --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --dur-fast: 0.2s;
+  --dur-base: 0.26s;
+  --dur-slow: 0.32s;
+}
+
+/* 场景 1：内容包卡片——导入列表时淡入上浮；多卡片按序交错入场 */
+@keyframes card-in {
+  from { opacity: 0; transform: translateY(14px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.pack-card {
+  animation: card-in var(--dur-slow) var(--ease-out) both;
+}
+
+.pack-card:nth-child(2) { animation-delay: 0.05s; }
+.pack-card:nth-child(3) { animation-delay: 0.1s; }
+.pack-card:nth-child(n + 4) { animation-delay: 0.15s; }
+
+/* 场景 2：主内容区（表格/空态）切换内容包类型页签时淡入上移 */
+@keyframes view-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.view-fade {
+  animation: view-in var(--dur-base) var(--ease-out) both;
+}
+
+/* 场景 3：设置分组内容切换——淡入滑动（配合 key 重挂载） */
+@keyframes section-in {
+  from { opacity: 0; transform: translateX(14px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.section-fade {
+  animation: section-in var(--dur-base) var(--ease-out) both;
+}
+
+/* 场景 4：左侧导航按钮 hover/按压反馈 */
+.sider-nav-btn {
+  transition:
+    background-color var(--dur-fast) ease,
+    color var(--dur-fast) ease,
+    transform var(--dur-fast) var(--ease-out);
+}
+
+.sider-nav-btn:active {
+  transform: scale(0.97);
+}
+
+/* 场景 5：服务商网格卡片 hover/选中过渡 */
+.provider-grid-card {
+  transition:
+    border-color var(--dur-fast) ease,
+    background var(--dur-fast) ease,
+    transform var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) ease;
+}
+
+.provider-grid-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 3px 10px var(--hover-shadow);
+}
+
+.provider-grid-card:active {
+  transform: translateY(0) scale(0.96);
+}
+
+/* 场景 6：通用可交互元素的基础过渡 */
+.fade-target {
+  transition: opacity var(--dur-base) ease;
+}
+
+/* 场景 7：内容包卡片展开区（高度变化不可动画，用内容淡入上移代替） */
+.pack-card-expanded-content {
+  animation: view-in var(--dur-base) var(--ease-out) both;
+}
+
+/* 场景 8：结果提示 Alert / 进度条出现时下滑淡入 */
+@keyframes alert-in {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.alert-slide {
+  animation: alert-in var(--dur-base) var(--ease-out) both;
+}
+
+/* 系统「减少动态效果」：只对本文件自定义的入场动画瞬时化，
+   不影响 antd 组件自带动画（弹窗缩放、抽屉滑动等） */
+@media (prefers-reduced-motion: reduce) {
+  .pack-card,
+  .view-fade,
+  .section-fade,
+  .pack-card-expanded-content,
+  .alert-slide,
+  .provider-grid-card,
+  .sider-nav-btn {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }

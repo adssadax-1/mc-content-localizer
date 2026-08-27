@@ -11,6 +11,7 @@ import type {
   PackType,
   PromptTemplate,
   DeepScanResult,
+  EntryTranslatedEvent,
   ResourcePackBundle,
   ResourcePackInfo,
   Settings,
@@ -28,6 +29,7 @@ export const api = {
     config: ProviderConfig,
     ctx: TranslateContext,
     items: BatchItem[],
+    packKey: string,
     batchSize?: number,
     extractGlossary?: boolean,
     threading?: ThreadingConfig,
@@ -36,6 +38,7 @@ export const api = {
       config,
       ctx,
       items,
+      packKey,
       batchSize,
       extractGlossary,
       threading,
@@ -125,6 +128,13 @@ export async function onTranslateProgress(
   handler: (p: ProgressPayload) => void,
 ): Promise<UnlistenFn> {
   return listen<ProgressPayload>("translate-progress", (e) => handler(e.payload));
+}
+
+/** 监听逐批实时翻译结果事件（实时写入存储并显示） */
+export async function onTranslationBatch(
+  handler: (payload: EntryTranslatedEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<EntryTranslatedEvent>("translation-batch", (e) => handler(e.payload));
 }
 
 /** 监听术语表提取完成事件 */

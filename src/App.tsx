@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   Checkbox,
+  ConfigProvider,
   Drawer,
   InputNumber,
   Layout,
@@ -15,6 +16,7 @@ import {
   Tag,
   Tooltip,
   Typography,
+  theme,
 } from "antd";
 import {
   CloudUploadOutlined,
@@ -36,12 +38,15 @@ import {
 } from "@ant-design/icons";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import zhCN from "antd/locale/zh_CN";
+import enUS from "antd/locale/en_US";
 
-import { api, onFileDropped, onGlossaryDone, onTranslateProgress } from "./api";
+import { api, onFileDropped, onGlossaryDone, onTranslateProgress, onTranslationBatch } from "./api";
 import { DropZone } from "./components/DropZone";
 import { EntryTable } from "./components/EntryTable";
 import { ContextPanel } from "./components/ContextPanel";
 import { SettingsModal } from "./components/SettingsModal";
+import { TranslationProvider, useTranslationContext } from "./i18n";
 import { LOADER_LABEL, packFormatForMc } from "./types";
 import type {
   BatchItem,
@@ -52,9 +57,79 @@ import type {
   ResourcePackBundle,
   Settings,
   TranslateContext,
+  TranslatedItem,
 } from "./types";
 
 const { Header, Content, Footer, Sider } = Layout;
+
+// 亮色主题配置
+const lightTheme = {
+  token: {
+    colorPrimary: "#4A90D9",
+    colorBgLayout: "#F5F6F8",
+    colorBgContainer: "#FFFFFF",
+    colorText: "#1F2937",
+    colorTextSecondary: "#6B7280",
+    colorBorder: "#E6E8EB",
+    colorBorderSecondary: "#EFF1F4",
+    colorSuccess: "#16A34A",
+    colorWarning: "#D97706",
+    colorError: "#DC2626",
+    borderRadius: 10,
+    fontSize: 13,
+  },
+  components: {
+    Layout: {
+      headerBg: "#FFFFFF",
+      siderBg: "#FFFFFF",
+      bodyBg: "#F5F6F8",
+      footerBg: "#FFFFFF",
+    },
+    Table: {
+      headerBg: "#F9FAFB",
+      headerColor: "#4B5563",
+      borderColor: "#F0F2F5",
+    },
+    Card: {
+      colorBorderSecondary: "#E6E8EB",
+    },
+  },
+};
+
+// 暗色主题配置（优化颜值）
+const darkTheme = {
+  algorithm: theme.darkAlgorithm,
+  token: {
+    colorPrimary: "#6CB3FF",
+    colorBgLayout: "#141414",
+    colorBgContainer: "#1F1F1F",
+    colorText: "#E5E7EB",
+    colorTextSecondary: "#9CA3AF",
+    colorBorder: "#303030",
+    colorBorderSecondary: "#262626",
+    colorSuccess: "#22C55E",
+    colorWarning: "#FBBF24",
+    colorError: "#EF4444",
+    borderRadius: 10,
+    fontSize: 13,
+  },
+  components: {
+    Layout: {
+      headerBg: "#1F1F1F",
+      siderBg: "#1F1F1F",
+      bodyBg: "#141414",
+      footerBg: "#1F1F1F",
+    },
+    Table: {
+      headerBg: "#1F2937",
+      headerColor: "#D1D5DB",
+      borderColor: "#374151",
+    },
+    Card: {
+      colorBorderSecondary: "#262626",
+    },
+  },
+};
 
 /** 项目 GitHub 地址 */
 const GITHUB_URL = "https://github.com/adssadax-1/mc-content-localizer";
@@ -102,10 +177,77 @@ function collectSuggestions(
   return out.slice(0, 20);
 }
 
-const KIND_META: Record<PackKind, { label: string; icon: React.ReactNode; color: string }> = {
-  mod: { label: "模组", icon: <AppstoreOutlined />, color: "#4A90D9" },
-  shader: { label: "光影包", icon: <SunOutlined />, color: "#D97706" },
-  resourcepack: { label: "资源包", icon: <PictureOutlined />, color: "#16A34A" },
+/** 由后端返回的单条结果推导前端条目补丁（与实时事件保持一致的状态着色） */
+function entryPatchFromResult(r: TranslatedItem): {
+  translation: string | null;
+  notes: string[];
+  status: LangEntry["status"];
+  translating: boolean;
+} {
+  const status: LangEntry["status"] = !r.translation
+    ? r.notes[0]?.startsWith("翻译失败")
+      ? "aiFailed"
+      : "aiEmpty"
+    : "aiTranslated";
+  return { translation: r.translation || null, notes: r.notes, status, translating: false };
+}
+
+/** 根据实时统计构造翻译结果汇总提示（醒目、可操作的解决建议） */
+function buildResultAlert(c: {
+  ok: number;
+  empty: number;
+  error: number;
+  error429: number;
+  warn: number;
+}): { type: "success" | "warning" | "error" | "info"; title: string; desc: React.ReactNode } {
+  const lines: string[] = [];
+  if (c.empty > 0) {
+    lines.push(
+      `有 ${c.empty} 条 AI 未返回译文（列表中标记为淡黄色）。常见原因：免费模型输出不稳定、单次请求条目过多导致模型截断、或网络波动。建议：① 仅勾选较少条目、分多批次翻译；② 在设置中适当降低「批处理大小」；③ 换用更稳定的模型或提高额度。`,
+    );
+  }
+  if (c.error > 0) {
+    if (c.error429 > 0) {
+      lines.push(
+        `有 ${c.error} 条因 429 限流失败（标记为红色）。免费模型额度有限会周期性限流。建议：减少本次勾选条目、降低并发线程数、调大请求间隔，或稍后重试；若长期需要可换更高额度模型。`,
+      );
+    } else {
+      lines.push(
+        `有 ${c.error} 条翻译失败（标记为红色），多为网络异常或密钥/模型配置错误。请检查：API Key 是否正确、Base URL 与模型名是否匹配、网络是否可访问服务商。`,
+      );
+    }
+  }
+  if (c.warn > 0) {
+    lines.push(
+      `有 ${c.warn} 条译文含占位符/格式校验警告（橙色标签），导出前请检查 %s、§ 等是否完整，避免游戏内显示异常。`,
+    );
+  }
+  if (c.ok > 0 && lines.length === 0) {
+    return {
+      type: "success",
+      title: `翻译完成：成功汉化 ${c.ok} 条`,
+      desc: "可勾选后导出汉化结果。",
+    };
+  }
+  if (lines.length === 0) {
+    return { type: "info", title: "翻译完成", desc: "本次没有产生新的译文。" };
+  }
+  const type: "success" | "warning" | "error" = c.error > 0 ? "error" : "warning";
+  const title =
+    c.error > 0
+      ? `翻译完成（${c.ok} 条成功，${c.error} 条失败）`
+      : `翻译完成（${c.ok} 条成功，${c.empty} 条未返回）`;
+  return {
+    type,
+    title,
+    desc: <div>{lines.map((l, i) => <div key={i} style={{ marginBottom: 4 }}>{l}</div>)}</div>,
+  };
+}
+
+const KIND_META: Record<PackKind, { labelKey: string; icon: React.ReactNode; color: string }> = {
+  mod: { labelKey: "app.mod", icon: <AppstoreOutlined />, color: "#4A90D9" },
+  shader: { labelKey: "app.shader", icon: <SunOutlined />, color: "#D97706" },
+  resourcepack: { labelKey: "app.resourcepack", icon: <PictureOutlined />, color: "#16A34A" },
 };
 
 interface PackCardProps {
@@ -145,6 +287,7 @@ const PackCard = memo(function PackCard({
   onToggleDeepGroup,
   deepScanningKey,
 }: PackCardProps) {
+  const { t } = useTranslationContext();
   const total = item.entries.length;
   const translated = item.entries.filter((e) => e.translation).length;
   const meta = KIND_META[item.kind];
@@ -152,7 +295,7 @@ const PackCard = memo(function PackCard({
     <div
       className="pack-card"
       style={{
-        border: "1px solid #E6E8EB",
+        border: "1px solid var(--border-color, #E6E8EB)",
         borderRadius: 12,
         marginBottom: 8,
         background: "#fff",
@@ -178,17 +321,17 @@ const PackCard = memo(function PackCard({
         {item.expanded ? <DownOutlined /> : <RightOutlined />}
         <span style={{ color: meta.color }}>{meta.icon}</span>
         <Typography.Text strong>{item.name}</Typography.Text>
-        <Tag color={meta.color}>{meta.label}</Tag>
+        <Tag color={meta.color}>{t(meta.labelKey)}</Tag>
         {item.modFile?.version && <Tag>{item.modFile.version}</Tag>}
-        {item.modFile && <Tag>{LOADER_LABEL[item.modFile.loader]}</Tag>}
+        {item.modFile && <Tag>{item.modFile.loader === "unknown" ? t("loader.unknown") : item.modFile.loader.toUpperCase()}</Tag>}
         {item.hasZh && (
-          <Tag color="cyan">自带中文 {item.zhCount ?? 0} 条</Tag>
+          <Tag color="cyan">{t("app.hasZh")} {item.zhCount ?? 0} {t("app.hasZhCount")}</Tag>
         )}
         <Typography.Text type="secondary" style={{ marginLeft: "auto" }}>
-          {translated}/{total} 条已翻译
+          {translated}/{total} {t("app.translatedCount")}
         </Typography.Text>
         {item.kind === "mod" && onDeepScan && (
-          <Tooltip title="若认为文本解析不全，可点击进行模组深度扫描（扫描全部文本文件，耗时略增；已编译的 .class 代码内文本暂不支持）">
+          <Tooltip title={t("app.deepScanDesc")}>
             <Button
               size="small"
               type={item.deepScanGroups ? "default" : "dashed"}
@@ -199,18 +342,18 @@ const PackCard = memo(function PackCard({
               }}
             >
               {item.deepScanGroups
-                ? `模组深度扫描 ${item.deepScanGroups.reduce((a, g) => a + g.count, 0)} 条`
-                : "模组深度扫描"}
+                ? `${t("app.deepScan")} ${item.deepScanGroups.reduce((a, g) => a + g.count, 0)}`
+                : t("app.deepScan")}
             </Button>
           </Tooltip>
         )}
       </div>
       {item.expanded && (
-        <div style={{ padding: "0 12px 12px" }}>
+        <div className="pack-card-expanded-content" style={{ padding: "0 12px 12px" }}>
           {item.deepScanGroups && item.deepScanGroups.length > 0 && (
             <Space style={{ marginBottom: 6 }} wrap align="center">
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                模组深度扫描文本（默认未勾选，勾选后才参与翻译/导出）：
+                {t("app.deepScanText")}
               </Typography.Text>
               {item.deepScanGroups.map((g) => (
                 <Checkbox
@@ -301,13 +444,27 @@ interface PackItem {
   zhCount?: number;
 }
 
-function App() {
+function AppInner({
+  settings,
+  setSettings,
+}: {
+  settings: Settings | null;
+  setSettings: (s: Settings | null) => void;
+}) {
+  const { t } = useTranslationContext();
   const [queue, setQueue] = useState<PackItem[]>([]);
   const [activeTab, setActiveTab] = useState<PackKind>("mod");
   const [dragOver, setDragOver] = useState(false);
   const [parsing, setParsing] = useState(false);
   const [translating, setTranslating] = useState(false);
   const [progress, setProgress] = useState<ProgressPayload | null>(null);
+  // 翻译结果汇总（实时统计，用于结束后的醒目提示）
+  const [resultAlert, setResultAlert] = useState<{
+    type: "success" | "warning" | "error" | "info";
+    title: string;
+    desc: React.ReactNode;
+  } | null>(null);
+  const liveCounts = useRef({ ok: 0, empty: 0, error: 0, error429: 0, warn: 0 });
   // 翻译开始时间（剩余时间估算用）
   const translateStartRef = useRef(0);
   // 术语表建议候选（翻译完成后一次性弹出）
@@ -317,7 +474,6 @@ function App() {
   const [extractedGlossary, setExtractedGlossary] = useState<[string, string][] | null>(null);
   const [extractedChecked, setExtractedChecked] = useState<string[]>([]);
   const [currentPackName, setCurrentPackName] = useState("");
-  const [settings, setSettings] = useState<Settings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
@@ -330,24 +486,7 @@ function App() {
   const [exportRiskChecked, setExportRiskChecked] = useState<PackItem[]>([]);
   const [paused, setPaused] = useState(false);
 
-  // 初始化：加载设置（兼容旧配置：补齐 threading / customPrompts 默认值）
-  useEffect(() => {
-    api
-      .loadSettings()
-      .then((s) =>
-        setSettings({
-          ...s,
-          threading: s.threading ?? {
-            enabled: false,
-            threadCount: 2,
-            requestIntervalSec: 4,
-          },
-          customPrompts: s.customPrompts ?? {},
-          deepScan: s.deepScan ?? false,
-        }),
-      )
-      .catch(() => setSettings(null));
-  }, []);
+  // 设置加载已提升到外层 App（主题/语言/无字模式需在 ConfigProvider 外层生效）
 
   // 静默检查更新：失败无感；同一版本只提示一次
   useEffect(() => {
@@ -456,6 +595,58 @@ function App() {
           return [...set];
         });
       }
+    });
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, []);
+
+  // 监听逐批实时翻译结果：实时写入存储（entries 状态）并显示，不等待全部完成
+  useEffect(() => {
+    const unlisten = onTranslationBatch(({ packKey, items }) => {
+      setQueue((prev) =>
+        prev.map((pack) => {
+          if (pack.key !== packKey) return pack;
+          const byKey = new Map(items.map((i) => [i.key, i]));
+          let okN = 0,
+            emptyN = 0,
+            errN = 0,
+            err429N = 0,
+            warnN = 0;
+          const entries = pack.entries.map((e) => {
+            const r = byKey.get(e.key);
+            if (!r) return e;
+            if (r.kind === "error") {
+              errN += 1;
+              if (r.notes.some((n) => n.includes("429"))) err429N += 1;
+            } else if (r.kind === "empty") {
+              emptyN += 1;
+            } else {
+              okN += 1;
+              if (r.notes.length > 0) warnN += 1;
+            }
+            const status: LangEntry["status"] =
+              r.kind === "error"
+                ? "aiFailed"
+                : r.kind === "empty"
+                  ? "aiEmpty"
+                  : "aiTranslated";
+            return {
+              ...e,
+              translation: r.translation || null,
+              notes: r.notes,
+              status,
+              translating: false,
+            };
+          });
+          liveCounts.current.ok += okN;
+          liveCounts.current.empty += emptyN;
+          liveCounts.current.error += errN;
+          liveCounts.current.error429 += err429N;
+          liveCounts.current.warn += warnN;
+          return { ...pack, entries };
+        }),
+      );
     });
     return () => {
       unlisten.then((f) => f());
@@ -590,40 +781,52 @@ function App() {
         `已导入 ${added.length} 个内容包${deepFound > 0 ? `（模组深度扫描发现 ${deepFound} 条内嵌文本，默认未勾选）` : ""}`,
       );
     }
-    // 未开开关 + 普通解析为空 → 引导启用深度扫描
-    const emptyMods = added.filter(
-      (it) => it.kind === "mod" && it.entries.length === 0,
-    );
-    if (emptyMods.length > 0 && !settings?.deepScan && settings) {
-      Modal.confirm({
-        title: "未发现常规可翻译文本",
-        content: `${emptyMods.length} 个模组在常规位置（语言文件）未找到文本，可能将文本写在内嵌文件（成就/配置/嵌套 jar）中。是否启用模组深度扫描重试？也可在模组卡片上手动点击「模组深度扫描」。`,
-        okText: "启用并重新扫描",
-        cancelText: "暂不",
-        onOk: async () => {
-          const next = { ...settings, deepScan: true };
-          try {
-            await api.saveSettings(next);
-            setSettings(next);
-          } catch {
-            /* 忽略 */
-          }
-          let found = 0;
-          for (const it of emptyMods) {
+    // 导入后校验：解析为空的内容包，给出明确、可操作的提示
+    const emptyPacks = added.filter((it) => it.entries.length === 0);
+    if (emptyPacks.length > 0) {
+      const modsEmpty = emptyPacks.filter((it) => it.kind === "mod");
+      const otherEmpty = emptyPacks.filter((it) => it.kind !== "mod");
+      if (modsEmpty.length > 0 && !settings?.deepScan && settings) {
+        Modal.confirm({
+          title: "未发现常规可翻译文本",
+          content: `${modsEmpty.length} 个模组在常规位置（语言文件）未找到文本，可能将文本写在内嵌文件（成就/配置/嵌套 jar）中。是否启用模组深度扫描重试？也可在模组卡片上手动点击「模组深度扫描」。\n\n若仍为空，请确认：① 该文件确实包含可汉化文本；② 文本格式当前版本是否支持；③ 文本是否硬编码在 .class 代码（无法自动提取，需手动处理）。`,
+          okText: "启用并重新扫描",
+          cancelText: "暂不",
+          onOk: async () => {
+            const next = { ...settings, deepScan: true };
             try {
-              found += await applyDeepScan(it);
+              await api.saveSettings(next);
+              setSettings(next);
             } catch {
               /* 忽略 */
             }
-          }
-          setQueue((prev) => [...prev]);
-          if (found > 0) {
-            message.success(`模组深度扫描发现 ${found} 条内嵌文本（默认未勾选，可在卡片上勾选组）`);
-          } else {
-            message.info("未发现额外可翻译文本（可能无内嵌文本，或文本在 .class 代码中）");
-          }
-        },
-      });
+            let found = 0;
+            for (const it of modsEmpty) {
+              try {
+                found += await applyDeepScan(it);
+              } catch {
+                /* 忽略 */
+              }
+            }
+            setQueue((prev) => [...prev]);
+            if (found > 0) {
+              message.success(`模组深度扫描发现 ${found} 条内嵌文本（默认未勾选，可在卡片上勾选组）`);
+            } else {
+              message.info("仍未发现可翻译文本：请确认文件含文本、文本类型受支持，或文本是否硬编码在 .class 代码中");
+            }
+          },
+        });
+      } else if (otherEmpty.length > 0) {
+        Modal.info({
+          title: "未发现可翻译文本",
+          content: `「${otherEmpty.map((it) => it.name).join("、")}」未提取到任何语言/文本。请确认：① 导入的文件确实包含可汉化的内容；② 该文本类型（如光影/资源包的 .json/.mcmeta/.txt）当前版本是否支持；③ 文本是否硬编码在代码中无法自动提取。`,
+        });
+      } else if (modsEmpty.length > 0 && settings?.deepScan) {
+        Modal.info({
+          title: "未发现可翻译文本",
+          content: `${modsEmpty.length} 个模组普通解析与深度扫描均未找到文本。请确认：① 文件确实包含可提取文本；② 文本类型受支持；③ 文本是否硬编码在 .class 代码（无法自动提取，需手动处理）。`,
+        });
+      }
     }
     if (zhHits > 0) {
       Modal.confirm({
@@ -778,6 +981,8 @@ function App() {
     setTranslating(true);
     setCancelRequested(false);
     setPaused(false);
+    setResultAlert(null);
+    liveCounts.current = { ok: 0, empty: 0, error: 0, error429: 0, warn: 0 };
     translateStartRef.current = Date.now();
     let doneAny = false;
     try {
@@ -789,6 +994,13 @@ function App() {
         if (untranslated.length === 0) {
           continue;
         }
+        // 先行将待翻译条目标记为「翻译中」（淡蓝），逐批完成后由实时事件翻为最终态
+        patchPack(item.key, (it) => ({
+          ...it,
+          entries: it.entries.map((e) =>
+            (e.selected ?? true) && !e.translation ? { ...e, translating: true } : e,
+          ),
+        }));
         const items: BatchItem[] = untranslated.map((e) => ({
           key: e.key,
           source: e.source,
@@ -797,7 +1009,7 @@ function App() {
           modName: item.name,
           modid: item.kind === "mod" ? item.modFile?.modid ?? "mod" : item.kind,
           mcVersion: item.modFile?.mcVersion ?? null,
-          loader: item.modFile ? LOADER_LABEL[item.modFile.loader] : KIND_META[item.kind].label,
+          loader: item.modFile ? LOADER_LABEL[item.modFile.loader] : t(KIND_META[item.kind].labelKey),
           packType: item.kind,
           customPrompt: settings.customPrompts?.[item.kind] ?? null,
           userGlossary: settings.userGlossary,
@@ -812,6 +1024,7 @@ function App() {
           provider,
           ctx,
           items,
+          item.key,
           settings.batchSize,
           settings.extractGlossary,
           settings.threading,
@@ -822,16 +1035,7 @@ function App() {
           entries: it.entries.map((e) => {
             const r = byKey.get(e.key);
             if (!r) return e;
-            if (!r.translation) {
-              return { ...e, notes: r.notes.length > 0 ? r.notes : ["翻译失败"] };
-            }
-            const hasWarning = r.notes.length > 0;
-            return {
-              ...e,
-              translation: r.translation,
-              notes: r.notes,
-              status: hasWarning ? ("placeholderError" as const) : ("aiTranslated" as const),
-            };
+            return { ...e, ...entryPatchFromResult(r) };
           }),
         }));
         doneAny = true;
@@ -839,8 +1043,8 @@ function App() {
       }
       if (cancelRequested) {
         message.info("已取消，已翻译部分已保留");
+        setResultAlert(null);
       } else if (doneAny) {
-        message.success("翻译完成");
         // 术语表建议：高频已翻译短语一次性提示（不打断）
         const sugg = collectSuggestions(
           queue.flatMap((q) => q.entries),
@@ -850,12 +1054,24 @@ function App() {
           setGlossarySuggest(sugg);
           setSuggestChecked(sugg.map(([en]) => en));
         }
+        setResultAlert(buildResultAlert(liveCounts.current));
       } else {
         message.info("勾选的内容包没有需要翻译的条目（可能已全部翻译）");
+        setResultAlert(null);
       }
     } catch (e) {
       message.error(`翻译失败：${String(e)}`);
     }
+    // 兜底：无论成功/取消/异常，清除所有条目的「翻译中」标记，
+    // 避免取消后尚有未完成的条目残留淡蓝底色。
+    setQueue((prev) =>
+      prev.map((it) => ({
+        ...it,
+        entries: it.entries.map((e) =>
+          e.translating ? { ...e, translating: false } : e,
+        ),
+      })),
+    );
     setTranslating(false);
     setProgress(null);
     setCurrentPackName("");
@@ -1152,36 +1368,38 @@ function App() {
           alignItems: "center",
           justifyContent: "space-between",
           paddingInline: 20,
-          borderBottom: "1px solid #E6E8EB",
+          borderBottom: "1px solid var(--border-color, #E6E8EB)",
         }}
       >
         <Space size="middle">
-          <Typography.Title level={4} style={{ margin: 0, color: "#1F2937" }}>
-            ⛏ MC 汉化工坊
+          <Typography.Title level={4} style={{ margin: 0 }} className="app-title-text">
+            <img src="/app-icon.svg" alt="" style={{ height: 26, verticalAlign: "middle" }} />
+            <span style={{ marginLeft: 8 }}>{t("app.title")}</span>
           </Typography.Title>
-          {queue.length > 0 && <Tag color="blue">{queue.length} 个内容包</Tag>}
+          {queue.length > 0 && <Tag color="blue">{queue.length} {t("app.tag")}</Tag>}
         </Space>
         <Space>
-          <Button type="text" icon={<GithubOutlined />} onClick={openGithub}>
-            GitHub 开源
+          <Button type="text" icon={<GithubOutlined />} onClick={openGithub} className="app-github-btn">
+            {t("app.github")}
           </Button>
-          <Button icon={<SettingOutlined />} onClick={() => setSettingsOpen(true)}>
-            设置
+          <Button icon={<SettingOutlined />} onClick={() => setSettingsOpen(true)} className="app-settings-btn">
+            {t("app.settings")}
           </Button>
         </Space>
       </Header>
 
       <Layout>
         {/* 左侧导航：三类内容包 */}
-        <Sider width={200} style={{ borderRight: "1px solid #E6E8EB", paddingTop: 12 }}>
+        <Sider width={200} style={{ borderRight: "1px solid var(--border-color, #E6E8EB)", paddingTop: 12 }}>
           <div style={{ padding: "0 12px" }}>
-            <Typography.Text type="secondary" style={{ fontSize: 12, paddingLeft: 8 }}>
-              内容包类型
+            <Typography.Text type="secondary" style={{ fontSize: 12, paddingLeft: 8 }} className="sider-label-text">
+              {t("app.contentKind")}
             </Typography.Text>
             {(Object.keys(KIND_META) as PackKind[]).map((k) => (
               <Button
                 key={k}
                 block
+                className="sider-nav-btn"
                 type={activeTab === k ? "primary" : "text"}
                 icon={KIND_META[k].icon}
                 style={{
@@ -1191,54 +1409,57 @@ function App() {
                 }}
                 onClick={() => setActiveTab(k)}
               >
-                {KIND_META[k].label}
+                {t(KIND_META[k].labelKey)}
               </Button>
             ))}
             <Typography.Text
               type="secondary"
               style={{ fontSize: 12, display: "block", marginTop: 16, paddingLeft: 8 }}
+              className="sider-label-text"
             >
-              共 {visibleQueue.length} 个
+              {visibleQueue.length}
             </Typography.Text>
           </div>
         </Sider>
 
         <Content style={{ padding: 12, overflow: "auto" }}>
           {visibleQueue.length === 0 ? (
-            <DropZone
-              dragOver={dragOver}
-              parsing={parsing}
-              kind={activeTab}
-              onPick={() => void pickFiles()}
-            />
+            <div key={activeTab} className="view-fade" style={{ height: "100%" }}>
+              <DropZone
+                dragOver={dragOver}
+                parsing={parsing}
+                kind={activeTab}
+                onPick={() => void pickFiles()}
+              />
+            </div>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+            <div key={activeTab} className="view-fade" style={{ display: "flex", flexDirection: "column", height: "100%" }}>
               <Space style={{ marginBottom: 8 }} wrap>
                 {translating ? (
                   <>
                     <Button icon={paused ? <PlayCircleOutlined /> : <PauseOutlined />} onClick={paused ? handleResume : handlePause}>
-                      {paused ? "继续翻译" : "暂停"}
+                      {paused ? t("app.resume") : t("app.pause")}
                     </Button>
                     <Button danger icon={<StopOutlined />} onClick={handleCancel}>
-                      取消翻译
+                      {t("app.cancelTranslate")}
                     </Button>
                   </>
                 ) : (
                   <Button type="primary" icon={<ThunderboltOutlined />} disabled={parsing} onClick={() => void runTranslation()}>
-                    开始 AI 翻译
+                    {t("app.translate")}
                   </Button>
                 )}
                 <Button icon={<ExportOutlined />} disabled={translating} onClick={() => void handleExport()}>
-                  导出
+                  {t("app.export")}
                 </Button>
                 <Button danger icon={<ClearOutlined />} disabled={translating} onClick={handleClear}>
-                  清除译文
+                  {t("app.clearTranslations")}
                 </Button>
                 <Button danger icon={<DeleteOutlined />} disabled={translating} onClick={handleClearQueue}>
-                  清空列表
+                  {t("app.clearList")}
                 </Button>
                 <Button icon={<CloudUploadOutlined />} disabled={translating} onClick={() => void pickFiles()}>
-                  导入
+                  {t("app.import")}
                 </Button>
                 <Checkbox
                   checked={allChecked}
@@ -1246,13 +1467,13 @@ function App() {
                   onChange={(e) => toggleAll(e.target.checked)}
                   disabled={translating}
                 >
-                  全选
+                  {t("app.checkAll")}
                 </Checkbox>
               </Space>
 
               {translating && progress && (
                 <Space style={{ marginBottom: 8 }} align="center">
-                  <Typography.Text type="secondary">正在翻译：{currentPackName}</Typography.Text>
+                  <Typography.Text type="secondary">{t("app.translating")}{currentPackName}</Typography.Text>
                   <Progress
                     percent={progressPercent}
                     size="small"
@@ -1276,6 +1497,19 @@ function App() {
                     }}
                   />
                 </Space>
+              )}
+
+              {resultAlert && (
+                <Alert
+                  className="alert-slide"
+                  type={resultAlert.type}
+                  message={resultAlert.title}
+                  description={resultAlert.desc}
+                  showIcon
+                  closable
+                  style={{ marginBottom: 8 }}
+                  onClose={() => setResultAlert(null)}
+                />
               )}
 
               {/* 内容包队列卡片（memo 化：勾选只重渲染对应卡片） */}
@@ -1311,7 +1545,7 @@ function App() {
             支持模组 jar · 光影包 · 资源包 · 勾选要翻译/导出的内容包
           </Typography.Text>
           <Typography.Link onClick={openGithub} style={{ fontWeight: 600 }}>
-            ⭐ 完全开源免费 · GitHub 项目地址
+            <img src="/github.svg" alt="" style={{ height: 14, marginRight: 4, verticalAlign: "middle" }} /> 完全开源免费 · GitHub 项目地址
           </Typography.Link>
         </Space>
       </Footer>
@@ -1546,6 +1780,51 @@ function App() {
         </div>
       </Modal>
     </Layout>
+  );
+}
+
+/** 外层 App：持有设置，动态应用主题（亮/暗）、语言（中/英）、无字模式（CSS 类） */
+function App() {
+  const [settings, setSettings] = useState<Settings | null>(null);
+
+  // 初始化：加载设置（兼容旧配置：补齐新字段默认值）
+  useEffect(() => {
+    api
+      .loadSettings()
+      .then((s) =>
+        setSettings({
+          ...s,
+          threading: s.threading ?? {
+            enabled: false,
+            threadCount: 2,
+            requestIntervalSec: 4,
+          },
+          customPrompts: s.customPrompts ?? {},
+          deepScan: s.deepScan ?? false,
+          theme: s.theme === "dark" ? "dark" : "light",
+          language: s.language === "en" ? "en" : "zh",
+        }),
+      )
+      .catch(() => setSettings(null));
+  }, []);
+
+  const themeMode = settings?.theme ?? "light";
+  const language: "zh" | "en" = settings?.language === "en" ? "en" : "zh";
+
+  // 主题 CSS 变量挂在 html 根元素（App.css 的 [data-theme="dark"] 选择器）
+  useEffect(() => {
+    document.documentElement.dataset.theme = themeMode;
+  }, [themeMode]);
+
+  return (
+    <ConfigProvider
+      theme={themeMode === "dark" ? darkTheme : lightTheme}
+      locale={language === "zh" ? zhCN : enUS}
+    >
+      <TranslationProvider language={language}>
+        <AppInner settings={settings} setSettings={setSettings} />
+      </TranslationProvider>
+    </ConfigProvider>
   );
 }
 

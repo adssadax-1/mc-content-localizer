@@ -175,6 +175,7 @@ pub fn parse_jar(path: &Path) -> Result<ModFile, JarError> {
             } else {
                 EntryStatus::Untranslated
             },
+            translating: false,
             placeholders,
             notes: if existing.is_some() {
                 vec!["模组自带中文".to_string()]
@@ -376,6 +377,7 @@ fn scan_hardcoded(
                 translation: None,
                 hardcoded: true,
                 status: EntryStatus::Untranslated,
+                translating: false,
                 placeholders,
                 notes: vec!["硬编码文本（非 lang 文件）".to_string()],
             });

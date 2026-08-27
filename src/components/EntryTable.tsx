@@ -4,8 +4,9 @@ import { Checkbox, Input, Table, Tag, Tooltip, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useSelectionContainer } from "@air/react-drag-to-select";
 import type { SelectionBox } from "@air/react-drag-to-select";
+import { useTranslationContext } from "../i18n";
 import type { LangEntry } from "../types";
-import { STATUS_COLOR, STATUS_LABEL } from "../types";
+import { STATUS_COLOR } from "../types";
 
 interface Props {
   entries: LangEntry[];
@@ -30,6 +31,21 @@ const MC_COLORS: Record<string, string> = {
   "8": "#555555", "9": "#5555FF", a: "#55FF55", b: "#55FFFF",
   c: "#FF5555", d: "#FF55FF", e: "#FFFF55", f: "#FFFFFF",
 };
+
+/** 按条目状态/翻译中标记返回表格行底色（CSS 变量，亮暗主题自适应） */
+function rowBg(e: LangEntry): string | undefined {
+  if (e.translating) return "var(--row-translating)"; // 淡蓝：正在汉化
+  switch (e.status) {
+    case "aiTranslated":
+      return "var(--row-translated)"; // 淡绿：已汉化完成
+    case "aiEmpty":
+      return "var(--row-empty)"; // 淡黄：AI 未返回译文
+    case "aiFailed":
+      return "var(--row-failed)"; // 淡红：429 限流 / 翻译失败
+    default:
+      return undefined;
+  }
+}
 
 /** 按 § 格式码渲染文本效果（颜色/粗体/斜体/下划线/删除线），深色背景便于预览 */
 function McFormatPreview({ text }: { text: string }) {
@@ -92,6 +108,8 @@ function TranslationInput({
   onChange: (v: string) => void;
   onClear?: () => void;
 }) {
+  const { t } = useTranslationContext();
+  const clearTip = t("components.clearTranslation");
   const [local, setLocal] = useState(value ?? "");
   const timerRef = useRef<number | null>(null);
   const focusedRef = useRef(false);
@@ -119,7 +137,7 @@ function TranslationInput({
   const input = (
     <Input
       value={local}
-      placeholder="（未翻译）"
+      placeholder={undefined}
       onFocus={() => {
         focusedRef.current = true;
       }}
@@ -133,7 +151,7 @@ function TranslationInput({
       }}
       suffix={
         onClear ? (
-          <Tooltip title="清除此条译文，重新加入汉化队列">
+          <Tooltip title={clearTip}>
             <CloseCircleOutlined
               style={{
                 cursor: local || value ? "pointer" : "default",
@@ -181,6 +199,7 @@ export const EntryTable = memo(function EntryTable({
   onToggleManySelected,
   scrollY,
 }: Props) {
+  const { t: tr } = useTranslationContext();
   const [filter, setFilter] = useState("");
   // 条目多时启用虚拟滚动（只渲染可视行，大幅降低渲染成本）
   const useVirtual = entries.length > 200 && (scrollY ?? 0) > 100;
@@ -370,17 +389,26 @@ export const EntryTable = memo(function EntryTable({
       title: "状态",
       dataIndex: "status",
       width: 100,
-      render: (s: LangEntry["status"]) => (
-        <Tag color={STATUS_COLOR[s]}>{STATUS_LABEL[s]}</Tag>
-      ),
+      render: (s: LangEntry["status"], record) =>
+        record.translating ? (
+          <Tag color="processing">{tr("components.translating")}</Tag>
+        ) : (
+          <Tag color={STATUS_COLOR[s]}>{tr(`status.${s}`)}</Tag>
+        ),
       filters: [
-        { text: "未翻译", value: "untranslated" },
-        { text: "自带中文", value: "existingZh" },
-        { text: "AI 翻译", value: "aiTranslated" },
-        { text: "人工确认", value: "userConfirmed" },
-        { text: "占位符异常", value: "placeholderError" },
+        { text: tr("components.statusUntranslated"), value: "untranslated" },
+        { text: tr("components.statusExistingZh"), value: "existingZh" },
+        { text: tr("components.statusAiTranslated"), value: "aiTranslated" },
+        { text: tr("components.statusUserConfirmed"), value: "userConfirmed" },
+        { text: tr("components.statusPlaceholderError"), value: "placeholderError" },
+        { text: tr("components.translating"), value: "__translating__" },
+        { text: tr("components.statusAiEmpty"), value: "aiEmpty" },
+        { text: tr("components.statusAiFailed"), value: "aiFailed" },
       ],
-      onFilter: (value, record) => record.status === value,
+      onFilter: (value, record) =>
+        value === "__translating__"
+          ? !!record.translating
+          : record.status === value,
     },
     {
       title: "key",
@@ -391,13 +419,13 @@ export const EntryTable = memo(function EntryTable({
       sorter: (a, b) => a.key.localeCompare(b.key),
     },
     {
-      title: "原文 (en)",
+      title: tr("components.colOriginal"),
       dataIndex: "source",
       width: 300,
       ellipsis: true,
     },
     {
-      title: "译文 (zh_cn)",
+      title: tr("components.colTranslation"),
       dataIndex: "translation",
       width: 340,
       render: (_, record) => (
@@ -411,7 +439,7 @@ export const EntryTable = memo(function EntryTable({
       ),
     },
     {
-      title: "备注",
+      title: tr("components.colNotes"),
       dataIndex: "notes",
       width: 200,
       render: (notes: string[], record) => (
@@ -437,7 +465,7 @@ export const EntryTable = memo(function EntryTable({
     <div style={{ display: "flex", flexDirection: "column" }}>
       <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
         <Input.Search
-          placeholder="搜索 key 或原文..."
+          placeholder={tr("components.searchPlaceholder")}
           allowClear
           style={{ maxWidth: 360 }}
           onChange={(e) => setFilter(e.target.value)}
@@ -445,8 +473,9 @@ export const EntryTable = memo(function EntryTable({
         <Typography.Text
           type="secondary"
           style={{ alignSelf: "center", fontSize: 12 }}
+          className="sider-label-text"
         >
-          <CheckOutlined /> 勾选 = 参与汉化（未勾选的不翻译、不导出）
+          <CheckOutlined /> {tr("components.checkHint")}
         </Typography.Text>
       </div>
       <div style={{ position: "relative" }} ref={tableWrapRef}>
@@ -491,7 +520,7 @@ export const EntryTable = memo(function EntryTable({
               if (d && Math.hypot(e.clientX - d.x, e.clientY - d.y) > 6) return;
               onSelect(record.key);
             },
-            style: { cursor: "pointer", userSelect: "none" },
+            style: { cursor: "pointer", userSelect: "none", background: rowBg(record) },
           })}
         />
       </div>

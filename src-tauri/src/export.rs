@@ -317,6 +317,7 @@ mod tests {
             translation: translation.map(String::from),
             hardcoded: false,
             status: crate::core::model::EntryStatus::AiTranslated,
+            translating: false,
             placeholders: Vec::new(),
             notes: Vec::new(),
         }
@@ -494,6 +495,7 @@ mod tests {
             translation: Some("欢迎".into()),
             hardcoded: true,
             status: crate::core::model::EntryStatus::AiTranslated,
+            translating: false,
             placeholders: vec![],
             notes: vec![],
         };
