@@ -775,6 +775,8 @@ function AppInner({
       }
     }
     setQueue((prev) => [...prev, ...added]);
+    // 新导入内容包时清掉上一轮的翻译汇总提示，避免陈旧信息残留
+    setResultAlert(null);
     setParsing(false);
     if (added.length > 0) {
       message.success(
@@ -1130,6 +1132,8 @@ function AppInner({
         setSelectedKey(null);
         setProgress(null);
         setTranslating(false);
+        // 同步清掉上一轮的翻译汇总提示，避免残留到新导入的内容包界面
+        setResultAlert(null);
         message.success("已清空列表");
       },
     });
