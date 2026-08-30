@@ -7,6 +7,11 @@
 <p align="center">
   面向《我的世界》模组、光影包与资源包的 AI 汉化桌面工具
 </p>
+<p align="center">
+  <a href="https://get.microsoft.com/installer/download/9p9bn1lhbjk4?referrer=appbadge" target="_self">
+    <img src="https://get.microsoft.com/images/zh-cn%20light.svg" width="200"/>
+  </a>
+</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/build-passing-brightgreen" alt="构建状态">
