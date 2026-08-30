@@ -92,6 +92,8 @@ pub enum TranslateError {
     Api { status: u16, body: String },
     #[error("未配置 API Key")]
     MissingApiKey,
+    #[error("未选择模型")]
+    MissingModel,
     #[error("模型响应为空")]
     EmptyResponse,
     #[error("响应 JSON 解析失败: {0}")]
@@ -237,9 +239,10 @@ impl OpenAiProvider {
                 {
                     continue;
                 }
+                // 名称中带 "free" 的视为免费模型（如 OpenRouter 的 :free 后缀）
                 models.push(ModelInfo {
                     id: id.to_string(),
-                    free: false,
+                    free: lower.contains("free"),
                 });
             }
         }
@@ -259,6 +262,51 @@ impl OpenAiProvider {
         }
 
         Ok(models)
+    }
+
+    /// 验证当前配置（API Key + Base URL + 模型）是否可用：发送一个最小请求并检查响应。
+    /// 仅用于设置页「验证连接」，不参与翻译流程。
+    pub async fn test_model(&self) -> Result<String, TranslateError> {
+        if self.config.api_key.trim().is_empty() {
+            return Err(TranslateError::MissingApiKey);
+        }
+        let (base_url, model) = self.config.resolve_endpoint();
+        if model.trim().is_empty() {
+            return Err(TranslateError::MissingModel);
+        }
+        let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [{"role":"user","content":"ping"}],
+            "max_tokens": 5,
+            "temperature": 0
+        });
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(self.config.api_key.trim())
+            .json(&body)
+            .send()
+            .await?;
+        let status = resp.status();
+        let text = resp.text().await?;
+        if !status.is_success() {
+            return Err(TranslateError::Api {
+                status: status.as_u16(),
+                body: text.chars().take(300).collect(),
+            });
+        }
+        let value: serde_json::Value = serde_json::from_str(&text)?;
+        let ok = value
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .map(|a| !a.is_empty())
+            .unwrap_or(false);
+        if ok {
+            Ok(format!("连接成功，模型「{}」可用", model))
+        } else {
+            Err(TranslateError::EmptyResponse)
+        }
     }
 }
 

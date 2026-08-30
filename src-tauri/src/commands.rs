@@ -316,6 +316,13 @@ pub async fn list_models(config: ProviderConfig) -> Result<Vec<crate::translate:
     provider.list_models().await.map_err(|e| e.to_string())
 }
 
+/// 验证所选模型连接是否可用（发送最小请求，不参与翻译流程）
+#[tauri::command]
+pub async fn test_model(config: ProviderConfig) -> Result<String, String> {
+    let provider = OpenAiProvider::new(config);
+    provider.test_model().await.map_err(|e| e.to_string())
+}
+
 /// 多模组合并导出汉化资源包（一个 zip 管所有模组），返回生成的文件路径
 #[tauri::command]
 pub fn export_resource_pack_multi(

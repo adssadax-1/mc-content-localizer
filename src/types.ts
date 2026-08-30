@@ -216,62 +216,73 @@ export const LOADER_LABEL: Record<Loader, string> = {
   unknown: "未知",
 };
 
-/** 服务商预设（与 Rust 侧 PRESETS 一一对应；label 用于网格卡片展示） */
-export const PROVIDER_PRESETS: Record<string, { label: string; model: string; baseUrl: string }> = {
+/** 服务商预设（与 Rust 侧 PRESETS 一一对应；label 用于网格卡片展示，website 为官网便于跳转） */
+export const PROVIDER_PRESETS: Record<string, { label: string; model: string; baseUrl: string; website: string }> = {
   zhipu: {
     label: "智谱 GLM",
     model: "glm-4-flash-250414",
     baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    website: "https://open.bigmodel.cn",
   },
   qwen: {
     label: "通义 Qwen",
     model: "qwen-flash",
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    website: "https://bailian.console.aliyun.com",
   },
   deepseek: {
     label: "DeepSeek",
     model: "deepseek-v4-flash",
     baseUrl: "https://api.deepseek.com/v1",
+    website: "https://platform.deepseek.com",
   },
   doubao: {
     label: "火山豆包",
     model: "doubao-seed-1-8",
     baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+    website: "https://www.volcengine.com/product/ark",
   },
   moonshot: {
     label: "Kimi 月之暗面",
     model: "kimi-k2",
     baseUrl: "https://api.moonshot.cn/v1",
+    website: "https://platform.moonshot.cn",
   },
   hunyuan: {
     label: "腾讯混元",
     model: "hunyuan-turbos-latest",
     baseUrl: "https://api.hunyuan.cloud.tencent.com/v1",
+    website: "https://cloud.tencent.com/product/hunyuan",
   },
   siliconflow: {
     label: "硅基流动",
     model: "deepseek-ai/DeepSeek-V3.2",
     baseUrl: "https://api.siliconflow.cn/v1",
+    website: "https://siliconflow.cn",
   },
   gemini: {
     label: "Google Gemini",
     model: "gemini-2.5-flash",
     baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    website: "https://aistudio.google.com",
   },
   openai: {
     label: "OpenAI",
     model: "gpt-5-mini",
     baseUrl: "https://api.openai.com/v1",
+    website: "https://platform.openai.com",
   },
   openrouter: {
     label: "OpenRouter",
     model: "google/gemini-2.5-flash",
     baseUrl: "https://openrouter.ai/api/v1",
+    website: "https://openrouter.ai",
   },
   custom: {
     label: "自定义",
     model: "",
     baseUrl: "",
+    website: "",
   },
 };
 

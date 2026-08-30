@@ -182,7 +182,7 @@
     "requestIntervalDesc": "Interval between each request per thread; larger intervals reduce rate-limiting risk (recommended ≥ 4s).",
     "warningThreading": "Multi-threaded parallelism sends multiple translation requests to the model simultaneously to speed up, but carries risks and limitations:",
     "warningThreadingList1": "Free models (glm-4-flash / 4.7-flash) have <b>account-level rate limits</b> (~15-30 req/min). Multi-threading can trigger rate limits (429), with automatic backoff retry.",
-    "warningThreadingList2": "<b>Free models recommend 1-2 threads</b>, paid models (glm-4.5, etc.) can use 4-8 threads for significant speedup.",
+    "warningThreadingList2": "<b>Thread count should follow each provider's official rate limits</b>: quotas vary across vendors for the same model — e.g. OpenRouter free models can run 8 threads, while Zhipu free models (glm-4-flash series) suggest 1-2 threads; paid models (glm-4.5, etc.) generally allow 4-8 threads for significant speedup.",
     "warningThreadingList3": "Threads are staggered by \"request interval\" to reduce rate-limit probability; larger intervals are more stable (recommended ≥ 4s).",
     "warningThreadingList4": "Different models translating simultaneously may have inconsistent naming style; use the same model for consistency.",
     "deepScanDesc": "Parse embedded text in mods that may be missed by regular scan (config/achievements/manuals/nested jars). Compiled .class text not supported.",

@@ -104,26 +104,6 @@ body {
 .pack-card:nth-child(3) { animation-delay: 0.1s; }
 .pack-card:nth-child(n + 4) { animation-delay: 0.15s; }
 
-/* 场景 2：主内容区（表格/空态）切换内容包类型页签时淡入上移 */
-@keyframes view-in {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-.view-fade {
-  animation: view-in var(--dur-base) var(--ease-out) both;
-}
-
-/* 场景 3：设置分组内容切换——淡入滑动（配合 key 重挂载） */
-@keyframes section-in {
-  from { opacity: 0; transform: translateX(14px); }
-  to { opacity: 1; transform: translateX(0); }
-}
-
-.section-fade {
-  animation: section-in var(--dur-base) var(--ease-out) both;
-}
-
 /* 场景 4：左侧导航按钮 hover/按压反馈 */
 .sider-nav-btn {
   transition:
@@ -160,8 +140,13 @@ body {
 }
 
 /* 场景 7：内容包卡片展开区（高度变化不可动画，用内容淡入上移代替） */
+@keyframes expand-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
 .pack-card-expanded-content {
-  animation: view-in var(--dur-base) var(--ease-out) both;
+  animation: expand-in var(--dur-base) var(--ease-out) both;
 }
 
 /* 场景 8：结果提示 Alert / 进度条出现时下滑淡入 */
@@ -178,8 +163,6 @@ body {
    不影响 antd 组件自带动画（弹窗缩放、抽屉滑动等） */
 @media (prefers-reduced-motion: reduce) {
   .pack-card,
-  .view-fade,
-  .section-fade,
   .pack-card-expanded-content,
   .alert-slide,
   .provider-grid-card,

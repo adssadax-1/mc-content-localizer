@@ -103,6 +103,9 @@ export const api = {
 
   listModels: (config: ProviderConfig) => invoke<ModelInfo[]>("list_models", { config }),
 
+  /** 验证所选模型连接是否可用（发送最小请求） */
+  testModel: (config: ProviderConfig) => invoke<string>("test_model", { config }),
+
   cancelTranslation: () => invoke<void>("cancel_translation"),
   pauseTranslation: () => invoke<void>("pause_translation"),
   resumeTranslation: () => invoke<void>("resume_translation"),

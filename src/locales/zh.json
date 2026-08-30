@@ -182,7 +182,7 @@
     "requestIntervalDesc": "每个线程每次请求之间的间隔，间隔越大越不容易触发限流",
     "warningThreading": "多线程并行会同时向模型发送多个翻译请求以提升速度，但存在以下风险与限制：",
     "warningThreadingList1": "免费模型（glm-4-flash / 4.7-flash）有<b>账号级速率限制</b>（实测约 15~30 请求/分钟），多线程容易触发限流（429），程序会自动退避重试；",
-    "warningThreadingList2": "<b>免费模型建议 1-2 线程</b>，付费模型（glm-4.5 等）可开 4-8 线程提速明显；",
+    "warningThreadingList2": "<b>具体线程数以各服务商官网限速为准</b>：同一模型不同厂商额度差异较大，例如 OpenRouter 的免费模型可开 8 线程，而智谱免费模型（glm-4-flash 系列）建议 1-2 线程；付费模型（glm-4.5 等）一般可开 4-8 线程提速明显；",
     "warningThreadingList3": "线程之间按「请求间隔」错开发送，降低限流概率，间隔越大越稳（推荐 ≥ 4 秒）；",
     "warningThreadingList4": "不同模型同时翻译时，译名风格可能不完全一致，建议用同一模型。",
     "deepScanDesc": "解析模组中普通扫描可能遗漏的内嵌文本（配置文件/成就/手册/嵌套 jar 等）。已编译的 .class 代码内文本暂不支持。",

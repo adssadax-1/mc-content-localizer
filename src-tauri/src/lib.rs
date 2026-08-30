@@ -29,6 +29,7 @@ pub fn run() {
             commands::load_settings,
             commands::save_settings,
             commands::list_models,
+            commands::test_model,
             commands::export_mod_jar,
             commands::cancel_translation,
             commands::pause_translation,

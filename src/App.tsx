@@ -1358,6 +1358,7 @@ function AppInner({
     return null;
   }, [queue, selectedKey]);
 
+
   const visibleQueue = queue.filter((it) => it.kind === activeTab);
   const allChecked = visibleQueue.length > 0 && visibleQueue.every((it) => it.checked);
   const progressPercent = progress
@@ -1428,7 +1429,7 @@ function AppInner({
 
         <Content style={{ padding: 12, overflow: "auto" }}>
           {visibleQueue.length === 0 ? (
-            <div key={activeTab} className="view-fade" style={{ height: "100%" }}>
+            <div style={{ height: "100%" }}>
               <DropZone
                 dragOver={dragOver}
                 parsing={parsing}
@@ -1437,7 +1438,7 @@ function AppInner({
               />
             </div>
           ) : (
-            <div key={activeTab} className="view-fade" style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+            <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
               <Space style={{ marginBottom: 8 }} wrap>
                 {translating ? (
                   <>

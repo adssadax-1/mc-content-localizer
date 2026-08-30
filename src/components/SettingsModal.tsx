@@ -1,7 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
-  AutoComplete,
   Button,
   Divider,
   Form,
@@ -17,12 +16,13 @@ import {
   Typography,
 } from "antd";
 import {
+  ApiOutlined,
   BookOutlined,
   BgColorsOutlined,
   CloudServerOutlined,
-  DownOutlined,
   EditOutlined,
   InfoCircleOutlined,
+  LinkOutlined,
   MinusCircleOutlined,
   PlusOutlined,
   ReloadOutlined,
@@ -103,7 +103,7 @@ interface FormValues {
 }
 
 /** 当前版本号（与 package.json / tauri.conf.json 一致） */
-const CURRENT_VERSION = "2.0.0";
+const CURRENT_VERSION = "2.0.1";
 
 /** 项目 GitHub 地址 */
 const GITHUB_URL = "https://github.com/adssadax-1/mc-content-localizer";
@@ -121,10 +121,11 @@ const SECTIONS: { key: string; label: string; icon: React.ReactNode }[] = [
 export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
   const [form] = Form.useForm<FormValues>();
   const provider = Form.useWatch("provider", form);
+  const selectedModel = Form.useWatch("model", form);
   const threadingEnabled = Form.useWatch("threadingEnabled", form);
   const [modelOptions, setModelOptions] = useState<ModelInfo[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
-  const [modelOpen, setModelOpen] = useState(false);
+  const [testingModel, setTestingModel] = useState(false);
   const [promptEditorOpen, setPromptEditorOpen] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   /** 当前展示的设置分组（默认页面设置） */
@@ -144,7 +145,6 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
     form.setFieldValue("apiKey", keys[provider] ?? "");
     form.setFieldValue("model", models[provider] ?? PROVIDER_PRESETS[provider]?.model ?? "");
     setModelOptions(opts[provider] ?? []);
-    setModelOpen(false);
   }, [provider, open, form]);
 
   /** 手动检查更新：有新版 → 确认跳转 Release；已最新 → 提示；连不上 → 明确报错 */
@@ -193,9 +193,49 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
       // 模型列表：用当前服务商缓存的列表（没拉取过则为空）
       const cur = settings.provider.provider;
       setModelOptions(settings.providerModelOptions?.[cur] ?? []);
-      setModelOpen(false);
     }
   }, [open, settings, form]);
+
+  /** Select 下拉选项：当前选中模型不在列表中时前置，保证可见可选 */
+  const selectOptions = useMemo(() => {
+    const list = [...modelOptions];
+    const cur = (selectedModel ?? "").trim();
+    if (cur && !list.some((m) => m.id === cur)) {
+      list.unshift({ id: cur, free: cur.toLowerCase().includes("free") });
+    }
+    return list;
+  }, [modelOptions, selectedModel]);
+
+  /** 验证所选模型连接是否可用：发送最小请求并反馈结果 */
+  async function handleTestModel() {
+    const apiKey = form.getFieldValue("apiKey")?.trim() as string | undefined;
+    const providerName = form.getFieldValue("provider") as string;
+    const model = form.getFieldValue("model")?.trim() as string | undefined;
+    if (!apiKey) {
+      message.warning("请先填写 API Key");
+      return;
+    }
+    if (!model) {
+      message.warning("请先选择或输入模型");
+      return;
+    }
+    const cfg: ProviderConfig = {
+      provider: providerName,
+      apiKey,
+      model,
+      baseUrl: providerName === "custom" ? (form.getFieldValue("baseUrl")?.trim() || null) : null,
+      temperature: 0,
+      maxRetries: 0,
+    };
+    setTestingModel(true);
+    try {
+      const msg = await api.testModel(cfg);
+      message.success(msg);
+    } catch (e) {
+      message.error(`连接验证失败：${String(e)}`);
+    }
+    setTestingModel(false);
+  }
 
   async function handleFetchModels() {
     const apiKey = form.getFieldValue("apiKey")?.trim() as string | undefined;
@@ -343,8 +383,8 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
           ))}
         </div>
 
-        {/* 右侧内容区：antd Form 数据存于 form 实例（与 DOM 无关），分组切换用
-            key 重挂载以触发 section-fade 淡入动画；字段值/校验状态不丢失 */}
+        {/* 右侧内容区：antd Form 数据存于 form 实例（与 DOM 无关），
+            分组切换即时渲染；字段值/校验状态不丢失 */}
         <div
           style={{
             flex: 1,
@@ -355,7 +395,7 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
           }}
         >
           <Form form={form} layout="vertical">
-            <div key={activeSection} className="section-fade">
+            <div key={activeSection}>
             {/* ===== 分组：服务商与模型 ===== */}
             {activeSection === "provider" && (
             <div>
@@ -422,56 +462,129 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
                     : "可点击「获取模型列表」拉取，或手动输入"
                 }
               >
-                <AutoComplete
-                  options={modelOptions.map((m) => ({
-                    value: m.id,
-                    label: (
-                      <span>
-                        {m.id}
-                        {m.free && (
-                          <span
-                            style={{
-                              marginLeft: 8,
-                              fontSize: 12,
-                              color: "#52c41a",
-                              fontWeight: "normal",
-                            }}
-                          >
-                            （免费模型）
-                          </span>
-                        )}
-                      </span>
-                    ),
-                  }))}
-                  placeholder={
-                    modelOptions.length === 0
-                      ? "填写 API Key 后点击「获取模型列表」"
-                      : provider
-                        ? PROVIDER_PRESETS[provider]?.model || "选择或输入模型名"
-                        : ""
-                  }
-                  open={modelOpen}
-                  onDropdownVisibleChange={setModelOpen}
-                >
-                  {/* 右侧为下拉箭头（非删除图标）：点击切换开合，中间区域为编辑光标 */}
+                {modelOptions.length === 0 ? (
+                  // 未拉取列表：允许自由输入模型名
                   <Input
-                    suffix={
-                      <DownOutlined
-                        style={{ cursor: "pointer", color: "#8c8c8c" }}
-                        onMouseDown={(e) => {
-                          e.preventDefault();
-                          setModelOpen((v) => !v);
-                        }}
-                      />
+                    placeholder={
+                      provider
+                        ? PROVIDER_PRESETS[provider]?.model || "选择或输入模型名"
+                        : "填写 API Key 后点击「获取模型列表」"
                     }
                   />
-                </AutoComplete>
+                ) : (
+                  // 已拉取列表：Select 自带搜索，原生虚拟化支持数百项
+                  <Select
+                    showSearch
+                    placeholder="搜索模型名称或 ID..."
+                    optionFilterProp="label"
+                    filterOption={(input, option) => {
+                      const v = String(option?.value ?? "").toLowerCase();
+                      const l = String(option?.label ?? "").toLowerCase();
+                      const q = input.toLowerCase();
+                      return v.includes(q) || l.includes(q);
+                    }}
+                    filterSort={(a, b) => {
+                      // 免费模型优先，再按 id 升序
+                      const va = String(a?.value ?? "").toLowerCase();
+                      const vb = String(b?.value ?? "").toLowerCase();
+                      const fa = va.includes("free") ? 1 : 0;
+                      const fb = vb.includes("free") ? 1 : 0;
+                      if (fa !== fb) return fb - fa;
+                      return va.localeCompare(vb);
+                    }}
+                    optionRender={(option) => {
+                      const id = String(option.value ?? "");
+                      const free = id.toLowerCase().includes("free");
+                      return (
+                        <span
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                          }}
+                        >
+                          <span
+                            style={{
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                            title={id}
+                          >
+                            {id}
+                          </span>
+                          {free && (
+                            <Tag
+                              color="green"
+                              style={{
+                                marginInline: 0,
+                                flexShrink: 0,
+                                fontSize: 11,
+                                lineHeight: "18px",
+                              }}
+                            >
+                              免费
+                            </Tag>
+                          )}
+                        </span>
+                      );
+                    }}
+                    options={selectOptions.map((m) => ({
+                      value: m.id,
+                      label: m.id,
+                    }))}
+                  />
+                )}
               </Form.Item>
 
-              {provider === "custom" && (
+              {/* 连接验证（链接样式小按钮）+ 选中模型为免费时标注 */}
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 12,
+                  marginTop: -4,
+                  marginBottom: 12,
+                }}
+              >
+                <Button
+                  type="link"
+                  size="small"
+                  icon={<ApiOutlined />}
+                  loading={testingModel}
+                  onClick={() => void handleTestModel()}
+                  style={{ paddingInline: 0 }}
+                >
+                  验证连接
+                </Button>
+              </div>
+
+              {/* Base URL 展示：自定义可编辑；预设只读灰色 + 官网跳转 */}
+              {provider === "custom" ? (
                 <Form.Item name="baseUrl" label="Base URL（OpenAI 兼容端点）">
                   <Input placeholder="https://..." />
                 </Form.Item>
+              ) : (
+                provider && PROVIDER_PRESETS[provider]?.baseUrl && (
+                  <Form.Item label="Base URL（OpenAI 兼容端点）">
+                    <Input
+                      disabled
+                      value={PROVIDER_PRESETS[provider].baseUrl}
+                      addonAfter={
+                        PROVIDER_PRESETS[provider]?.website ? (
+                          <Typography.Link
+                            onClick={() =>
+                              void openUrl(PROVIDER_PRESETS[provider].website)
+                            }
+                            style={{ fontSize: 12 }}
+                          >
+                            <LinkOutlined /> 官网
+                          </Typography.Link>
+                        ) : undefined
+                      }
+                    />
+                  </Form.Item>
+                )
               )}
             </div>
             )}
@@ -590,7 +703,9 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
                         （实测约 15~30 请求/分钟），多线程容易触发限流（429），程序会自动退避重试；
                       </li>
                       <li>
-                        <b>免费模型建议 1-2 线程</b>，付费模型（glm-4.5 等）可开 4-8 线程提速明显；
+                        <b>具体线程数以各服务商官网限速为准</b>：同一模型不同厂商额度差异较大，
+                        例如 OpenRouter 的免费模型可开 8 线程，而智谱免费模型（glm-4-flash 系列）建议 1-2 线程；
+                        付费模型（glm-4.5 等）一般可开 4-8 线程提速明显；
                       </li>
                       <li>线程之间按「请求间隔」错开发送，降低限流概率，间隔越大越稳（推荐 ≥ 4 秒）；</li>
                       <li>不同模型同时翻译时，译名风格可能不完全一致，建议用同一模型。</li>
@@ -723,7 +838,7 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
             </div>
             )}
             </div>
-          </Form>
+            </Form>
         </div>
       </div>
 
