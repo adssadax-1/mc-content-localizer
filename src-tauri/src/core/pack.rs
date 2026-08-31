@@ -316,12 +316,18 @@ pub fn export_shader_zh(source: &Path, dest: &Path, entries: &[LangEntry]) -> Re
         .filter(|e| e.translation.as_ref().is_some_and(|t| !t.is_empty()))
         .collect();
     if translated.is_empty() {
-        return Err("没有已翻译的条目可导出".to_string());
+        return Err("没有可导出的内容：当前勾选项中没有\"已翻译完成\"的条目。请确认：① 已勾选要导出的条目；② 这些条目的翻译状态不是红色（失败）。".to_string());
     }
 
     let src_file = File::open(source).map_err(|e| format!("无法打开源光影包: {}", e))?;
     let mut src = ZipArchive::new(src_file).map_err(|e| e.to_string())?;
-    let dest_file = File::create(dest).map_err(|e| format!("无法创建文件: {}", e))?;
+    let dest_file = File::create(dest).map_err(|e| {
+        format!(
+            "无法将翻译结果保存到「{}」：可能原因：磁盘空间不足 / 无写入权限 / 文件被其他程序占用。请排查后重试。（原始错误：{}）",
+            dest.display(),
+            e
+        )
+    })?;
     let mut out = zip::ZipWriter::new(dest_file);
 
     for i in 0..src.len() {
@@ -380,12 +386,18 @@ pub fn export_resource_pack_desc(
         .filter(|e| e.translation.as_ref().is_some_and(|t| !t.is_empty()))
         .collect();
     if translated.is_empty() {
-        return Err("没有已翻译的条目可导出".to_string());
+        return Err("没有可导出的内容：当前勾选项中没有\"已翻译完成\"的条目。请确认：① 已勾选要导出的条目；② 这些条目的翻译状态不是红色（失败）。".to_string());
     }
 
     let src_file = File::open(source).map_err(|e| format!("无法打开源资源包: {}", e))?;
     let mut src = ZipArchive::new(src_file).map_err(|e| e.to_string())?;
-    let dest_file = File::create(dest).map_err(|e| format!("无法创建文件: {}", e))?;
+    let dest_file = File::create(dest).map_err(|e| {
+        format!(
+            "无法将翻译结果保存到「{}」：可能原因：磁盘空间不足 / 无写入权限 / 文件被其他程序占用。请排查后重试。（原始错误：{}）",
+            dest.display(),
+            e
+        )
+    })?;
     let mut out = zip::ZipWriter::new(dest_file);
 
     let mut new_description: Option<String> = None;

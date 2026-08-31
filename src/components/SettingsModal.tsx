@@ -103,7 +103,7 @@ interface FormValues {
 }
 
 /** 当前版本号（与 package.json / tauri.conf.json 一致） */
-const CURRENT_VERSION = "2.0.1";
+const CURRENT_VERSION = "2.0.2";
 
 /** 项目 GitHub 地址 */
 const GITHUB_URL = "https://github.com/adssadax-1/mc-content-localizer";

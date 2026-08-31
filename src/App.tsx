@@ -46,7 +46,7 @@ import { DropZone } from "./components/DropZone";
 import { EntryTable } from "./components/EntryTable";
 import { ContextPanel } from "./components/ContextPanel";
 import { SettingsModal } from "./components/SettingsModal";
-import { TranslationProvider, useTranslationContext } from "./i18n";
+import { TranslationProvider, useTranslation, useTranslationContext } from "./i18n";
 import { LOADER_LABEL, packFormatForMc } from "./types";
 import type {
   BatchItem,
@@ -145,6 +145,12 @@ function asDir(dir: string | string[] | null): string | null {
   return Array.isArray(dir) ? dir[0] : dir;
 }
 
+/** Windows 文件名非法字符清洗（* ? : < > | / \ "）→ _，并截断超过 100 字符。
+ *  防止 modid / 文件名含非法字符时导出触发 os error 123（文件名语法不正确）。 */
+function sanitizeFileName(s: string): string {
+  return s.replace(/[*?:<>|\\/"]/g, "_").slice(0, 100);
+}
+
 /** 内容包类型 */
 type PackKind = "mod" | "shader" | "resourcepack";
 
@@ -193,28 +199,25 @@ function entryPatchFromResult(r: TranslatedItem): {
 }
 
 /** 根据实时统计构造翻译结果汇总提示（醒目、可操作的解决建议） */
-function buildResultAlert(c: {
-  ok: number;
-  empty: number;
-  error: number;
-  error429: number;
-  warn: number;
-}): { type: "success" | "warning" | "error" | "info"; title: string; desc: React.ReactNode } {
+function buildResultAlert(
+  c: {
+    ok: number;
+    empty: number;
+    error: number;
+    error429: number;
+    warn: number;
+  },
+  t: (p: string, v?: Record<string, string | number>) => string,
+): { type: "success" | "warning" | "error" | "info"; title: string; desc: React.ReactNode } {
   const lines: string[] = [];
   if (c.empty > 0) {
-    lines.push(
-      `有 ${c.empty} 条 AI 未返回译文（列表中标记为淡黄色）。常见原因：免费模型输出不稳定、单次请求条目过多导致模型截断、或网络波动。建议：① 仅勾选较少条目、分多批次翻译；② 在设置中适当降低「批处理大小」；③ 换用更稳定的模型或提高额度。`,
-    );
+    lines.push(t("app.alertEmpty", { empty: c.empty }));
   }
   if (c.error > 0) {
     if (c.error429 > 0) {
-      lines.push(
-        `有 ${c.error} 条因 429 限流失败（标记为红色）。免费模型额度有限会周期性限流。建议：减少本次勾选条目、降低并发线程数、调大请求间隔，或稍后重试；若长期需要可换更高额度模型。`,
-      );
+      lines.push(t("app.alertError429", { error: c.error }));
     } else {
-      lines.push(
-        `有 ${c.error} 条翻译失败（标记为红色），多为网络异常或密钥/模型配置错误。请检查：API Key 是否正确、Base URL 与模型名是否匹配、网络是否可访问服务商。`,
-      );
+      lines.push(t("app.alertErrorOther", { error: c.error }));
     }
   }
   if (c.warn > 0) {
@@ -758,7 +761,15 @@ function AppInner({
           zhTotal += item.zhCount ?? 0;
         }
       } catch (e) {
-        message.error(`「${p.split(/[\\/]/).pop()}」解析失败：${String(e)}`);
+        const fileName = p.split(/[\\/]/).pop() ?? p;
+        const err = String(e);
+        if (/zip 读取失败|无法打开文件/.test(err)) {
+          message.error(t("app.msgParseCorrupt", { name: fileName }));
+        } else if (/未能识别为可翻译的模组|不是可翻译/.test(err)) {
+          message.error(t("app.msgParseNotPack", { name: fileName }));
+        } else {
+          message.error(t("app.msgParseOther", { name: fileName, error: err }));
+        }
       }
     }
     // 自动深度扫描（设置开关开启时）：普通解析为空的模组
@@ -968,7 +979,7 @@ function AppInner({
       return;
     }
     if (!settings.provider.apiKey) {
-      message.warning("请先在设置中填写 API Key");
+      message.warning(t("app.msgApiKeyRequired"));
       setSettingsOpen(true);
       return;
     }
@@ -1056,7 +1067,7 @@ function AppInner({
           setGlossarySuggest(sugg);
           setSuggestChecked(sugg.map(([en]) => en));
         }
-        setResultAlert(buildResultAlert(liveCounts.current));
+        setResultAlert(buildResultAlert(liveCounts.current, t));
       } else {
         message.info("勾选的内容包没有需要翻译的条目（可能已全部翻译）");
         setResultAlert(null);
@@ -1207,7 +1218,7 @@ function AppInner({
         }
         try {
           const base = it.fileName.replace(/\.(zip|jar)$/i, "");
-          const dest = `${dir}/${base}_zh_CN.zip`;
+          const dest = `${dir}/${sanitizeFileName(base)}_zh_CN.zip`;
           await api.exportShaderZh(it.sourcePath, dest, translated);
           generated.push(dest);
           ok += 1;
@@ -1219,7 +1230,9 @@ function AppInner({
       if (skipped > 0)
         message.warning(`${skipped} 个光影包没有可导出的译文（请先翻译，或检查条目勾选状态）`);
       if (ok === 0 && skipped === 0)
-        message.warning("没有可导出的内容");
+        message.warning(
+          t("app.noTranslations"),
+        );
       return;
     }
     if (kind === "resourcepack") {
@@ -1238,7 +1251,7 @@ function AppInner({
         }
         try {
           const base = it.fileName.replace(/\.(zip|jar)$/i, "");
-          const dest = `${dir}/${base}_zh_CN.zip`;
+          const dest = `${dir}/${sanitizeFileName(base)}_zh_CN.zip`;
           await api.exportResourcePackDesc(it.sourcePath, dest, translated);
           generated.push(dest);
           ok += 1;
@@ -1250,7 +1263,9 @@ function AppInner({
       if (skipped > 0)
         message.warning(`${skipped} 个资源包没有可导出的译文（请先翻译，或检查条目勾选状态）`);
       if (ok === 0 && skipped === 0)
-        message.warning("没有可导出的内容");
+        message.warning(
+          t("app.noTranslations"),
+        );
       return;
     }
     // 模组：弹窗选合并资源包 / 汉化 jar
@@ -1324,11 +1339,11 @@ function AppInner({
         return (e.selected ?? true) && e.translation;
       });
       if (translated.length === 0) {
-        message.warning(`「${it.name}」没有译文，跳过`);
+        message.warning(t("app.noExportItem", { name: it.name }));
         continue;
       }
       try {
-        const dest = `${dir}/${it.modFile?.modid ?? "mod"}_zh_cn.jar`;
+        const dest = `${dir}/${sanitizeFileName(it.modFile?.modid ?? "mod")}_zh_cn.jar`;
         await api.exportModJar(
           it.sourcePath,
           dest,
@@ -1346,7 +1361,9 @@ function AppInner({
       notifyExport(`已生成 ${ok} 个汉化 jar`, generated);
       setExportOpen(false);
     } else {
-      message.warning("没有可导出的译文（请先翻译，或检查条目勾选状态）");
+      message.warning(
+        t("app.noTranslations"),
+      );
     }
   }
 
@@ -1791,6 +1808,10 @@ function AppInner({
 /** 外层 App：持有设置，动态应用主题（亮/暗）、语言（中/英）、无字模式（CSS 类） */
 function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
+  const themeMode = settings?.theme ?? "light";
+  const language: "zh" | "en" = settings?.language === "en" ? "en" : "zh";
+  // 外层组件在 TranslationProvider 之外，用不依赖 context 的 useTranslation
+  const { t } = useTranslation(language);
 
   // 初始化：加载设置（兼容旧配置：补齐新字段默认值）
   useEffect(() => {
@@ -1810,11 +1831,11 @@ function App() {
           language: s.language === "en" ? "en" : "zh",
         }),
       )
-      .catch(() => setSettings(null));
+      .catch(() => {
+        message.warning(t("app.msgSettingsLoadFailed"));
+        setSettings(null);
+      });
   }, []);
-
-  const themeMode = settings?.theme ?? "light";
-  const language: "zh" | "en" = settings?.language === "en" ? "en" : "zh";
 
   // 主题 CSS 变量挂在 html 根元素（App.css 的 [data-theme="dark"] 选择器）
   useEffect(() => {

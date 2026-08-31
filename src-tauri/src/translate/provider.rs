@@ -90,7 +90,7 @@ pub enum TranslateError {
     Http(#[from] reqwest::Error),
     #[error("服务返回错误状态 {status}: {body}")]
     Api { status: u16, body: String },
-    #[error("未配置 API Key")]
+    #[error("未配置 API Key（请在设置中填写）")]
     MissingApiKey,
     #[error("未选择模型")]
     MissingModel,

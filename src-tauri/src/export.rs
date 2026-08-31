@@ -19,6 +19,19 @@ pub struct ResourcePackBundle {
     pub lang_format: LangFormat,
 }
 
+/// Windows 文件名非法字符清洗（* ? : < > | / \ "）→ _，并截断超过 100 字符。
+/// 防止 modid 含非法字符时 File::create 触发 os error 123（文件名语法不正确）。
+fn sanitize_file_stem(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .map(|c| match c {
+            '*' | '?' | ':' | '<' | '>' | '|' | '/' | '\\' | '"' => '_',
+            _ => c,
+        })
+        .collect();
+    cleaned.chars().take(100).collect()
+}
+
 /// 多模组合并导出汉化资源包 zip（一个资源包管所有模组中文）。
 /// 只包含 lang 条目（硬编码文本无法通过资源包覆盖，需回写 jar）。
 pub fn export_resource_pack_multi(
@@ -28,7 +41,13 @@ pub fn export_resource_pack_multi(
 ) -> Result<String, String> {
     let file_name = "mods_zh_cn.zip".to_string();
     let zip_path = dest_dir.join(&file_name);
-    let file = File::create(&zip_path).map_err(|e| format!("无法创建文件: {}", e))?;
+    let file = File::create(&zip_path).map_err(|e| {
+        format!(
+            "无法将翻译结果保存到「{}」：可能原因：磁盘空间不足 / 无写入权限 / 文件被其他程序占用。请排查后重试。（原始错误：{}）",
+            zip_path.display(),
+            e
+        )
+    })?;
     let mut zip = zip::ZipWriter::new(file);
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
 
@@ -66,13 +85,13 @@ pub fn export_resource_pack_multi(
             .collect();
         if b.lang_format == LangFormat::LegacyLang {
             let bytes = crate::core::lang::encode_lang(&pairs);
-            zip.start_file(format!("assets/{}/lang/zh_cn.lang", b.modid), options)
+            zip.start_file(format!("assets/{}/lang/zh_cn.lang", sanitize_file_stem(&b.modid)), options)
                 .map_err(|e| e.to_string())?;
             zip.write_all(&bytes).map_err(|e| e.to_string())?;
         } else {
             let text =
                 crate::core::json_lang::encode_json_lang(&pairs).map_err(|e| e.to_string())?;
-            zip.start_file(format!("assets/{}/lang/zh_cn.json", b.modid), options)
+            zip.start_file(format!("assets/{}/lang/zh_cn.json", sanitize_file_stem(&b.modid)), options)
                 .map_err(|e| e.to_string())?;
             zip.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
         }
@@ -80,7 +99,7 @@ pub fn export_resource_pack_multi(
     }
 
     if !wrote_any {
-        return Err("没有已翻译的条目可导出".to_string());
+        return Err("没有可导出的内容：当前勾选项中没有\"已翻译完成\"的条目。请确认：① 已勾选要导出的条目；② 这些条目的翻译状态不是红色（失败）。".to_string());
     }
     zip.finish().map_err(|e| e.to_string())?;
     Ok(zip_path.to_string_lossy().to_string())
@@ -106,12 +125,18 @@ pub fn export_resource_pack(
         .collect();
 
     if translated.is_empty() {
-        return Err("没有已翻译的条目可导出".to_string());
+        return Err("没有可导出的内容：当前勾选项中没有\"已翻译完成\"的条目。请确认：① 已勾选要导出的条目；② 这些条目的翻译状态不是红色（失败）。".to_string());
     }
 
-    let file_name = format!("{}_zh_cn.zip", modid);
+    let file_name = format!("{}_zh_cn.zip", sanitize_file_stem(modid));
     let zip_path = dest_dir.join(&file_name);
-    let file = File::create(&zip_path).map_err(|e| format!("无法创建文件: {}", e))?;
+    let file = File::create(&zip_path).map_err(|e| {
+        format!(
+            "无法将翻译结果保存到「{}」：可能原因：磁盘空间不足 / 无写入权限 / 文件被其他程序占用。请排查后重试。（原始错误：{}）",
+            zip_path.display(),
+            e
+        )
+    })?;
     let mut zip = zip::ZipWriter::new(file);
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
 
@@ -172,7 +197,7 @@ pub fn export_mod_jar(
         .filter(|e| e.translation.as_ref().is_some_and(|t| !t.is_empty()))
         .collect();
     if translated.is_empty() {
-        return Err("没有已翻译的条目可写回".to_string());
+        return Err("没有可导出的内容：当前勾选项中没有\"已翻译完成\"的条目。请确认：① 已勾选要导出的条目；② 这些条目的翻译状态不是红色（失败）。".to_string());
     }
 
     let lang_path = format!(
@@ -203,7 +228,13 @@ pub fn export_mod_jar(
 
     let src_file = File::open(source).map_err(|e| format!("无法打开源 jar: {}", e))?;
     let mut src = zip::ZipArchive::new(src_file).map_err(|e| e.to_string())?;
-    let dest_file = File::create(dest).map_err(|e| format!("无法创建文件: {}", e))?;
+    let dest_file = File::create(dest).map_err(|e| {
+        format!(
+            "无法将翻译结果保存到「{}」：可能原因：磁盘空间不足 / 无写入权限 / 文件被其他程序占用。请排查后重试。（原始错误：{}）",
+            dest.display(),
+            e
+        )
+    })?;
     let mut out = zip::ZipWriter::new(dest_file);
 
     // 复制原 jar 全部条目（跳过将写入的 zh_cn，防止重复）
