@@ -3,8 +3,10 @@ mod core;
 mod export;
 mod settings;
 mod translate;
+#[cfg(feature = "devtools")]
+mod dev;
 
-use tauri::{Emitter, WindowEvent};
+use tauri::{Emitter, Manager, WindowEvent};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -19,6 +21,12 @@ pub fn run() {
                     .map(|p| p.to_string_lossy().to_string())
                     .collect();
                 let _ = window.emit("file-dropped", paths);
+            }
+            // 主窗口销毁 → 退出整个应用（devtools 第二窗口一并关闭，不残留后台进程）
+            if window.label() == "main" {
+                if let WindowEvent::Destroyed = event {
+                    window.app_handle().exit(0);
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -42,6 +50,25 @@ pub fn run() {
             commands::deep_scan_jar,
             commands::export_shader_zh,
             commands::export_resource_pack_desc,
+            // devtools 专用命令：仅在 devtools feature 下注册
+            #[cfg(feature = "devtools")]
+            commands::devtools::dev_parse_text,
+            #[cfg(feature = "devtools")]
+            commands::devtools::dev_validate_placeholders,
+            #[cfg(feature = "devtools")]
+            commands::devtools::dev_preview_export,
+            #[cfg(feature = "devtools")]
+            commands::devtools::dev_set_fault,
+            #[cfg(feature = "devtools")]
+            commands::devtools::dev_clear_fault,
+            #[cfg(feature = "devtools")]
+            commands::devtools::dev_open_devtools_window,
+            #[cfg(feature = "devtools")]
+            commands::devtools::dev_read_text_file,
+            #[cfg(feature = "devtools")]
+            commands::devtools::dev_encode_pairs,
+            #[cfg(feature = "devtools")]
+            commands::devtools::dev_write_text_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

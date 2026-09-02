@@ -124,6 +124,54 @@ export const api = {
       entries,
       langFormat,
     }),
+
+  // ── devtools 专用命令（仅 __DEVTOOLS__ 时调用；生产构建后端无此命令） ──────
+  devParseText: (format: string, text: string) =>
+    invoke<{ pairs: [string, string][]; placeholders: string[]; error: string | null }>(
+      "dev_parse_text",
+      { format, text },
+    ),
+  devValidatePlaceholders: (source: string, translation: string) =>
+    invoke<string[]>("dev_validate_placeholders", { source, translation }),
+  devPreviewExport: (
+    modid: string,
+    modName: string,
+    entries: LangEntry[],
+    langFormat: string,
+    packFormat: number,
+  ) =>
+    invoke<{
+      file_name: string;
+      sanitized_modid: string;
+      original_modid: string;
+      uses_min_max_format: boolean;
+      mcmeta_json: string;
+      lang_path: string;
+      lang_content_preview: string;
+      zip_tree: string[];
+      entry_count: number;
+    }>("dev_preview_export", { modid, modName, entries, langFormat, packFormat }),
+  devSetFault: (config: {
+    delayMs: number | null;
+    forceTimeout: boolean;
+    mockStatus: number | null;
+    mockBody: string | null;
+    disconnect: boolean;
+  }) =>
+    invoke<void>("dev_set_fault", {
+      // Tauri 命令参数必须与 Rust 侧形参一一对应（camelCase 顶层键），不能嵌套
+      delayMs: config.delayMs,
+      forceTimeout: config.forceTimeout,
+      mockStatus: config.mockStatus,
+      mockBody: config.mockBody,
+      disconnect: config.disconnect,
+    }),
+  devClearFault: () => invoke<void>("dev_clear_fault"),
+  devReadTextFile: (path: string) => invoke<string>("dev_read_text_file", { path }),
+  devEncodePairs: (format: string, pairs: [string, string][]) =>
+    invoke<string>("dev_encode_pairs", { format, pairs }),
+  devWriteTextFile: (path: string, content: string) =>
+    invoke<void>("dev_write_text_file", { path, content }),
 };
 
 /** 监听翻译进度事件 */
@@ -155,4 +203,36 @@ export async function onFileDropped(
   handler: (paths: string[]) => void,
 ): Promise<UnlistenFn> {
   return listen<string[]>("file-dropped", (e) => handler(e.payload));
+}
+
+// ── devApi: invoke 日志代理（仅 __DEVTOOLS__ 时生效） ──────────────────────────
+// 当 __DEVTOOLS__ 为 true 时，devApi 是 api 的 Proxy 包装：每次 invoke 记录
+// {command, args, result, error, durationMs} 到 DevToolsPanel 的 ring buffer。
+// 生产构建 __DEVTOOLS__=false → devApi === api，零开销。
+
+export function createDevApi(
+  base: typeof api,
+  logger: (entry: { command: string; args: unknown; result: unknown; error: string | null; durationMs: number }) => void,
+): typeof api {
+  return new Proxy(base, {
+    get(target, prop: string) {
+      const orig = (target as Record<string, unknown>)[prop];
+      if (typeof orig !== "function") return orig;
+      return (...args: unknown[]) => {
+        const start = performance.now();
+        const command = prop;
+        return (orig as (...a: unknown[]) => Promise<unknown>)(...args).then(
+          (result) => {
+            logger({ command, args: args.length === 1 ? args[0] : args, result, error: null, durationMs: Math.round(performance.now() - start) });
+            return result;
+          },
+          (err) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            logger({ command, args: args.length === 1 ? args[0] : args, result: null, error: msg, durationMs: Math.round(performance.now() - start) });
+            throw err;
+          },
+        );
+      };
+    },
+  }) as typeof api;
 }

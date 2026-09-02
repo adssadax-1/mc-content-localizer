@@ -125,20 +125,89 @@ impl OpenAiProvider {
         Self { config, client }
     }
 
+    /// devtools 故障注入（provider 全部 HTTP 请求共用）：
+    /// 断网/模拟状态码 → 返回 Some(伪造错误)；延迟 → sleep 后返回 None 继续正常发送。
+    #[cfg(feature = "devtools")]
+    async fn dev_fault(&self) -> Option<TranslateError> {
+        let fc = crate::dev::get_fault()?;
+        use std::time::Duration;
+
+        // disconnect → 直接返回伪造连接错误
+        if fc.disconnect {
+            crate::dev::dev_emit(
+                "dev-http-response",
+                serde_json::json!({
+                    "status": 0u16,
+                    "bodyHead": "dev: disconnect fault (no request sent)",
+                }),
+            );
+            return Some(TranslateError::Api {
+                status: 0,
+                body: "dev: disconnect fault".to_string(),
+            });
+        }
+
+        // mockStatus → 不发真请求，直接返回伪造响应
+        if let Some(ms) = fc.mock_status {
+            let mb = fc
+                .mock_body
+                .clone()
+                .unwrap_or_else(|| "dev: mock fault".to_string());
+            crate::dev::dev_emit(
+                "dev-http-response",
+                serde_json::json!({
+                    "status": ms,
+                    "bodyHead": mb,
+                }),
+            );
+            return Some(TranslateError::Api {
+                status: ms,
+                body: mb.chars().take(500).collect(),
+            });
+        }
+
+        // delayMs → 发送前 sleep
+        if let Some(d) = fc.delay_ms {
+            tokio::time::sleep(Duration::from_millis(d)).await;
+        }
+        None
+    }
+
+    /// devtools forceTimeout：注入生效时用 1s 超时的临时 client，否则用正常 client
+    #[cfg(feature = "devtools")]
+    fn dev_send_client(&self) -> reqwest::Client {
+        if crate::dev::get_fault()
+            .map(|fc| fc.force_timeout)
+            .unwrap_or(false)
+        {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(1))
+                .build()
+                .unwrap_or_else(|_| self.client.clone())
+        } else {
+            self.client.clone()
+        }
+    }
+
     /// 单次对话请求，返回模型输出的文本。
+    /// purpose: 请求用途标记（"translate" 翻译 / "glossary" 术语提取），仅 devtools 事件里使用。
     /// 遇到 400 参数类错误时自动降级重试：
     /// 1) 去掉 response_format（JSON 模式）重试
     /// 2) 改用整数温度 1.0 重试（部分模型只接受 0 或 1）
-    pub async fn chat(&self, system: &str, user: &str) -> Result<String, TranslateError> {
+    pub async fn chat(&self, system: &str, user: &str, purpose: &str) -> Result<String, TranslateError> {
         let temp = self.config.temperature();
-        match self.chat_inner(system, user, temp, true).await {
+        match self.chat_inner(system, user, temp, true, purpose).await {
             Err(TranslateError::Api { status: 400, .. }) => {
                 // 400：先去掉 response_format 重试
-                match self.chat_inner(system, user, temp, false).await {
+                #[cfg(feature = "devtools")]
+                crate::dev::dev_emit("dev-degradation", serde_json::json!({"stage": "json-off"}));
+                match self.chat_inner(system, user, temp, false, purpose).await {
                     Ok(r) => Ok(r),
                     Err(_) => {
                         // 仍失败：改用整数温度 1.0 再试一次
-                        self.chat_inner(system, user, 1.0, false).await
+                        #[cfg(feature = "devtools")]
+                        crate::dev::dev_emit("dev-degradation", serde_json::json!({"stage": "temp-integer", "temp": 1.0}));
+                        self.chat_inner(system, user, 1.0, false, purpose).await
                     }
                 }
             }
@@ -153,7 +222,10 @@ impl OpenAiProvider {
         user: &str,
         temperature: f32,
         json_mode: bool,
+        purpose: &str,
     ) -> Result<String, TranslateError> {
+        #[cfg(not(feature = "devtools"))]
+        let _ = purpose;
         if self.config.api_key.trim().is_empty() {
             return Err(TranslateError::MissingApiKey);
         }
@@ -172,8 +244,31 @@ impl OpenAiProvider {
             body["response_format"] = serde_json::json!({"type": "json_object"});
         }
 
-        let resp = self
-            .client
+        // devtools 插桩：发送前 emit 请求详情（全文，dev 构建专用不受体积限制）
+        #[cfg(feature = "devtools")]
+        crate::dev::dev_emit("dev-http-request", serde_json::json!({
+            "url": &url,
+            "model": model,
+            "temperature": temperature,
+            "jsonMode": json_mode,
+            "purpose": purpose,
+            "systemHead": system,
+            "userHead": user,
+        }));
+
+        // devtools 故障注入：整个 provider 层生效（翻译/术语提取/拉模型/测试模型共用）
+        #[cfg(feature = "devtools")]
+        if let Some(e) = self.dev_fault().await {
+            return Err(e);
+        }
+
+        // devtools forceTimeout → 用 1s 超时 client 发送
+        #[cfg(feature = "devtools")]
+        let send_client = self.dev_send_client();
+        #[cfg(not(feature = "devtools"))]
+        let send_client = self.client.clone();
+
+        let resp = send_client
             .post(&url)
             .bearer_auth(self.config.api_key.trim())
             .json(&body)
@@ -182,6 +277,14 @@ impl OpenAiProvider {
 
         let status = resp.status();
         let text = resp.text().await?;
+
+        // devtools 插桩：收到后 emit 响应详情（全文）
+        #[cfg(feature = "devtools")]
+        crate::dev::dev_emit("dev-http-response", serde_json::json!({
+            "status": status.as_u16(),
+            "bodyHead": text,
+        }));
+
         if !status.is_success() {
             return Err(TranslateError::Api {
                 status: status.as_u16(),
@@ -209,8 +312,17 @@ impl OpenAiProvider {
         let (base_url, _) = self.config.resolve_endpoint();
         let url = format!("{}/models", base_url.trim_end_matches('/'));
 
-        let resp = self
-            .client
+        // devtools 故障注入：拉取模型同样受影响
+        #[cfg(feature = "devtools")]
+        if let Some(e) = self.dev_fault().await {
+            return Err(e);
+        }
+        #[cfg(feature = "devtools")]
+        let send_client = self.dev_send_client();
+        #[cfg(not(feature = "devtools"))]
+        let send_client = self.client.clone();
+
+        let resp = send_client
             .get(&url)
             .bearer_auth(self.config.api_key.trim())
             .send()
@@ -281,8 +393,18 @@ impl OpenAiProvider {
             "max_tokens": 5,
             "temperature": 0
         });
-        let resp = self
-            .client
+
+        // devtools 故障注入：测试模型同样受影响
+        #[cfg(feature = "devtools")]
+        if let Some(e) = self.dev_fault().await {
+            return Err(e);
+        }
+        #[cfg(feature = "devtools")]
+        let send_client = self.dev_send_client();
+        #[cfg(not(feature = "devtools"))]
+        let send_client = self.client.clone();
+
+        let resp = send_client
             .post(&url)
             .bearer_auth(self.config.api_key.trim())
             .json(&body)

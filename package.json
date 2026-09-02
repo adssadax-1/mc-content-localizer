@@ -1,13 +1,15 @@
 {
   "name": "mod-translator",
   "private": true,
-  "version": "2.0.2",
+  "version": "2.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "tauri:dev:devtools": "cross-env DEVTOOLS=1 tauri dev -- --features devtools",
+    "tauri:build:devtools": "cross-env DEVTOOLS=1 tauri build -- --features devtools"
   },
   "dependencies": {
     "@air/react-drag-to-select": "^5.0.11",
@@ -24,6 +26,7 @@
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
+    "cross-env": "^7.0.3",
     "typescript": "~5.8.3",
     "vite": "^7.0.4"
   }

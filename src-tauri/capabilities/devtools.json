@@ -1,0 +1,10 @@
+{
+  "$schema": "./gen/schemas/desktop-schema.json",
+  "identifier": "devtools",
+  "description": "Capability for the devtools second window (dev build only; the window never exists in production builds)",
+  "windows": ["devtools"],
+  "permissions": [
+    "core:default",
+    "dialog:default"
+  ]
+}

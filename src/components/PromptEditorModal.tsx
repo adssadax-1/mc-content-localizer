@@ -15,13 +15,14 @@ import {
 import { ReloadOutlined } from "@ant-design/icons";
 import { api } from "../api";
 import type { PromptTemplate, Settings } from "../types";
+import { useTranslationContext } from "../i18n";
 
 type PackKind = "mod" | "shader" | "resourcepack";
 
 const KIND_LABEL: Record<PackKind, string> = {
-  mod: "🎮 模组",
-  shader: "☀️ 光影包",
-  resourcepack: "🎨 资源包",
+  mod: "promptEditor.tabMod",
+  shader: "promptEditor.tabShader",
+  resourcepack: "promptEditor.tabResourcepack",
 };
 
 interface Props {
@@ -33,6 +34,7 @@ interface Props {
 
 /** 自定义提示词编辑器：三类型分开设置；可编辑段开放，核心段系统保留（灰底只读） */
 export function PromptEditorModal({ open, settings, onClose, onSaved }: Props) {
+  const { t } = useTranslationContext();
   const [activeType, setActiveType] = useState<PackKind>("mod");
   const [template, setTemplate] = useState<PromptTemplate | null>(null);
   const [edited, setEdited] = useState("");
@@ -46,9 +48,9 @@ export function PromptEditorModal({ open, settings, onClose, onSaved }: Props) {
     setTemplate(null);
     api
       .getPromptTemplate(activeType)
-      .then((t) => {
-        setTemplate(t);
-        setEdited(settings?.customPrompts?.[activeType] ?? t.editableDefault);
+      .then((tpl) => {
+        setTemplate(tpl);
+        setEdited(settings?.customPrompts?.[activeType] ?? tpl.editableDefault);
       })
       .catch(() => {
         setTemplate(null);
@@ -73,7 +75,7 @@ export function PromptEditorModal({ open, settings, onClose, onSaved }: Props) {
   }
 
   function messageSaved() {
-    message.success("提示词已保存");
+    message.success(t("promptEditor.saved"));
   }
 
   function handleReset() {
@@ -83,12 +85,12 @@ export function PromptEditorModal({ open, settings, onClose, onSaved }: Props) {
 
   return (
     <Modal
-      title="自定义提示词"
+      title={t("promptEditor.title")}
       open={open}
       onCancel={onClose}
       onOk={() => void handleSave()}
-      okText="保存"
-      cancelText="取消"
+      okText={t("promptEditor.save")}
+      cancelText={t("promptEditor.cancel")}
       width={860}
       destroyOnClose
     >
@@ -96,30 +98,30 @@ export function PromptEditorModal({ open, settings, onClose, onSaved }: Props) {
         type="warning"
         showIcon
         style={{ marginBottom: 12 }}
-        message="自定义内容可能影响翻译质量。以下「可编辑区」可自由修改；底部「系统保留段」不可修改（删除会导致输出解析失败或占位符错乱）。"
+        message={t("promptEditor.warning")}
       />
       <Tabs
         activeKey={activeType}
         onChange={(k) => setActiveType(k as PackKind)}
         items={(Object.keys(KIND_LABEL) as PackKind[]).map((k) => ({
           key: k,
-          label: KIND_LABEL[k],
+          label: t(KIND_LABEL[k]),
           children: null,
         }))}
       />
       {template ? (
         <div style={{ marginTop: 8 }}>
           <Space style={{ width: "100%", justifyContent: "space-between" }}>
-            <Typography.Text strong>可编辑区（角色 / 语境规则 / 参考术语）</Typography.Text>
+            <Typography.Text strong>{t("promptEditor.editable")}</Typography.Text>
             <Space size={8}>
-              {isCustomized && <Tag color="blue">已自定义</Tag>}
+              {isCustomized && <Tag color="blue">{t("promptEditor.customized")}</Tag>}
               <Button
                 size="small"
                 icon={<ReloadOutlined />}
                 onClick={handleReset}
-                title="恢复为默认内容"
+                title={t("promptEditor.restoreTip")}
               >
-                恢复默认
+                {t("promptEditor.restore")}
               </Button>
             </Space>
           </Space>
@@ -130,13 +132,12 @@ export function PromptEditorModal({ open, settings, onClose, onSaved }: Props) {
             style={{ marginTop: 8, fontFamily: "monospace", fontSize: 12 }}
           />
           <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: 4 }}>
-            可用变量：{`{mod_name}`}（名称）、{`{modid}`}、{`{mc_version}`}（仅模组）、
-            {`{loader}`}（仅模组）
+            {t("promptEditor.variables")}
           </Typography.Paragraph>
 
           <Divider style={{ margin: "12px 0" }} />
-          <Typography.Text type="secondary">系统保留段（不可修改，翻译时自动追加）</Typography.Text>
-          <Tooltip title="系统保留：删除会导致输出解析失败或占位符错乱">
+          <Typography.Text type="secondary">{t("promptEditor.reserved")}</Typography.Text>
+          <Tooltip title={t("promptEditor.reservedTip")}>
             <pre
               style={{
                 marginTop: 8,
@@ -158,7 +159,7 @@ export function PromptEditorModal({ open, settings, onClose, onSaved }: Props) {
           </Tooltip>
         </div>
       ) : (
-        <Typography.Text type="secondary">加载中...</Typography.Text>
+        <Typography.Text type="secondary">{t("promptEditor.loading")}</Typography.Text>
       )}
     </Modal>
   );

@@ -35,19 +35,27 @@ import {
   StopOutlined,
   SunOutlined,
   ThunderboltOutlined,
+  ToolOutlined,
 } from "@ant-design/icons";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import zhCN from "antd/locale/zh_CN";
 import enUS from "antd/locale/en_US";
 
-import { api, onFileDropped, onGlossaryDone, onTranslateProgress, onTranslationBatch } from "./api";
+import { api as rawApi, createDevApi, onFileDropped, onGlossaryDone, onTranslateProgress, onTranslationBatch } from "./api";
 import { DropZone } from "./components/DropZone";
 import { EntryTable } from "./components/EntryTable";
 import { ContextPanel } from "./components/ContextPanel";
 import { SettingsModal } from "./components/SettingsModal";
+import { pushInvoke } from "./components/DevToolsPanel";
+import { type DevResultKind, DEV_SHOW_RESULT_ALERT, DEV_SHOW_EXPORT_ERROR, DEV_SETTINGS_SYNC, DEV_FAULT_CHANGED, type DevFaultNotice } from "./devtools/bus";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, emit, type UnlistenFn } from "@tauri-apps/api/event";
 import { TranslationProvider, useTranslation, useTranslationContext } from "./i18n";
 import { LOADER_LABEL, packFormatForMc } from "./types";
+
+// devApi 代理：__DEVTOOLS__ 时包装 api，每次 invoke 记录到 ring buffer；生产构建直接用原 api。
+const api = __DEVTOOLS__ ? createDevApi(rawApi, pushInvoke) : rawApi;
 import type {
   BatchItem,
   LangEntry,
@@ -63,7 +71,7 @@ import type {
 const { Header, Content, Footer, Sider } = Layout;
 
 // 亮色主题配置
-const lightTheme = {
+export const lightTheme = {
   token: {
     colorPrimary: "#4A90D9",
     colorBgLayout: "#F5F6F8",
@@ -97,7 +105,7 @@ const lightTheme = {
 };
 
 // 暗色主题配置（优化颜值）
-const darkTheme = {
+export const darkTheme = {
   algorithm: theme.darkAlgorithm,
   token: {
     colorPrimary: "#6CB3FF",
@@ -199,33 +207,37 @@ function entryPatchFromResult(r: TranslatedItem): {
 }
 
 /** 根据实时统计构造翻译结果汇总提示（醒目、可操作的解决建议） */
+type CountValue = number | "XX";
+
 function buildResultAlert(
   c: {
-    ok: number;
-    empty: number;
-    error: number;
-    error429: number;
-    warn: number;
+    ok: CountValue;
+    empty: CountValue;
+    error: CountValue;
+    error429: CountValue;
+    warn: CountValue;
   },
   t: (p: string, v?: Record<string, string | number>) => string,
 ): { type: "success" | "warning" | "error" | "info"; title: string; desc: React.ReactNode } {
+  // "XX" 用于 devtools 弹窗模拟：视为非零，展示为 XX
+  const has = (v: CountValue) => v === "XX" || v > 0;
   const lines: string[] = [];
-  if (c.empty > 0) {
+  if (has(c.empty)) {
     lines.push(t("app.alertEmpty", { empty: c.empty }));
   }
-  if (c.error > 0) {
-    if (c.error429 > 0) {
+  if (has(c.error)) {
+    if (has(c.error429)) {
       lines.push(t("app.alertError429", { error: c.error }));
     } else {
       lines.push(t("app.alertErrorOther", { error: c.error }));
     }
   }
-  if (c.warn > 0) {
+  if (has(c.warn)) {
     lines.push(
       `有 ${c.warn} 条译文含占位符/格式校验警告（橙色标签），导出前请检查 %s、§ 等是否完整，避免游戏内显示异常。`,
     );
   }
-  if (c.ok > 0 && lines.length === 0) {
+  if (has(c.ok) && lines.length === 0) {
     return {
       type: "success",
       title: `翻译完成：成功汉化 ${c.ok} 条`,
@@ -235,9 +247,9 @@ function buildResultAlert(
   if (lines.length === 0) {
     return { type: "info", title: "翻译完成", desc: "本次没有产生新的译文。" };
   }
-  const type: "success" | "warning" | "error" = c.error > 0 ? "error" : "warning";
+  const type: "success" | "warning" | "error" = has(c.error) ? "error" : "warning";
   const title =
-    c.error > 0
+    has(c.error)
       ? `翻译完成（${c.ok} 条成功，${c.error} 条失败）`
       : `翻译完成（${c.ok} 条成功，${c.empty} 条未返回）`;
   return {
@@ -253,9 +265,39 @@ const KIND_META: Record<PackKind, { labelKey: string; icon: React.ReactNode; col
   resourcepack: { labelKey: "app.resourcepack", icon: <PictureOutlined />, color: "#16A34A" },
 };
 
+/** 右上角全局结果卡片：底部 2s 读条后自动收起，右上角 × 可手动关闭 */
+function showResultCard(
+  type: "success" | "warning" | "error" | "info",
+  title: string,
+  desc: React.ReactNode,
+) {
+  const fn =
+    type === "success" ? notification.success
+    : type === "error" ? notification.error
+    : type === "warning" ? notification.warning
+    : notification.info;
+  fn({
+    message: title,
+    description: (
+      <>
+        {desc}
+        <div className="dev-card-progress">
+          <div />
+        </div>
+      </>
+    ),
+    placement: "topRight",
+    duration: 2,
+  });
+}
+
 interface PackCardProps {
   item: PackItem;
   translating: boolean;
+  /** 本包是否正在翻译（并行时区分各包） */
+  thisTranslating?: boolean;
+  /** 本包实时进度（并行时卡片内显示） */
+  packProgress?: { done: number; total: number };
   onToggleExpanded: (key: string) => void;
   onToggleChecked: (key: string, v: boolean) => void;
   onEdit: (packKey: string, entryKey: string, value: string) => void;
@@ -277,6 +319,8 @@ interface PackCardProps {
 const PackCard = memo(function PackCard({
   item,
   translating,
+  thisTranslating,
+  packProgress,
   onToggleExpanded,
   onToggleChecked,
   onEdit,
@@ -301,7 +345,7 @@ const PackCard = memo(function PackCard({
         border: "1px solid var(--border-color, #E6E8EB)",
         borderRadius: 12,
         marginBottom: 8,
-        background: "#fff",
+        background: "var(--card-bg)",
       }}
     >
       <div
@@ -329,6 +373,12 @@ const PackCard = memo(function PackCard({
         {item.modFile && <Tag>{item.modFile.loader === "unknown" ? t("loader.unknown") : item.modFile.loader.toUpperCase()}</Tag>}
         {item.hasZh && (
           <Tag color="cyan">{t("app.hasZh")} {item.zhCount ?? 0} {t("app.hasZhCount")}</Tag>
+        )}
+        {thisTranslating && (
+          <Tag color="processing" className="dev-pulse-tag">
+            {t("components.translating")}
+            {packProgress ? ` ${packProgress.done}/${packProgress.total}` : ""}
+          </Tag>
         )}
         <Typography.Text type="secondary" style={{ marginLeft: "auto" }}>
           {translated}/{total} {t("app.translatedCount")}
@@ -461,15 +511,15 @@ function AppInner({
   const [parsing, setParsing] = useState(false);
   const [translating, setTranslating] = useState(false);
   const [progress, setProgress] = useState<ProgressPayload | null>(null);
-  // 翻译结果汇总（实时统计，用于结束后的醒目提示）
-  const [resultAlert, setResultAlert] = useState<{
-    type: "success" | "warning" | "error" | "info";
-    title: string;
-    desc: React.ReactNode;
-  } | null>(null);
-  const liveCounts = useRef({ ok: 0, empty: 0, error: 0, error429: 0, warn: 0 });
   // 翻译开始时间（剩余时间估算用）
   const translateStartRef = useRef(0);
+  // 每个内容包的实时计数（批次事件累加，完成后弹 per-pack 卡片用）；same = 译文与原文相同
+  const packCountsRef = useRef<Map<string, { ok: number; empty: number; error: number; error429: number; warn: number; same: number }>>(new Map());
+  // 内容包并行：正在翻译的包（key → true）与各包实时进度
+  const [translatingKeys, setTranslatingKeys] = useState<Record<string, boolean>>({});
+  const [packProgress, setPackProgress] = useState<Record<string, { done: number; total: number }>>({});
+  // 取消标志的同步 ref（并行池 worker 内读到最新值，不受闭包捕获限制）
+  const cancelRequestedRef = useRef(false);
   // 术语表建议候选（翻译完成后一次性弹出）
   const [glossarySuggest, setGlossarySuggest] = useState<[string, string][] | null>(null);
   const [suggestChecked, setSuggestChecked] = useState<string[]>([]);
@@ -478,16 +528,74 @@ function AppInner({
   const [extractedChecked, setExtractedChecked] = useState<string[]>([]);
   const [currentPackName, setCurrentPackName] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // 打开设置时要定位到的分组（如翻译参数 params）；undefined = 默认页
+  const [settingsSection, setSettingsSection] = useState<string | undefined>(undefined);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportSettingsOpen, setExportSettingsOpen] = useState(false);
   const [packMode, setPackMode] = useState<"auto" | "custom">("auto");
   const [customPackFormat, setCustomPackFormat] = useState(15);
-  const [cancelRequested, setCancelRequested] = useState(false);
   const [deepScanningKey, setDeepScanningKey] = useState<string | null>(null);
   const [exportRiskOpen, setExportRiskOpen] = useState(false);
   const [exportRiskChecked, setExportRiskChecked] = useState<PackItem[]>([]);
   const [paused, setPaused] = useState(false);
+  // devtools：网络故障注入生效中（Header 常驻标签文案，null = 无故障）
+  const [devFaultSummary, setDevFaultSummary] = useState<string | null>(null);
+  // 清除译文对话框：可见性 + 勾选的备注标签（空 = 清除全部）
+  const [clearOpen, setClearOpen] = useState(false);
+  const [clearTags, setClearTags] = useState<string[]>([]);
+  const clearTagOptions = useMemo(() => {
+    const set = new Set<string>();
+    queue.forEach((it) => it.entries.forEach((e) => (e.notes ?? []).forEach((n) => set.add(n))));
+    return [...set];
+  }, [queue, clearOpen]);
+
+  // devtools：监听开发者工具第二窗口广播的触发事件，在主窗口弹出真实提示
+  useEffect(() => {
+    if (!__DEVTOOLS__) return;
+    const counts: Record<
+      Exclude<DevResultKind, "cancel">,
+      { ok: CountValue; empty: CountValue; error: CountValue; error429: CountValue; warn: CountValue }
+    > = {
+      ok: { ok: "XX", empty: 0, error: 0, error429: 0, warn: 0 },
+      empty: { ok: "XX", empty: "XX", error: 0, error429: 0, warn: 0 },
+      warn: { ok: "XX", empty: 0, error: 0, error429: 0, warn: "XX" },
+      error: { ok: "XX", empty: 0, error: "XX", error429: 0, warn: 0 },
+      error429: { ok: "XX", empty: 0, error: "XX", error429: "XX", warn: 0 },
+    };
+    const unlisteners: Promise<UnlistenFn>[] = [
+      listen(DEV_SHOW_RESULT_ALERT, (e) => {
+        const kind = e.payload as DevResultKind;
+        if (kind === "cancel") {
+          // 与翻译取消路径同款提示（该路径本身为硬编码文案）
+          message.info("已取消，已翻译部分已保留");
+          return;
+        }
+        // 与真实翻译完成卡片同款样式：per-pack 标题，模拟数据全部 XX
+        const a = buildResultAlert(counts[kind], t);
+        const labels = [t("app.mod"), t("app.shader"), t("app.resourcepack")];
+        const label = labels[Math.floor(Math.random() * labels.length)];
+        showResultCard(a.type, `翻译 XX ${label}完成`, a.desc);
+      }),
+      listen(DEV_SHOW_EXPORT_ERROR, (e) => {
+        // 与 handleExport 失败路径同款提示格式
+        message.error(`「DevTools 测试包」导出失败：${String(e.payload)}`);
+      }),
+      listen(DEV_FAULT_CHANGED, (e) => {
+        const n = e.payload as DevFaultNotice;
+        setDevFaultSummary(n.active ? n.summary : null);
+        if (n.active) {
+          message.warning(`⚠ ${t("devtools.injection.faultTag", { summary: n.summary })}`);
+        } else {
+          message.info(t("devtools.injection.clearedToast"));
+        }
+      }),
+    ];
+    return () => {
+      unlisteners.forEach((p) => void p.then((u) => u()));
+    };
+  }, [t]);
+
 
   // 设置加载已提升到外层 App（主题/语言/无字模式需在 ConfigProvider 外层生效）
 
@@ -573,9 +681,17 @@ function AppInner({
     };
   }, []);
 
-  // 监听翻译进度
+  // 监听翻译进度：全局一条 + 按包细分（并行翻译时各包独立显示）
   useEffect(() => {
-    const unlisten = onTranslateProgress((p) => setProgress(p));
+    const unlisten = onTranslateProgress((p) => {
+      setProgress(p);
+      if (p.packKey) {
+        setPackProgress((prev) => ({
+          ...prev,
+          [p.packKey as string]: { done: p.doneCount, total: p.totalCount },
+        }));
+      }
+    });
     return () => {
       unlisten.then((f) => f());
     };
@@ -615,10 +731,12 @@ function AppInner({
             emptyN = 0,
             errN = 0,
             err429N = 0,
-            warnN = 0;
+            warnN = 0,
+            sameN = 0;
           const entries = pack.entries.map((e) => {
             const r = byKey.get(e.key);
             if (!r) return e;
+            if (r.translation && r.translation === e.source) sameN += 1;
             if (r.kind === "error") {
               errN += 1;
               if (r.notes.some((n) => n.includes("429"))) err429N += 1;
@@ -642,11 +760,14 @@ function AppInner({
               translating: false,
             };
           });
-          liveCounts.current.ok += okN;
-          liveCounts.current.empty += emptyN;
-          liveCounts.current.error += errN;
-          liveCounts.current.error429 += err429N;
-          liveCounts.current.warn += warnN;
+          const pc = packCountsRef.current.get(packKey) ?? { ok: 0, empty: 0, error: 0, error429: 0, warn: 0, same: 0 };
+          pc.ok += okN;
+          pc.empty += emptyN;
+          pc.error += errN;
+          pc.error429 += err429N;
+          pc.warn += warnN;
+          pc.same += sameN;
+          packCountsRef.current.set(packKey, pc);
           return { ...pack, entries };
         }),
       );
@@ -786,9 +907,26 @@ function AppInner({
       }
     }
     setQueue((prev) => [...prev, ...added]);
-    // 新导入内容包时清掉上一轮的翻译汇总提示，避免陈旧信息残留
-    setResultAlert(null);
     setParsing(false);
+    // 自动批次 + 多线程时，条目过少的内容包会切出很小的批次（可能影响翻译质量），主动询问
+    if (settings?.threading?.enabled && (settings.batchSizeAuto ?? true)) {
+      const threads = settings.threading.threadCount;
+      const small = added.filter((it) => it.entries.length > 0 && it.entries.length < 50);
+      if (threads >= 4 && small.length > 0) {
+        const minLen = Math.min(...small.map((it) => it.entries.length));
+        const names = small.map((it) => `「${it.name}」${it.entries.length} 条`).join("、");
+        Modal.confirm({
+          title: "内容包条目较少，建议检查批次设置",
+          content: `${names}。当前 ${threads} 线程 + 跟随线程数最优条数，实际每批仅约 ${Math.max(1, Math.ceil(minLen / threads))} 条——小批次可能影响翻译上下文与准确性。是否前往设置调整？`,
+          okText: "去设置",
+          cancelText: "保持现状",
+          onOk: () => {
+            setSettingsSection("params");
+            setSettingsOpen(true);
+          },
+        });
+      }
+    }
     if (added.length > 0) {
       message.success(
         `已导入 ${added.length} 个内容包${deepFound > 0 ? `（模组深度扫描发现 ${deepFound} 条内嵌文本，默认未勾选）` : ""}`,
@@ -970,7 +1108,7 @@ function AppInner({
     window.addEventListener("mouseup", onUp);
   }, []);
 
-  /** 翻译当前 Tab 下勾选的内容包（逐个串行，增量翻译） */
+  /** 翻译当前 Tab 下勾选的内容包（按设置的包并行数并发，增量翻译） */
   async function runTranslation() {
     if (!settings) return;
     const targets = queue.filter((it) => it.checked && it.kind === activeTab);
@@ -992,53 +1130,64 @@ function AppInner({
     };
 
     setTranslating(true);
-    setCancelRequested(false);
+    cancelRequestedRef.current = false;
     setPaused(false);
-    setResultAlert(null);
-    liveCounts.current = { ok: 0, empty: 0, error: 0, error429: 0, warn: 0 };
+    packCountsRef.current.clear();
+    setPackProgress({});
     translateStartRef.current = Date.now();
     let doneAny = false;
-    try {
-      for (const item of targets) {
-        setCurrentPackName(item.name);
-        const untranslated = item.entries.filter(
-          (e) => (e.selected ?? true) && !e.translation,
-        );
-        if (untranslated.length === 0) {
-          continue;
-        }
-        // 先行将待翻译条目标记为「翻译中」（淡蓝），逐批完成后由实时事件翻为最终态
-        patchPack(item.key, (it) => ({
-          ...it,
-          entries: it.entries.map((e) =>
-            (e.selected ?? true) && !e.translation ? { ...e, translating: true } : e,
-          ),
-        }));
-        const items: BatchItem[] = untranslated.map((e) => ({
-          key: e.key,
-          source: e.source,
-        }));
-        const ctx: TranslateContext = {
-          modName: item.name,
-          modid: item.kind === "mod" ? item.modFile?.modid ?? "mod" : item.kind,
-          mcVersion: item.modFile?.mcVersion ?? null,
-          loader: item.modFile ? LOADER_LABEL[item.modFile.loader] : t(KIND_META[item.kind].labelKey),
-          packType: item.kind,
-          customPrompt: settings.customPrompts?.[item.kind] ?? null,
-          userGlossary: settings.userGlossary,
-        };
-        setProgress({
-          batchIndex: 0,
-          batchTotal: 0,
-          doneCount: 0,
-          totalCount: items.length,
-        });
+
+    // 待翻译任务（无待翻译条目的包直接跳过；preSame = 历史遗留的同原文条数）
+    const tasks = targets
+      .map((item) => ({
+        item,
+        untranslated: item.entries.filter((e) => (e.selected ?? true) && !e.translation),
+        preSame: item.entries.filter(
+          (e) => e.status === "aiTranslated" && e.translation != null && e.translation === e.source,
+        ).length,
+      }))
+      .filter((tk) => tk.untranslated.length > 0);
+
+    const translateOnePack = async (
+      item: PackItem,
+      untranslated: BatchItem[],
+      preSame: number,
+    ): Promise<void> => {
+      setTranslatingKeys((prev) => ({ ...prev, [item.key]: true }));
+      // 先行将待翻译条目标记为「翻译中」（淡蓝），逐批完成后由实时事件翻为最终态
+      patchPack(item.key, (it) => ({
+        ...it,
+        entries: it.entries.map((e) =>
+          (e.selected ?? true) && !e.translation ? { ...e, translating: true } : e,
+        ),
+      }));
+      const items: BatchItem[] = untranslated.map((e) => ({
+        key: e.key,
+        source: e.source,
+      }));
+      const ctx: TranslateContext = {
+        modName: item.name,
+        modid: item.kind === "mod" ? item.modFile?.modid ?? "mod" : item.kind,
+        mcVersion: item.modFile?.mcVersion ?? null,
+        loader: item.modFile ? LOADER_LABEL[item.modFile.loader] : t(KIND_META[item.kind].labelKey),
+        packType: item.kind,
+        customPrompt: settings.customPrompts?.[item.kind] ?? null,
+        userGlossary: settings.userGlossary,
+      };
+      setPackProgress((prev) => ({ ...prev, [item.key]: { done: 0, total: items.length } }));
+      // 批次大小：跟随线程数取最优（条目数 ÷ 线程数，向上取整），否则用设置值
+      const threads = settings.threading?.enabled ? settings.threading.threadCount : 1;
+      const effectiveBatch =
+        settings.batchSizeAuto ?? true
+          ? Math.max(1, Math.ceil(untranslated.length / threads))
+          : settings.batchSize;
+      try {
         const results = await api.runTranslation(
           provider,
           ctx,
           items,
           item.key,
-          settings.batchSize,
+          effectiveBatch,
           settings.extractGlossary,
           settings.threading,
         );
@@ -1052,11 +1201,74 @@ function AppInner({
           }),
         }));
         doneAny = true;
-        if (cancelRequested) break;
+        // 每个内容包单独弹出完成卡片（真实数据）
+        const c = packCountsRef.current.get(item.key) ?? {
+          ok: 0, empty: 0, error: 0, error429: 0, warn: 0, same: 0,
+        };
+        const a = buildResultAlert(c, t);
+        showResultCard(
+          a.type,
+          `翻译 ${item.name} ${t(KIND_META[item.kind].labelKey)}完成`,
+          a.desc,
+        );
+        // 检测：某包大量译文与原文相同（批次内内容相似时模型易原样返回）→ 询问清除重译
+        const sameN = preSame + c.same;
+        if (sameN >= 5) {
+          const pk = item.key;
+          Modal.confirm({
+            title: "检测到大量译文与原文相同",
+            content: `「${item.name}」有 ${sameN} 条译文与原文相同（可能未翻译，常见于批次内内容高度相似）。是否清除这些译文以便重新汉化？其他条目不受影响。`,
+            okText: "清除这些译文",
+            okButtonProps: { danger: true },
+            cancelText: "保留",
+            onOk: () => {
+              setQueue((prev) =>
+                prev.map((it) =>
+                  it.key !== pk
+                    ? it
+                    : {
+                        ...it,
+                        entries: it.entries.map((e) =>
+                          e.status === "aiTranslated" && e.translation != null && e.translation === e.source
+                            ? { ...e, translation: null, status: "untranslated" as const, notes: [] }
+                            : e,
+                        ),
+                      },
+                ),
+              );
+              message.success(`已清除 ${sameN} 条与原文相同的译文，重新点击翻译即可重试`);
+            },
+          });
+        }
+      } finally {
+        setTranslatingKeys((prev) => {
+          const next = { ...prev };
+          delete next[item.key];
+          return next;
+        });
       }
-      if (cancelRequested) {
+    };
+
+    try {
+      // 包并行池：同时最多 packLimit 个包在翻译；每个包只入队一次，天然不会重复翻译
+      const packLimit = (settings.packParallelEnabled ?? false)
+        ? (settings.packParallelCount ?? 2) === 0
+          ? Infinity
+          : Math.max(1, settings.packParallelCount ?? 2)
+        : 1;
+      let nextIdx = 0;
+      const worker = async (): Promise<void> => {
+        while (!cancelRequestedRef.current) {
+          const i = nextIdx++;
+          if (i >= tasks.length) return;
+          const tk = tasks[i];
+          await translateOnePack(tk.item, tk.untranslated, tk.preSame);
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(packLimit, tasks.length) }, () => worker()));
+
+      if (cancelRequestedRef.current) {
         message.info("已取消，已翻译部分已保留");
-        setResultAlert(null);
       } else if (doneAny) {
         // 术语表建议：高频已翻译短语一次性提示（不打断）
         const sugg = collectSuggestions(
@@ -1067,10 +1279,8 @@ function AppInner({
           setGlossarySuggest(sugg);
           setSuggestChecked(sugg.map(([en]) => en));
         }
-        setResultAlert(buildResultAlert(liveCounts.current, t));
       } else {
         message.info("勾选的内容包没有需要翻译的条目（可能已全部翻译）");
-        setResultAlert(null);
       }
     } catch (e) {
       message.error(`翻译失败：${String(e)}`);
@@ -1091,7 +1301,7 @@ function AppInner({
   }
 
   function handleCancel() {
-    setCancelRequested(true);
+    cancelRequestedRef.current = true;
     void api.cancelTranslation();
     message.info("正在停止…当前批次完成后结束");
   }
@@ -1107,28 +1317,25 @@ function AppInner({
     void api.resumeTranslation();
   }
 
+  /** 清除译文对话框：勾选备注标签时只清除带对应标签的条目；全不勾选 = 清除全部 */
   function handleClear() {
-    Modal.confirm({
-      title: "清除所有译文？",
-      content: "全部内容包的译文将恢复为未翻译状态（原文保留），此操作不可撤销。",
-      okText: "清除",
-      okButtonProps: { danger: true },
-      cancelText: "取消",
-      onOk: () => {
-        setQueue((prev) =>
-          prev.map((it) => ({
-            ...it,
-            entries: it.entries.map((e) => ({
-              ...e,
-              translation: null,
-              status: "untranslated" as const,
-              notes: [],
-            })),
-          })),
-        );
-        message.success("已清除全部译文");
-      },
-    });
+    setClearTags([]);
+    setClearOpen(true);
+  }
+
+  function doClear() {
+    const useTags = clearTags.length > 0;
+    setQueue((prev) =>
+      prev.map((it) => ({
+        ...it,
+        entries: it.entries.map((e) => {
+          if (useTags && !(e.notes ?? []).some((n) => clearTags.includes(n))) return e;
+          return { ...e, translation: null, status: "untranslated" as const, notes: [] };
+        }),
+      })),
+    );
+    setClearOpen(false);
+    message.success(useTags ? "已清除带所选标签的译文" : "已清除全部译文");
   }
 
   function handleClearQueue() {
@@ -1143,8 +1350,6 @@ function AppInner({
         setSelectedKey(null);
         setProgress(null);
         setTranslating(false);
-        // 同步清掉上一轮的翻译汇总提示，避免残留到新导入的内容包界面
-        setResultAlert(null);
         message.success("已清空列表");
       },
     });
@@ -1407,6 +1612,21 @@ function AppInner({
           <Button icon={<SettingOutlined />} onClick={() => setSettingsOpen(true)} className="app-settings-btn">
             {t("app.settings")}
           </Button>
+          {__DEVTOOLS__ && devFaultSummary && (
+            <Tag color="warning" style={{ marginRight: 0 }}>
+              ⚠ {t("devtools.injection.faultTag", { summary: devFaultSummary })}
+            </Tag>
+          )}
+          {__DEVTOOLS__ && (
+            <Button
+              icon={<ToolOutlined />}
+              onClick={() => {
+                void invoke("dev_open_devtools_window", { title: t("devtools.title") }).catch(
+                  (e) => message.error(String(e)),
+                );
+              }}
+            />
+          )}
         </Space>
       </Header>
 
@@ -1521,19 +1741,6 @@ function AppInner({
                 </Space>
               )}
 
-              {resultAlert && (
-                <Alert
-                  className="alert-slide"
-                  type={resultAlert.type}
-                  message={resultAlert.title}
-                  description={resultAlert.desc}
-                  showIcon
-                  closable
-                  style={{ marginBottom: 8 }}
-                  onClose={() => setResultAlert(null)}
-                />
-              )}
-
               {/* 内容包队列卡片（memo 化：勾选只重渲染对应卡片） */}
               <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
                 {visibleQueue.map((it) => (
@@ -1541,6 +1748,8 @@ function AppInner({
                     key={it.key}
                     item={it}
                     translating={translating}
+                    thisTranslating={!!translatingKeys[it.key]}
+                    packProgress={packProgress[it.key]}
                     onToggleExpanded={toggleExpanded}
                     onToggleChecked={toggleChecked}
                     onEdit={editTranslation}
@@ -1630,9 +1839,36 @@ function AppInner({
       <SettingsModal
         open={settingsOpen}
         settings={settings}
+        initialSection={settingsSection}
         onClose={() => setSettingsOpen(false)}
         onSaved={setSettings}
       />
+
+      {/* 清除译文：按备注标签勾选清除；全不勾选 = 清除全部 */}
+      <Modal
+        title="清除译文"
+        open={clearOpen}
+        onCancel={() => setClearOpen(false)}
+        onOk={doClear}
+        okText="清除"
+        okButtonProps={{ danger: true }}
+        cancelText="取消"
+        width={520}
+      >
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+          勾选标签：只清除带所选标签的条目；全部不勾选：清除全部译文（不可撤销）。
+        </Typography.Paragraph>
+        {clearTagOptions.length > 0 ? (
+          <Checkbox.Group
+            value={clearTags}
+            onChange={(v) => setClearTags(v as string[])}
+            options={clearTagOptions.map((tg) => ({ label: tg, value: tg }))}
+            style={{ display: "flex", flexDirection: "column", gap: 6 }}
+          />
+        ) : (
+          <Typography.Text type="secondary">当前没有带备注标签的条目，将清除全部译文。</Typography.Text>
+        )}
+      </Modal>
 
       {/* 提取到的术语：弹窗勾选加入用户术语表（不阻塞翻译） */}
       <Modal
@@ -1826,6 +2062,9 @@ function App() {
             requestIntervalSec: 4,
           },
           customPrompts: s.customPrompts ?? {},
+          batchSizeAuto: s.batchSizeAuto ?? true,
+          packParallelEnabled: s.packParallelEnabled ?? false,
+          packParallelCount: s.packParallelCount ?? 2,
           deepScan: s.deepScan ?? false,
           theme: s.theme === "dark" ? "dark" : "light",
           language: s.language === "en" ? "en" : "zh",
@@ -1841,6 +2080,12 @@ function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = themeMode;
   }, [themeMode]);
+
+  // devtools：主题/语言变化时广播给开发者工具第二窗口，实现实时联动
+  useEffect(() => {
+    if (!__DEVTOOLS__) return;
+    void emit(DEV_SETTINGS_SYNC, { theme: themeMode, language }).catch(() => {});
+  }, [themeMode, language]);
 
   return (
     <ConfigProvider

@@ -184,10 +184,11 @@ export function ProviderGrid({
 }
 
 /** 各服务商的补充说明（选中后显示在网格下方） */
+/** 服务商提示的 i18n key（settings.provider.hint*），渲染处用 t() 转换 */
 export const PROVIDER_HINTS: Record<string, string> = {
-  doubao: "豆包：模型名填具体模型 ID，或火山方舟控制台创建的接入点 ID（ep- 开头）",
-  moonshot: "Kimi：模型迭代较快，可点击「获取模型列表」查看可用模型",
-  openai: "OpenAI：国内网络访问不稳定，可能需要代理",
-  openrouter: "OpenRouter：一个 Key 调全平台，模型 ID 带 vendor 前缀（如 google/gemini-2.5-flash）",
-  custom: "自定义：填入任意 OpenAI 兼容端点（Base URL + 模型名）",
+  doubao: "settings.provider.hintDoubao",
+  moonshot: "settings.provider.hintMoonshot",
+  openai: "settings.provider.hintOpenai",
+  openrouter: "settings.provider.hintOpenrouter",
+  custom: "settings.provider.hintCustom",
 };

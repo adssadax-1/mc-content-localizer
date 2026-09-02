@@ -8,6 +8,12 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [react()],
 
+  // 开发者工具面板门控：DEVTOOLS=1 时 __DEVTOOLS__=true，面板代码编译进前端包；
+  // 生产构建（npm run tauri build）不带此 env，__DEVTOOLS__=false，面板被 tree-shake 掉。
+  define: {
+    __DEVTOOLS__: JSON.stringify(process.env.DEVTOOLS === "1"),
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

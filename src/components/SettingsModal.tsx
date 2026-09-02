@@ -35,6 +35,7 @@ import type { ModelInfo, ProviderConfig, Settings } from "../types";
 import { PROVIDER_PRESETS } from "../types";
 import { ProviderGrid, PROVIDER_HINTS } from "./ProviderIcon";
 import { PromptEditorModal } from "./PromptEditorModal";
+import { useTranslationContext } from "../i18n";
 
 /** 主题选项的简约 SVG 图标（替代 emoji） */
 function SunGlyph({ size = 13 }: { size?: number }) {
@@ -70,6 +71,8 @@ function MoonGlyph({ size = 13 }: { size?: number }) {
 interface Props {
   open: boolean;
   settings: Settings | null;
+  /** 打开时定位到的设置分组（如 "params" 翻译参数）；undefined = 默认页 */
+  initialSection?: string;
   onClose: () => void;
   onSaved: (s: Settings) => void;
 }
@@ -81,6 +84,7 @@ interface FormValues {
   baseUrl?: string;
   temperature: number;
   batchSize: number;
+  batchSizeAuto: boolean;
   extractGlossary: boolean;
   packFormat: number;
   userGlossary: [string, string][];
@@ -90,10 +94,13 @@ interface FormValues {
   providerModels?: Record<string, string>;
   /** 各服务商缓存的模型列表（隐藏字段） */
   providerModelOptions?: Record<string, ModelInfo[]>;
-  /** 多线程翻译（实验性） */
+  /** 多线程翻译 */
   threadingEnabled?: boolean;
   threadCount?: number;
   requestIntervalSec?: number;
+  /** 内容包并行翻译 */
+  packParallelEnabled?: boolean;
+  packParallelCount?: number;
   /** 深度文本扫描 */
   deepScan?: boolean;
   /** 主题：light / dark */
@@ -109,27 +116,33 @@ const CURRENT_VERSION = "2.0.2";
 const GITHUB_URL = "https://github.com/adssadax-1/mc-content-localizer";
 
 /** 设置分组（NAV / section 结构）：页面设置置顶为默认分组 */
-const SECTIONS: { key: string; label: string; icon: React.ReactNode }[] = [
-  { key: "appearance", label: "页面设置", icon: <BgColorsOutlined /> },
-  { key: "provider", label: "服务商与模型", icon: <CloudServerOutlined /> },
-  { key: "params", label: "翻译参数", icon: <SlidersOutlined /> },
-  { key: "glossary", label: "术语表", icon: <BookOutlined /> },
-  { key: "threading", label: "翻译加速", icon: <ThunderboltOutlined /> },
-  { key: "about", label: "关于", icon: <InfoCircleOutlined /> },
+const SECTIONS: { key: string; labelKey: string; icon: React.ReactNode }[] = [
+  { key: "appearance", labelKey: "settings.section.appearance", icon: <BgColorsOutlined /> },
+  { key: "provider", labelKey: "settings.section.provider", icon: <CloudServerOutlined /> },
+  { key: "params", labelKey: "settings.section.params", icon: <SlidersOutlined /> },
+  { key: "glossary", labelKey: "settings.section.glossary", icon: <BookOutlined /> },
+  { key: "threading", labelKey: "settings.section.threading", icon: <ThunderboltOutlined /> },
+  { key: "about", labelKey: "settings.section.about", icon: <InfoCircleOutlined /> },
 ];
 
-export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
+export function SettingsModal({ open, settings, initialSection, onClose, onSaved }: Props) {
+  const { t } = useTranslationContext();
   const [form] = Form.useForm<FormValues>();
   const provider = Form.useWatch("provider", form);
   const selectedModel = Form.useWatch("model", form);
   const threadingEnabled = Form.useWatch("threadingEnabled", form);
+  const batchSizeAuto = Form.useWatch("batchSizeAuto", form) ?? true;
+  const packParallelEnabled = Form.useWatch("packParallelEnabled", form) ?? false;
   const [modelOptions, setModelOptions] = useState<ModelInfo[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
   const [testingModel, setTestingModel] = useState(false);
   const [promptEditorOpen, setPromptEditorOpen] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
-  /** 当前展示的设置分组（默认页面设置） */
+  /** 当前展示的设置分组（默认页面设置；打开时按 initialSection 定位） */
   const [activeSection, setActiveSection] = useState<string>("appearance");
+  useEffect(() => {
+    if (open) setActiveSection(initialSection ?? "appearance");
+  }, [open, initialSection]);
 
   /** 服务商切换联动：切换时载入该服务商保存的 key / 模型 / 模型列表 */
   const prevProviderRef = useRef<string | undefined>(undefined);
@@ -154,17 +167,17 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
       const info = await api.checkUpdate();
       if (info) {
         Modal.confirm({
-          title: "发现新版本",
-          content: `当前 v${CURRENT_VERSION}，最新 v${info.latestVersion}。是否前往 GitHub 下载更新？`,
-          okText: "前往下载",
+          title: t("settings.msg.updateFound"),
+          content: t("settings.msg.updateContent", { cur: CURRENT_VERSION, latest: info.latestVersion }),
+          okText: t("settings.msg.goDownload"),
           cancelText: "取消",
           onOk: () => void openUrl(info.url),
         });
       } else {
-        message.success(`已是最新版本（v${CURRENT_VERSION}）`);
+        message.success(t("settings.msg.latest", { version: CURRENT_VERSION }));
       }
     } catch (e) {
-      message.error(String(e) || "连接不到 GitHub，无法检查更新");
+      message.error(String(e) || t("settings.msg.updateCheckFailed"));
     } finally {
       setCheckingUpdate(false);
     }
@@ -179,11 +192,14 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
         baseUrl: settings.provider.baseUrl ?? "",
         temperature: settings.provider.temperature ?? 0.7,
         batchSize: settings.batchSize,
+        batchSizeAuto: settings.batchSizeAuto ?? true,
         extractGlossary: settings.extractGlossary,
         threadingEnabled: settings.threading?.enabled ?? false,
         deepScan: settings.deepScan ?? false,
         threadCount: settings.threading?.threadCount ?? 2,
         requestIntervalSec: settings.threading?.requestIntervalSec ?? 4,
+        packParallelEnabled: settings.packParallelEnabled ?? false,
+        packParallelCount: settings.packParallelCount ?? 2,
         userGlossary: settings.userGlossary.length ? settings.userGlossary : [],
         providerApiKeys: settings.providerApiKeys ?? {},
         providerModels: settings.providerModels ?? {},
@@ -212,7 +228,7 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
     const providerName = form.getFieldValue("provider") as string;
     const model = form.getFieldValue("model")?.trim() as string | undefined;
     if (!apiKey) {
-      message.warning("请先填写 API Key");
+      message.warning(t("settings.msg.needKey"));
       return;
     }
     if (!model) {
@@ -232,7 +248,7 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
       const msg = await api.testModel(cfg);
       message.success(msg);
     } catch (e) {
-      message.error(`连接验证失败：${String(e)}`);
+      message.error(t("settings.msg.testFailed", { error: String(e) }));
     }
     setTestingModel(false);
   }
@@ -241,7 +257,7 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
     const apiKey = form.getFieldValue("apiKey")?.trim() as string | undefined;
     const providerName = form.getFieldValue("provider") as string;
     if (!apiKey) {
-      message.warning("请先填写 API Key");
+      message.warning(t("settings.msg.needKey"));
       return;
     }
     const cfg: ProviderConfig = {
@@ -263,16 +279,16 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
       };
       form.setFieldValue("providerModelOptions", opts);
       if (models.length > 0) {
-        message.success(`获取到 ${models.length} 个模型（免费模型已标注）`);
+        message.success(t("settings.msg.fetched", { n: models.length }));
         const cur = form.getFieldValue("model");
         if (!cur) {
           form.setFieldValue("model", models[0].id);
         }
       } else {
-        message.info("未获取到模型列表，可手动输入模型名");
+        message.info(t("settings.msg.fetchEmpty"));
       }
     } catch (e) {
-      message.error(`获取模型列表失败：${String(e)}`);
+      message.error(t("settings.msg.fetchFailed", { error: String(e) }));
     }
     setLoadingModels(false);
   }
@@ -288,7 +304,7 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
     }
     const v = form.getFieldsValue(true) as FormValues;
     if (!v.provider || v.apiKey === undefined) {
-      message.error("服务商配置缺失，请先到「服务商与模型」分组检查");
+      message.error(t("settings.msg.providerMissing"));
       return;
     }
     const custom = v.provider === "custom";
@@ -324,12 +340,15 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
         .filter(([en, zh]) => en.trim() && zh.trim())
         .map(([en, zh]) => [en.trim(), zh.trim()] as [string, string]),
       batchSize: v.batchSize,
+      batchSizeAuto: v.batchSizeAuto ?? true,
       extractGlossary: v.extractGlossary,
       threading: {
         enabled: v.threadingEnabled ?? false,
         threadCount: Math.min(Math.max(v.threadCount ?? 1, 1), 8),
         requestIntervalSec: Math.min(Math.max(v.requestIntervalSec ?? 4, 1), 60),
       },
+      packParallelEnabled: v.packParallelEnabled ?? false,
+      packParallelCount: Math.max(v.packParallelCount ?? 2, 0),
       deepScan: v.deepScan ?? false,
       theme: v.theme === "dark" ? "dark" : "light",
       language: v.language === "en" ? "en" : "zh",
@@ -337,7 +356,7 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
     };
     try {
       await api.saveSettings(next);
-      message.success("设置已保存");
+      message.success(t("settings.msg.saved"));
       onSaved(next);
       onClose();
     } catch (e) {
@@ -347,7 +366,7 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
 
   return (
     <Modal
-      title="设置"
+      title={t("settings.title")}
       open={open}
       onCancel={onClose}
       onOk={() => void handleSave()}
@@ -378,7 +397,7 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
               }}
               onClick={() => setActiveSection(s.key)}
             >
-              {s.label}
+              {t(s.labelKey)}
             </Button>
           ))}
         </div>
@@ -399,20 +418,20 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
             {/* ===== 分组：服务商与模型 ===== */}
             {activeSection === "provider" && (
             <div>
-              <Typography.Text strong>AI 翻译服务</Typography.Text>
+              <Typography.Text strong>{t("settings.provider.groupTitle")}</Typography.Text>
               <Typography.Paragraph
                 type="secondary"
                 style={{ fontSize: 12, marginBottom: 12 }}
               >
-                各服务商的 API Key 与模型选择分别保存，切换服务商不串配置
+                {t("settings.provider.groupDesc")}
               </Typography.Paragraph>
 
-              <Form.Item name="provider" label="服务商">
+              <Form.Item name="provider" label={t("settings.provider.label")}>
                 <ProviderGrid />
               </Form.Item>
               {provider && PROVIDER_HINTS[provider] && (
                 <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: -8, marginBottom: 12 }}>
-                  {PROVIDER_HINTS[provider]}
+                  {t(PROVIDER_HINTS[provider])}
                 </Typography.Paragraph>
               )}
 
@@ -430,13 +449,13 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
               <Form.Item
                 name="apiKey"
                 label="API Key"
-                rules={[{ required: true, message: "请输入 API Key" }]}
+                rules={[{ required: true, message: t("settings.provider.apiKeyRequired") }]}
               >
                 <Input.Password
                   placeholder={
                     provider === "zhipu"
-                      ? "在 bigmodel.cn 控制台创建（免费）"
-                      : "粘贴你的 API Key"
+                      ? t("settings.provider.apiKeyPlaceholderZhipu")
+                      : t("settings.provider.apiKeyPlaceholder")
                   }
                   addonAfter={
                     <Button
@@ -447,7 +466,7 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
                       disabled={!provider}
                       onClick={() => void handleFetchModels()}
                     >
-                      获取模型列表
+                      {t("settings.provider.fetchModels")}
                     </Button>
                   }
                 />
@@ -458,8 +477,8 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
                 label="模型"
                 extra={
                   provider === "zhipu"
-                    ? "免费模型，也可拉取列表选择其他模型"
-                    : "可点击「获取模型列表」拉取，或手动输入"
+                    ? t("settings.provider.modelExtraZhipu")
+                    : t("settings.provider.modelExtra")
                 }
               >
                 {modelOptions.length === 0 ? (
@@ -467,15 +486,15 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
                   <Input
                     placeholder={
                       provider
-                        ? PROVIDER_PRESETS[provider]?.model || "选择或输入模型名"
-                        : "填写 API Key 后点击「获取模型列表」"
+                        ? PROVIDER_PRESETS[provider]?.model || t("settings.provider.modelPlaceholderCustom")
+                        : t("settings.provider.modelPlaceholderNeedKey")
                     }
                   />
                 ) : (
                   // 已拉取列表：Select 自带搜索，原生虚拟化支持数百项
                   <Select
                     showSearch
-                    placeholder="搜索模型名称或 ID..."
+                    placeholder={t("settings.provider.modelSearch")}
                     optionFilterProp="label"
                     filterOption={(input, option) => {
                       const v = String(option?.value ?? "").toLowerCase();
@@ -523,7 +542,7 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
                                 lineHeight: "18px",
                               }}
                             >
-                              免费
+                              {t("settings.provider.free")}
                             </Tag>
                           )}
                         </span>
@@ -555,18 +574,18 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
                   onClick={() => void handleTestModel()}
                   style={{ paddingInline: 0 }}
                 >
-                  验证连接
+                  {t("settings.provider.testConnection")}
                 </Button>
               </div>
 
               {/* Base URL 展示：自定义可编辑；预设只读灰色 + 官网跳转 */}
               {provider === "custom" ? (
-                <Form.Item name="baseUrl" label="Base URL（OpenAI 兼容端点）">
+                <Form.Item name="baseUrl" label={t("settings.provider.baseUrl")}>
                   <Input placeholder="https://..." />
                 </Form.Item>
               ) : (
                 provider && PROVIDER_PRESETS[provider]?.baseUrl && (
-                  <Form.Item label="Base URL（OpenAI 兼容端点）">
+                  <Form.Item label={t("settings.provider.baseUrl")}>
                     <Input
                       disabled
                       value={PROVIDER_PRESETS[provider].baseUrl}
@@ -578,7 +597,7 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
                             }
                             style={{ fontSize: 12 }}
                           >
-                            <LinkOutlined /> 官网
+                            <LinkOutlined /> {t("settings.provider.website")}
                           </Typography.Link>
                         ) : undefined
                       }
@@ -592,24 +611,33 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
             {/* ===== 分组：翻译参数 ===== */}
             {activeSection === "params" && (
             <div>
-              <Typography.Text strong>翻译参数</Typography.Text>
+              <Typography.Text strong>{t("settings.params.groupTitle")}</Typography.Text>
               <Typography.Paragraph
                 type="secondary"
                 style={{ fontSize: 12, marginBottom: 12 }}
               >
-                温度越低译文越稳定；每批条数影响单次请求规模与实时推送粒度
+                {t("settings.params.groupDesc")}
               </Typography.Paragraph>
               <Space size="large" wrap>
-                <Form.Item name="temperature" label="温度" style={{ marginBottom: 8 }}>
+                <Form.Item name="temperature" label={t("settings.params.temperature")} style={{ marginBottom: 8 }}>
                   <InputNumber min={0} max={2} step={0.01} precision={2} />
                 </Form.Item>
                 <Form.Item
-                  name="batchSize"
-                  label="每批条数"
+                  name="batchSizeAuto"
+                  label={t("settings.params.batchSizeAuto")}
+                  valuePropName="checked"
                   style={{ marginBottom: 8 }}
-                  tooltip="每批翻译的条目数，5-200 条；实时译文按批推送"
+                  tooltip={t("settings.params.batchSizeAutoTooltip")}
                 >
-                  <InputNumber min={5} max={200} />
+                  <Switch />
+                </Form.Item>
+                <Form.Item
+                  name="batchSize"
+                  label={t("settings.params.batchSize")}
+                  style={{ marginBottom: 8 }}
+                  tooltip={t("settings.params.batchSizeTooltip")}
+                >
+                  <InputNumber min={1} max={200} disabled={batchSizeAuto} />
                 </Form.Item>
               </Space>
             </div>
@@ -618,42 +646,42 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
             {/* ===== 分组：术语表 ===== */}
             {activeSection === "glossary" && (
             <div>
-              <Typography.Text strong>术语表</Typography.Text>
+              <Typography.Text strong>{t("settings.glossary.groupTitle")}</Typography.Text>
               <Typography.Paragraph
                 type="secondary"
                 style={{ fontSize: 12, marginBottom: 12 }}
               >
-                统一译名与翻译风格：术语表锁定专有名词译法，提示词定义翻译角色与规则
+                {t("settings.glossary.groupDesc")}
               </Typography.Paragraph>
 
               <Form.Item
                 name="extractGlossary"
-                label="先提取术语表"
+                label={t("settings.glossary.extract")}
                 valuePropName="checked"
                 style={{ marginBottom: 12 }}
-                tooltip="翻译前先让 AI 从条目中提取专有名词术语表，用于统一译名"
+                tooltip={t("settings.glossary.extractTooltip")}
               >
                 <Switch />
               </Form.Item>
 
               <Typography.Text type="secondary">
-                自定义术语表（统一译名，如 Diamond → 钻石；格式：英文 → 中文）
+                {t("settings.glossary.customDesc")}
               </Typography.Text>
               <Form.List name="userGlossary">
                 {(fields, { add, remove }) => (
                   <div style={{ marginTop: 8 }}>
                     {fields.length === 0 && (
                       <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
-                        暂无自定义术语，可点击下方按钮添加
+                        {t("settings.glossary.empty")}
                       </Typography.Paragraph>
                     )}
                     {fields.map(({ key, name }) => (
                       <Space key={key} align="baseline" style={{ display: "flex" }}>
-                        <Form.Item name={[name, 0]} rules={[{ required: true, message: "英文" }]}>
-                          <Input placeholder="英文原文" style={{ width: 200 }} />
+                        <Form.Item name={[name, 0]} rules={[{ required: true, message: t("settings.glossary.enRequired") }]}>
+                          <Input placeholder={t("settings.glossary.enPlaceholder")} style={{ width: 200 }} />
                         </Form.Item>
-                        <Form.Item name={[name, 1]} rules={[{ required: true, message: "中文" }]}>
-                          <Input placeholder="中文译名" style={{ width: 200 }} />
+                        <Form.Item name={[name, 1]} rules={[{ required: true, message: t("settings.glossary.zhRequired") }]}>
+                          <Input placeholder={t("settings.glossary.zhPlaceholder")} style={{ width: 200 }} />
                         </Form.Item>
                         <MinusCircleOutlined onClick={() => remove(name)} />
                       </Space>
@@ -664,7 +692,7 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
                       block
                       icon={<PlusOutlined />}
                     >
-                      添加术语
+                      {t("settings.glossary.add")}
                     </Button>
                   </div>
                 )}
@@ -678,7 +706,7 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
                 onClick={() => setPromptEditorOpen(true)}
                 style={{ marginBottom: 8 }}
               >
-                自定义提示词（模组 / 光影包 / 资源包）
+                {t("settings.glossary.openPrompts")}
               </Button>
             </div>
             )}
@@ -686,37 +714,21 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
             {/* ===== 分组：翻译加速 ===== */}
             {activeSection === "threading" && (
             <div>
-              <Space align="center" style={{ marginBottom: 8 }}>
-                <Typography.Text strong>翻译加速（实验性）</Typography.Text>
-                <Tag color="volcano">实验性</Tag>
-              </Space>
+              <Typography.Text strong>{t("settings.threading.groupTitle")}</Typography.Text>
               <Alert
                 type="warning"
                 showIcon
-                style={{ marginBottom: 12 }}
+                style={{ margin: "8px 0 12px" }}
                 message={
                   <div style={{ fontSize: 12, lineHeight: 1.7 }}>
-                    多线程并行会同时向模型发送多个翻译请求以提升速度，但存在以下风险与限制：
-                    <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
-                      <li>
-                        免费模型（glm-4-flash / 4.7-flash）有<b>账号级速率限制</b>
-                        （实测约 15~30 请求/分钟），多线程容易触发限流（429），程序会自动退避重试；
-                      </li>
-                      <li>
-                        <b>具体线程数以各服务商官网限速为准</b>：同一模型不同厂商额度差异较大，
-                        例如 OpenRouter 的免费模型可开 8 线程，而智谱免费模型（glm-4-flash 系列）建议 1-2 线程；
-                        付费模型（glm-4.5 等）一般可开 4-8 线程提速明显；
-                      </li>
-                      <li>线程之间按「请求间隔」错开发送，降低限流概率，间隔越大越稳（推荐 ≥ 4 秒）；</li>
-                      <li>不同模型同时翻译时，译名风格可能不完全一致，建议用同一模型。</li>
-                    </ul>
+                    {t("settings.threading.warn")}
                   </div>
                 }
               />
               <Space size="large" wrap align="start">
                 <Form.Item
                   name="threadingEnabled"
-                  label="启用并行翻译"
+                  label={t("settings.threading.enable")}
                   valuePropName="checked"
                   style={{ marginBottom: 4 }}
                 >
@@ -724,41 +736,81 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
                 </Form.Item>
                 <Form.Item
                   name="threadCount"
-                  label="线程数"
+                  label={t("settings.threading.threads")}
                   style={{ marginBottom: 4 }}
                 >
                   <Select
                     style={{ width: 120 }}
                     options={[1, 2, 3, 4, 5, 6, 7, 8].map((n) => ({
                       value: n,
-                      label: `${n} 线程${n === 1 ? "（=不并行）" : ""}`,
+                      label: `${t("settings.threading.threadLabel", { n })}${n === 1 ? t("settings.threading.threadSingle") : ""}`,
                     }))}
                     disabled={!threadingEnabled}
                   />
                 </Form.Item>
                 <Form.Item
                   name="requestIntervalSec"
-                  label="请求间隔（秒）"
+                  label={t("settings.threading.interval")}
                   style={{ marginBottom: 4 }}
-                  tooltip="每个线程每次请求之间的间隔，间隔越大越不容易触发限流"
+                  tooltip={t("settings.threading.intervalTooltip")}
                 >
                   <InputNumber
                     min={1}
                     max={60}
                     step={1}
-                    addonAfter="秒"
+                    addonAfter={t("settings.threading.seconds")}
                     disabled={!threadingEnabled}
                   />
                 </Form.Item>
               </Space>
 
               <Divider style={{ margin: "8px 0 12px" }} />
+
+              {/* 内容包并行翻译（与上面单包线程并行相互独立） */}
+              <Space size="large" wrap align="start">
+                <Form.Item
+                  name="packParallelEnabled"
+                  label={t("settings.threading.packEnable")}
+                  valuePropName="checked"
+                  style={{ marginBottom: 4 }}
+                >
+                  <Switch />
+                </Form.Item>
+                <Form.Item
+                  name="packParallelCount"
+                  label={t("settings.threading.packCount")}
+                  style={{ marginBottom: 4 }}
+                >
+                  <Select
+                    style={{ width: 190 }}
+                    disabled={!packParallelEnabled}
+                    options={[
+                      { value: 2, label: t("settings.threading.packCount2") },
+                      { value: 4, label: t("settings.threading.packCount4") },
+                      { value: 8, label: t("settings.threading.packCount8") },
+                      { value: 0, label: t("settings.threading.packCountInf") },
+                    ]}
+                  />
+                </Form.Item>
+              </Space>
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 12 }}
+                message={
+                  <div style={{ fontSize: 12, lineHeight: 1.7 }}>
+                    {t("settings.threading.packWarn")}
+                  </div>
+                }
+              />
+
+              <Divider style={{ margin: "8px 0 12px" }} />
               <Form.Item
                 name="deepScan"
-                label="模组深度扫描"
+                label={t("settings.threading.deepScan")}
                 valuePropName="checked"
                 style={{ marginBottom: 4 }}
-                tooltip="解析模组中普通扫描可能遗漏的内嵌文本（配置文件/成就/手册/嵌套 jar 等）。已编译的 .class 代码内文本暂不支持。"
+                tooltip={t("settings.threading.deepScanTooltip")}
               >
                 <Switch />
               </Form.Item>
@@ -766,7 +818,7 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
                 type="secondary"
                 style={{ fontSize: 12, marginBottom: 0 }}
               >
-                开启后，普通解析为空的模组会自动启用强化扫描；也可在模组卡片上手动点击「模组深度扫描」
+                {t("settings.threading.deepScanDesc")}
               </Typography.Paragraph>
             </div>
             )}
@@ -774,19 +826,19 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
             {/* ===== 分组：页面设置（主题 / 语言，两项独立配置互不影响） ===== */}
             {activeSection === "appearance" && (
             <div>
-              <Typography.Text strong>页面设置</Typography.Text>
+              <Typography.Text strong>{t("settings.appearance.groupTitle")}</Typography.Text>
               <Typography.Paragraph
                 type="secondary"
                 style={{ fontSize: 12, marginBottom: 16 }}
               >
-                主题与语言互相独立，可任意组合；保存后立即生效
+                {t("settings.appearance.groupDesc")}
               </Typography.Paragraph>
 
               <Space size="large" wrap align="start">
-                <Form.Item name="theme" label="主题" style={{ marginBottom: 8 }}>
+                <Form.Item name="theme" label={t("settings.appearance.theme")} style={{ marginBottom: 8 }}>
                   <Radio.Group optionType="button" buttonStyle="solid">
-                    <Radio.Button value="light"><SunGlyph /> 亮色</Radio.Button>
-                    <Radio.Button value="dark"><MoonGlyph /> 暗色</Radio.Button>
+                    <Radio.Button value="light"><SunGlyph /> {t("settings.appearance.light")}</Radio.Button>
+                    <Radio.Button value="dark"><MoonGlyph /> {t("settings.appearance.dark")}</Radio.Button>
                   </Radio.Group>
                 </Form.Item>
 
@@ -806,13 +858,13 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
               {/* about:author：作者 / 项目信息（纯展示） */}
               <div style={{ textAlign: "center", paddingTop: 24 }}>
                 <Typography.Title level={5} style={{ marginBottom: 4 }}>
-                  <img src="/app-icon.svg" alt="" style={{ height: 22, marginRight: 8, verticalAlign: "middle" }} /> MC 汉化工坊 v{CURRENT_VERSION}
+                  <img src="/app-icon.svg" alt="" style={{ height: 22, marginRight: 8, verticalAlign: "middle" }} /> {t("settings.about.title")} v{CURRENT_VERSION}
                 </Typography.Title>
                 <Typography.Paragraph type="secondary" style={{ marginBottom: 4 }}>
-                  面向《我的世界》模组 / 光影包 / 资源包的 AI 汉化桌面工具
+                  {t("settings.about.desc")}
                 </Typography.Paragraph>
                 <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
-                  作者：adssadax-1 · 完全开源免费（MIT 协议）
+                  {t("settings.about.author")}
                 </Typography.Paragraph>
                 <Typography.Link
                   onClick={() => void openUrl(GITHUB_URL)}
@@ -832,7 +884,7 @@ export function SettingsModal({ open, settings, onClose, onSaved }: Props) {
                   loading={checkingUpdate}
                   onClick={() => void handleCheckUpdate()}
                 >
-                  <img src="/refresh.svg" alt="" style={{ height: 12, marginRight: 4, verticalAlign: "middle" }} /> 检查更新（当前 v{CURRENT_VERSION}）
+                  <img src="/refresh.svg" alt="" style={{ height: 12, marginRight: 4, verticalAlign: "middle" }} /> {t("settings.about.checkUpdate", { version: CURRENT_VERSION })}
                 </Button>
               </div>
             </div>

@@ -32,6 +32,13 @@ const MC_COLORS: Record<string, string> = {
   c: "#FF5555", d: "#FF55FF", e: "#FFFF55", f: "#FFFFFF",
 };
 
+/** 按备注内容分类着色：与原文相同=金色、空译文=红色、占位符/格式警告=橙色 */
+function noteTagColor(n: string): string {
+  if (n.includes("译文与原文相同")) return "gold";
+  if (n.includes("空译文")) return "red";
+  return "orange";
+}
+
 /** 按条目状态/翻译中标记返回表格行底色（CSS 变量，亮暗主题自适应） */
 function rowBg(e: LangEntry): string | undefined {
   if (e.translating) return "var(--row-translating)"; // 淡蓝：正在汉化
@@ -386,7 +393,7 @@ export const EntryTable = memo(function EntryTable({
       ),
     },
     {
-      title: "状态",
+      title: tr("components.colStatus"),
       dataIndex: "status",
       width: 100,
       render: (s: LangEntry["status"], record) =>
@@ -442,6 +449,12 @@ export const EntryTable = memo(function EntryTable({
       title: tr("components.colNotes"),
       dataIndex: "notes",
       width: 200,
+      // 表头筛选：按备注标签过滤（与状态列同款交互）
+      filters: [...new Set(entries.flatMap((e) => e.notes ?? []))].map((n) => ({
+        text: n,
+        value: n,
+      })),
+      onFilter: (value, record) => (record.notes ?? []).includes(value as string),
       render: (notes: string[], record) => (
         <div>
           {record.placeholders.length > 0 && (
@@ -449,7 +462,7 @@ export const EntryTable = memo(function EntryTable({
           )}
           {notes.map((n, i) => (
             <Tooltip title={n} key={i}>
-              <Tag color="orange" style={{ marginBottom: 2, maxWidth: 160 }}>
+              <Tag color={noteTagColor(n)} style={{ marginBottom: 2, maxWidth: 160 }}>
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis", display: "inline-block" }}>
                   {n}
                 </span>

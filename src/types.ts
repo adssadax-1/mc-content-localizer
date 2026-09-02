@@ -158,6 +158,12 @@ export interface Settings {
   providerModelOptions: Record<string, ModelInfo[]>;
   userGlossary: [string, string][];
   batchSize: number;
+  /** 每批条数跟随线程数自动取最优（条目数 ÷ 线程数，向上取整）；false 时用 batchSize */
+  batchSizeAuto: boolean;
+  /** 内容包并行翻译开关 */
+  packParallelEnabled: boolean;
+  /** 同时翻译的内容包数（0 = 无限制） */
+  packParallelCount: number;
   extractGlossary: boolean;
   /** 多线程翻译配置（实验性） */
   threading: ThreadingConfig;
@@ -183,6 +189,8 @@ export interface ProgressPayload {
   batchTotal: number;
   doneCount: number;
   totalCount: number;
+  /** 所属内容包 key（并行翻译时区分各包进度） */
+  packKey?: string;
 }
 
 // 翻译状态的中文标签

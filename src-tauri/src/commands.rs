@@ -97,13 +97,16 @@ pub async fn run_translation(
     threading: Option<ThreadingConfig>,
 ) -> Result<Vec<TranslatedItem>, String> {
     let provider = OpenAiProvider::new(config);
+    // devtools：设置全局 emitter，供 provider/pipeline 插桩 emit
+    #[cfg(feature = "devtools")]
+    crate::dev::set_emitter(app.clone());
     // 诊断信息：报错时附上实际请求参数，方便定位
     let diag = format!(
         "model={}, temperature={}",
         provider.config.resolve_endpoint().1,
         provider.config.temperature()
     );
-    let batch_size = batch_size.unwrap_or(40).clamp(5, 200);
+    let batch_size = batch_size.unwrap_or(40).clamp(1, 200);
     let threading = threading.unwrap_or_default();
     let threads = if threading.enabled {
         threading.thread_count.max(1)
@@ -140,6 +143,14 @@ pub async fn run_translation(
 
     // 单线程：串行批处理（保持原有行为）
     if threads <= 1 {
+        // devtools：单线程也上报调度（worker 0），保证调度视图始终有数据
+        #[cfg(feature = "devtools")]
+        crate::dev::dev_emit("dev-thread-assign", serde_json::json!({
+            "workerId": 0,
+            "chunkCount": batch_count,
+            "packKey": pack_key,
+            "packName": ctx.mod_name,
+        }));
         let mut results: Vec<TranslatedItem> = Vec::with_capacity(total);
         let mut done = 0;
         for (idx, chunk) in items.chunks(batch_size).enumerate() {
@@ -149,7 +160,7 @@ pub async fn run_translation(
             if CANCEL_TRANSLATION.load(Ordering::Relaxed) {
                 break;
             }
-            let translated = process_chunk(&provider, &ctx, &glossary, chunk, &diag).await;
+            let translated = process_chunk(&provider, &ctx, &glossary, chunk, &diag, &pack_key, 0).await;
             emit_batch(&app, &pack_key, &translated);
             done += chunk.len();
             results.extend(translated);
@@ -160,12 +171,15 @@ pub async fn run_translation(
                     "batchTotal": batch_count,
                     "doneCount": done,
                     "totalCount": total,
+                    "packKey": pack_key,
                 }),
             );
         }
         // 结束（完成/取消/暂停遗留）后复位标志
         CANCEL_TRANSLATION.store(false, Ordering::Relaxed);
         PAUSE_TRANSLATION.store(false, Ordering::Relaxed);
+        #[cfg(feature = "devtools")]
+        crate::dev::clear_emitter();
         return Ok(results);
     }
 
@@ -181,10 +195,20 @@ pub async fn run_translation(
     let interval = std::time::Duration::from_secs(threading.request_interval_sec.max(1));
 
     let mut handles = Vec::new();
-    for wchunks in worker_chunks {
+    for (wid, wchunks) in worker_chunks.into_iter().enumerate() {
         if wchunks.is_empty() {
             continue;
         }
+        // devtools：worker 分配事件
+        #[cfg(feature = "devtools")]
+        crate::dev::dev_emit("dev-thread-assign", serde_json::json!({
+            "workerId": wid,
+            "chunkCount": wchunks.len(),
+            "packKey": pack_key,
+            "packName": ctx.mod_name,
+        }));
+        #[cfg(not(feature = "devtools"))]
+        let _ = wid;
         let provider = provider.clone();
         let ctx = ctx.clone();
         let glossary = glossary.clone();
@@ -202,7 +226,7 @@ pub async fn run_translation(
                 if CANCEL_TRANSLATION.load(Ordering::Relaxed) {
                     return;
                 }
-                let translated = process_chunk(&provider, &ctx, &glossary, &chunk, &diag).await;
+                let translated = process_chunk(&provider, &ctx, &glossary, &chunk, &diag, &pack_key, wid).await;
                 emit_batch(&app, &pack_key, &translated);
                 {
                     let mut lock = results.lock().unwrap();
@@ -217,9 +241,16 @@ pub async fn run_translation(
                         "batchTotal": batch_count,
                         "doneCount": done,
                         "totalCount": total,
+                        "packKey": pack_key,
                     }),
                 );
                 // 线程间请求间隔：降低限流概率
+                #[cfg(feature = "devtools")]
+                crate::dev::dev_emit("dev-thread-throttle", serde_json::json!({
+                    "workerId": wid,
+                    "intervalSec": interval.as_secs(),
+                    "packKey": pack_key,
+                }));
                 tokio::time::sleep(interval).await;
             }
         }));
@@ -229,6 +260,8 @@ pub async fn run_translation(
     }
     CANCEL_TRANSLATION.store(false, Ordering::Relaxed);
     PAUSE_TRANSLATION.store(false, Ordering::Relaxed);
+    #[cfg(feature = "devtools")]
+    crate::dev::clear_emitter();
     let final_results = Arc::try_unwrap(results)
         .map_err(|_| "并发结果收集失败".to_string())?
         .into_inner()
@@ -253,8 +286,41 @@ async fn process_chunk(
     glossary: &[(String, String)],
     chunk: &[BatchItem],
     diag: &str,
+    pack_key: &str,
+    worker_id: usize,
 ) -> Vec<TranslatedItem> {
-    match pipeline::translate_batch(provider, ctx, glossary, chunk).await {
+    #[cfg(not(feature = "devtools"))]
+    let _ = (pack_key, worker_id);
+    // devtools：批次开始（带包/线程标识，供调度两级视图）
+    #[cfg(feature = "devtools")]
+    {
+        let keys: Vec<&str> = chunk.iter().map(|i| i.key.as_str()).collect();
+        crate::dev::dev_emit("dev-batch-start", serde_json::json!({
+            "keys": keys,
+            "packKey": pack_key,
+            "workerId": worker_id,
+        }));
+    }
+    let start = std::time::Instant::now();
+    let result = pipeline::translate_batch(provider, ctx, glossary, chunk).await;
+    // devtools：批次结束
+    #[cfg(feature = "devtools")]
+    {
+        let (ok, error) = match &result {
+            Ok(res) => (res.translated.len(), String::new()),
+            Err(e) => (0, e.to_string()),
+        };
+        crate::dev::dev_emit("dev-batch-done", serde_json::json!({
+            "ok": ok,
+            "error": error,
+            "durationMs": start.elapsed().as_millis(),
+            "packKey": pack_key,
+            "workerId": worker_id,
+        }));
+    }
+    #[cfg(not(feature = "devtools"))]
+    let _ = start;
+    match result {
         Ok(res) => {
             let mut out = res.translated;
             for key in res.missing {
@@ -472,4 +538,216 @@ pub fn export_resource_pack_desc(
         std::path::Path::new(&dest),
         &entries,
     )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 以下为 devtools 专用命令：仅在 devtools feature 下编译，复用现有解析函数，
+// 不写盘，供前端解析器测试台使用。
+// ═══════════════════════════════════════════════════════════════════════════
+#[cfg(feature = "devtools")]
+pub mod devtools {
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    pub struct DevParseResult {
+        pub pairs: Vec<(String, String)>,
+        pub placeholders: Vec<String>,
+        pub error: Option<String>,
+    }
+
+    /// 解析器测试台：粘贴文本 → 解析，不写盘。
+    /// format ∈ {"json","lang","properties"}
+    #[tauri::command]
+    pub fn dev_parse_text(format: String, text: String) -> DevParseResult {
+        let result = match format.as_str() {
+            "json" => crate::core::json_lang::parse_json_lang(&text)
+                .map_err(|e| e.to_string()),
+            "lang" => crate::core::lang::parse_lang(text.as_bytes())
+                .map_err(|e| e.to_string()),
+            "properties" => crate::core::lang::parse_properties_utf8(&text)
+                .map_err(|e| e.to_string()),
+            other => Err(format!("未知格式: {other}")),
+        };
+
+        match result {
+            Ok(pairs) => {
+                let placeholders = pairs
+                    .iter()
+                    .flat_map(|(_, v)| crate::core::placeholder::extract_placeholders(v))
+                    .collect();
+                DevParseResult {
+                    pairs,
+                    placeholders,
+                    error: None,
+                }
+            }
+            Err(e) => DevParseResult {
+                pairs: vec![],
+                placeholders: vec![],
+                error: Some(e),
+            },
+        }
+    }
+
+    /// 占位符校验：返回警告列表（空 = 通过）
+    #[tauri::command]
+    pub fn dev_validate_placeholders(source: String, translation: String) -> Vec<String> {
+        crate::core::placeholder::validate_placeholders(&source, &translation)
+    }
+
+    #[derive(Serialize)]
+    pub struct DevExportPreview {
+        pub file_name: String,
+        pub sanitized_modid: String,
+        pub original_modid: String,
+        pub uses_min_max_format: bool,
+        pub mcmeta_json: String,
+        pub lang_path: String,
+        pub lang_content_preview: String,
+        pub zip_tree: Vec<String>,
+        pub entry_count: usize,
+    }
+
+    /// 导出预览器：复用 sanitize_file_stem + mcmeta 逻辑，返回结构化预览，不写盘。
+    #[tauri::command]
+    pub fn dev_preview_export(
+        modid: String,
+        mod_name: String,
+        entries: Vec<crate::core::model::LangEntry>,
+        lang_format: String,
+        pack_format: u32,
+    ) -> DevExportPreview {
+        let sanitized = crate::export::sanitize_file_stem(&modid);
+        let file_name = format!("{}_zh_cn.zip", sanitized);
+
+        let translated: Vec<&crate::core::model::LangEntry> = entries
+            .iter()
+            .filter(|e| e.translation.as_ref().is_some_and(|t| !t.is_empty()))
+            .collect();
+
+        let pairs: Vec<(String, String)> = translated
+            .iter()
+            .map(|e| (e.key.clone(), e.translation.clone().unwrap()))
+            .collect();
+
+        let is_legacy = lang_format == "LegacyLang" || lang_format == "legacy";
+        let lang_ext = if is_legacy { "lang" } else { "json" };
+        let lang_path = format!("assets/{}/lang/zh_cn.{}", sanitized, lang_ext);
+
+        let description = format!("§a[模组汉化] §r{} 中文汉化包", mod_name);
+        let pack_obj = if pack_format > 64 {
+            serde_json::json!({
+                "min_format": [pack_format, 0],
+                "max_format": [pack_format, 0],
+                "description": description,
+            })
+        } else {
+            serde_json::json!({
+                "pack_format": pack_format,
+                "description": description,
+            })
+        };
+        let mcmeta = serde_json::json!({ "pack": pack_obj });
+        let mcmeta_json = serde_json::to_string_pretty(&mcmeta).unwrap_or_default();
+
+        let lang_content = if is_legacy {
+            String::from_utf8_lossy(&crate::core::lang::encode_lang(&pairs)).to_string()
+        } else {
+            crate::core::json_lang::encode_json_lang(&pairs).unwrap_or_default()
+        };
+        let preview_lines: Vec<&str> = lang_content.lines().take(50).collect();
+        let lang_content_preview = preview_lines.join("\n");
+
+        let zip_tree = vec![
+            format!("{}.zip", sanitized),
+            "├── pack.mcmeta".to_string(),
+            format!("└── {}", lang_path),
+        ];
+
+        DevExportPreview {
+            file_name,
+            sanitized_modid: sanitized,
+            original_modid: modid,
+            uses_min_max_format: pack_format > 64,
+            mcmeta_json,
+            lang_path,
+            lang_content_preview,
+            zip_tree,
+            entry_count: pairs.len(),
+        }
+    }
+
+    // ── 网络故障注入 ──────────────────────────────────────────────────────
+    #[tauri::command]
+    pub fn dev_set_fault(
+        delay_ms: Option<u64>,
+        force_timeout: bool,
+        mock_status: Option<u16>,
+        mock_body: Option<String>,
+        disconnect: bool,
+    ) {
+        crate::dev::set_fault(crate::dev::DevFaultConfig {
+            delay_ms,
+            force_timeout,
+            mock_status,
+            mock_body,
+            disconnect,
+        });
+    }
+
+    #[tauri::command]
+    pub fn dev_clear_fault() {
+        crate::dev::clear_fault();
+    }
+
+    /// 打开（或聚焦）开发者工具第二窗口。Rust 侧创建，无需前端 capabilities。
+    /// 必须是 async 命令：同步命令在主线程执行，而 WebviewWindowBuilder::build()
+    /// 要等主线程事件循环处理创建请求 → 同步命令会自锁死锁（窗口白屏且无法关闭）。
+    #[tauri::command]
+    pub async fn dev_open_devtools_window(
+        app: tauri::AppHandle,
+        title: String,
+    ) -> Result<(), String> {
+        use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+
+        // 已存在则聚焦
+        if let Some(existing) = app.get_webview_window("devtools") {
+            let _ = existing.set_focus();
+            return Ok(());
+        }
+        let title = if title.is_empty() { "Developer Tools".to_string() } else { title };
+        WebviewWindowBuilder::new(&app, "devtools", WebviewUrl::App("index.html".into()))
+            .title(title)
+            .inner_size(1120.0, 820.0)
+            .min_inner_size(880.0, 600.0)
+            .build()
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// 解析器测试台：读取文本文件内容（配合前端 dialog 选路径）
+    #[tauri::command]
+    pub fn dev_read_text_file(path: String) -> Result<String, String> {
+        std::fs::read_to_string(&path).map_err(|e| e.to_string())
+    }
+
+    /// 解析器测试台：键值对编码为语言文件内容（复用生产编码器）
+    #[tauri::command]
+    pub fn dev_encode_pairs(format: String, pairs: Vec<(String, String)>) -> Result<String, String> {
+        match format.as_str() {
+            "lang" | "properties" => {
+                Ok(String::from_utf8_lossy(&crate::core::lang::encode_lang(&pairs)).to_string())
+            }
+            _ => crate::core::json_lang::encode_json_lang(&pairs).map_err(|e| e.to_string()),
+        }
+    }
+
+    /// 解析器测试台：把内容写到用户选择的路径
+    #[tauri::command]
+    pub fn dev_write_text_file(path: String, content: String) -> Result<(), String> {
+        if let Some(parent) = std::path::Path::new(&path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(&path, content).map_err(|e| e.to_string())
+    }
 }

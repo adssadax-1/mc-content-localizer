@@ -37,6 +37,10 @@ fn default_language() -> String {
     "zh".to_string()
 }
 
+fn default_batch_size_auto() -> bool {
+    true
+}
+
 impl Default for ThreadingConfig {
     fn default() -> Self {
         Self {
@@ -66,11 +70,20 @@ pub struct Settings {
     pub user_glossary: Vec<(String, String)>,
     /// 每批翻译条数
     pub batch_size: usize,
+    /// 每批条数自动按线程数取最优（条目数 ÷ 线程数，向上取整）；false 时用 batch_size
+    #[serde(default = "default_batch_size_auto")]
+    pub batch_size_auto: bool,
     /// 是否先让 AI 提取模组术语表
     pub extract_glossary: bool,
-    /// 多线程翻译配置（实验性）
+    /// 多线程翻译配置
     #[serde(default)]
     pub threading: ThreadingConfig,
+    /// 内容包并行翻译开关
+    #[serde(default)]
+    pub pack_parallel_enabled: bool,
+    /// 同时翻译的内容包数（0 = 无限制）
+    #[serde(default)]
+    pub pack_parallel_count: u32,
   /// 自定义提示词（key: mod / shader / resourcepack → 用户自定义的可编辑段）
   #[serde(default)]
   pub custom_prompts: HashMap<String, String>,
@@ -91,8 +104,11 @@ impl Default for Settings {
             provider_model_options: HashMap::new(),
             user_glossary: Vec::new(),
             batch_size: 40,
+            batch_size_auto: true,
             extract_glossary: true,
             threading: ThreadingConfig::default(),
+            pack_parallel_enabled: false,
+            pack_parallel_count: 2,
             custom_prompts: HashMap::new(),
             theme: default_theme(),
             language: default_language(),

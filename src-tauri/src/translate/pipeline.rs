@@ -95,7 +95,7 @@ pub async fn translate_batch(
     let mut last_err: Option<TranslateError> = None;
 
     loop {
-        match provider.chat(&system, &payload).await {
+        match provider.chat(&system, &payload, "translate").await {
             Ok(raw) => {
                 return Ok(parse_batch_response(&raw, items));
             }
@@ -104,6 +104,7 @@ pub async fn translate_batch(
                     return Err(last_err.unwrap_or(e));
                 }
                 let is_rate_limited = matches!(&e, TranslateError::Api { status: 429, .. });
+                let err_msg = e.to_string();
                 last_err = Some(e);
                 attempt += 1;
                 // 429（限流）退避更长：5s, 10s, 20s...；其他错误 1s, 2s, 4s...
@@ -112,6 +113,17 @@ pub async fn translate_batch(
                 } else {
                     std::time::Duration::from_secs(1u64 << attempt)
                 };
+                // devtools 插桩：重试事件
+                #[cfg(feature = "devtools")]
+                crate::dev::dev_emit("dev-retry", serde_json::json!({
+                    "attempt": attempt,
+                    "maxRetries": max_retries,
+                    "is429": is_rate_limited,
+                    "errorMsg": err_msg,
+                    "waitSecs": wait.as_secs(),
+                }));
+                #[cfg(not(feature = "devtools"))]
+                let _ = err_msg;
                 tokio::time::sleep(wait).await;
             }
         }
@@ -127,7 +139,7 @@ pub async fn extract_glossary(
         return Ok(Vec::new());
     }
     let payload = serde_json::to_string(samples).unwrap_or_default();
-    let raw = provider.chat(GLOSSARY_SYSTEM, &payload).await?;
+    let raw = provider.chat(GLOSSARY_SYSTEM, &payload, "glossary").await?;
 
     let value: serde_json::Value = serde_json::from_str(&raw).map_err(|_| {
         TranslateError::Api {

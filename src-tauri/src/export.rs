@@ -21,7 +21,7 @@ pub struct ResourcePackBundle {
 
 /// Windows 文件名非法字符清洗（* ? : < > | / \ "）→ _，并截断超过 100 字符。
 /// 防止 modid 含非法字符时 File::create 触发 os error 123（文件名语法不正确）。
-fn sanitize_file_stem(s: &str) -> String {
+pub fn sanitize_file_stem(s: &str) -> String {
     let cleaned: String = s
         .chars()
         .map(|c| match c {
