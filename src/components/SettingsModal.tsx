@@ -29,6 +29,7 @@ import {
   SlidersOutlined,
   ThunderboltOutlined,
 } from "@ant-design/icons";
+import { getVersion } from "@tauri-apps/api/app";
 import { api } from "../api";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { ModelInfo, ProviderConfig, Settings } from "../types";
@@ -109,8 +110,8 @@ interface FormValues {
   language?: "zh" | "en";
 }
 
-/** 当前版本号（与 package.json / tauri.conf.json 一致） */
-const CURRENT_VERSION = "2.0.2";
+/** 版本号兜底值（实际显示用 Tauri 返回的应用版本，避免与发布版本不一致） */
+const FALLBACK_VERSION = "2.1.0";
 
 /** 项目 GitHub 地址 */
 const GITHUB_URL = "https://github.com/adssadax-1/mc-content-localizer";
@@ -138,6 +139,13 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
   const [testingModel, setTestingModel] = useState(false);
   const [promptEditorOpen, setPromptEditorOpen] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  /** 应用版本号：从 Tauri 运行时读取（= tauri.conf.json version） */
+  const [appVersion, setAppVersion] = useState(FALLBACK_VERSION);
+  useEffect(() => {
+    if (open) {
+      getVersion().then(setAppVersion).catch(() => {});
+    }
+  }, [open]);
   /** 当前展示的设置分组（默认页面设置；打开时按 initialSection 定位） */
   const [activeSection, setActiveSection] = useState<string>("appearance");
   useEffect(() => {
@@ -168,13 +176,13 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
       if (info) {
         Modal.confirm({
           title: t("settings.msg.updateFound"),
-          content: t("settings.msg.updateContent", { cur: CURRENT_VERSION, latest: info.latestVersion }),
+          content: t("settings.msg.updateContent", { cur: appVersion, latest: info.latestVersion }),
           okText: t("settings.msg.goDownload"),
           cancelText: "取消",
           onOk: () => void openUrl(info.url),
         });
       } else {
-        message.success(t("settings.msg.latest", { version: CURRENT_VERSION }));
+        message.success(t("settings.msg.latest", { version: appVersion }));
       }
     } catch (e) {
       message.error(String(e) || t("settings.msg.updateCheckFailed"));
@@ -858,7 +866,7 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
               {/* about:author：作者 / 项目信息（纯展示） */}
               <div style={{ textAlign: "center", paddingTop: 24 }}>
                 <Typography.Title level={5} style={{ marginBottom: 4 }}>
-                  <img src="/app-icon.svg" alt="" style={{ height: 22, marginRight: 8, verticalAlign: "middle" }} /> {t("settings.about.title")} v{CURRENT_VERSION}
+                  <img src="/app-icon.svg" alt="" style={{ height: 22, marginRight: 8, verticalAlign: "middle" }} /> {t("settings.about.title")} v{appVersion}
                 </Typography.Title>
                 <Typography.Paragraph type="secondary" style={{ marginBottom: 4 }}>
                   {t("settings.about.desc")}
@@ -884,7 +892,7 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
                   loading={checkingUpdate}
                   onClick={() => void handleCheckUpdate()}
                 >
-                  <img src="/refresh.svg" alt="" style={{ height: 12, marginRight: 4, verticalAlign: "middle" }} /> {t("settings.about.checkUpdate", { version: CURRENT_VERSION })}
+                  <img src="/refresh.svg" alt="" style={{ height: 12, marginRight: 4, verticalAlign: "middle" }} /> {t("settings.about.checkUpdate", { version: appVersion })}
                 </Button>
               </div>
             </div>
