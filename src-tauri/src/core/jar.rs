@@ -586,6 +586,36 @@ mod tests {
     use std::io::Write;
 
     #[test]
+    fn parses_indented_legacy_lang_in_wrapped_jar() {
+        // 模组 legacy .lang：带缩进 + 多字节字符（§/中文），jar 套顶层文件夹 → 三重兼容
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default();
+            w.start_file("MyMod-1.16/META-INF/mods.toml", opts).unwrap();
+            w.write_all(b"modLoader=\"javafml\"\n[[mods]]\nmodId=\"mymod\"\n").unwrap();
+            w.start_file("MyMod-1.16/assets/mymod/lang/en_us.lang", opts).unwrap();
+            w.write_all("    option.a=Hello\n    option.b=§cWarning!§r\n".as_bytes()).unwrap();
+            w.start_file("MyMod-1.16/assets/mymod/lang/zh_cn.lang", opts).unwrap();
+            w.write_all("    option.a=你好\n".as_bytes()).unwrap();
+            w.finish().unwrap();
+        }
+        let tmp = std::env::temp_dir().join("wrapped_mod.jar");
+        std::fs::write(&tmp, &buf).unwrap();
+        let mod_file = parse_jar(&tmp).unwrap();
+        let _ = std::fs::remove_file(&tmp);
+
+        assert_eq!(mod_file.entries.len(), 2);
+        let a = mod_file.entries.iter().find(|e| e.key == "option.a").unwrap();
+        assert_eq!(a.source, "Hello");
+        assert_eq!(a.translation.as_deref(), Some("你好"));
+        let b = mod_file.entries.iter().find(|e| e.key == "option.b").unwrap();
+        assert_eq!(b.source, "§cWarning!§r");
+        assert_eq!(b.status, EntryStatus::Untranslated);
+        assert_eq!(mod_file.modid, "mymod");
+    }
+
+    #[test]
     fn detects_language_kinds() {
         assert!(is_en_lang("en_us"));
         assert!(is_en_lang("en_GB"));

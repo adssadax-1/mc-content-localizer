@@ -9,9 +9,13 @@ pub enum LangError {
 
 /// 将 ISO-8859-1 字节解码并处理 \uXXXX 转义，得到 UTF-8 文本
 pub fn decode_lang(bytes: &[u8]) -> Result<String, LangError> {
-    // 1. ISO-8859-1: 每字节映射为一个字符
+    // 1. 合法 UTF-8（含多字节，说明作者直接用 UTF-8 写了中文）→ 按 UTF-8 解码
+    if let Ok(utf8) = std::str::from_utf8(bytes) {
+        return unescape_unicode(utf8);
+    }
+    // 2. 非 UTF-8 → 老规范 ISO-8859-1：每字节映射为一个字符
     let latin: String = bytes.iter().map(|&b| b as char).collect();
-    // 2. 处理 \uXXXX 转义
+    // 3. 处理 \uXXXX 转义
     unescape_unicode(&latin)
 }
 
