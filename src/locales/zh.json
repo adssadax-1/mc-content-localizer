@@ -240,7 +240,11 @@
       "groupDesc": "主题与语言互相独立，可任意组合；保存后立即生效",
       "theme": "主题",
       "light": "亮色",
-      "dark": "暗色"
+      "dark": "暗色",
+      "closeBehavior": "关闭行为",
+      "closeBehaviorTip": "「最小化到托盘」：点击关闭按钮仅隐藏窗口，从托盘图标可恢复或退出；保留当前列表与翻译进度",
+      "closeExit": "直接退出",
+      "closeMinimize": "最小化到托盘"
     },
     "about": {
       "title": "MC 汉化工坊",

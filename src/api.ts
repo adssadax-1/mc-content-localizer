@@ -167,6 +167,10 @@ export const api = {
       disconnect: config.disconnect,
     }),
   devClearFault: () => invoke<void>("dev_clear_fault"),
+  /** 会话缓存：崩溃/关闭后恢复内容包列表 */
+  saveSessionCache: (content: string) => invoke<void>("save_session_cache", { content }),
+  loadSessionCache: () => invoke<string | null>("load_session_cache"),
+  clearSessionCache: () => invoke<void>("clear_session_cache"),
   devReadTextFile: (path: string) => invoke<string>("dev_read_text_file", { path }),
   devEncodePairs: (format: string, pairs: [string, string][]) =>
     invoke<string>("dev_encode_pairs", { format, pairs }),

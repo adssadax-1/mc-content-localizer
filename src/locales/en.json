@@ -240,7 +240,11 @@
       "groupDesc": "Theme and language are independent — any combination; changes apply immediately after saving",
       "theme": "Theme",
       "light": "Light",
-      "dark": "Dark"
+      "dark": "Dark",
+      "closeBehavior": "Close behavior",
+      "closeBehaviorTip": "\"Minimize to tray\": the close button only hides the window — restore or exit from the tray icon; your pack list and progress are kept",
+      "closeExit": "Exit directly",
+      "closeMinimize": "Minimize to tray"
     },
     "about": {
       "title": "MC Content Localizer",

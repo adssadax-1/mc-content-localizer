@@ -11,7 +11,7 @@ export type EntryStatus =
   | "aiFailed";
 
 export type LangFormat = "legacyLang" | "json";
-export type Loader = "forge" | "fabric" | "neoForge" | "unknown";
+export type Loader = "forge" | "fabric" | "neoForge" | "quilt" | "unknown";
 
 export interface LangEntry {
   key: string;
@@ -175,6 +175,8 @@ export interface Settings {
   theme: 'light' | 'dark';
   /** 界面语言：zh（中文）/ en（英文） */
   language: 'zh' | 'en';
+  /** 主窗口关闭行为：exit 直接退出 / minimize 最小化到托盘 */
+  closeBehavior: 'exit' | 'minimize';
 }
 
 /** 多线程翻译配置（实验性） */
@@ -221,6 +223,7 @@ export const LOADER_LABEL: Record<Loader, string> = {
   forge: "Forge",
   fabric: "Fabric",
   neoForge: "NeoForge",
+  quilt: "Quilt",
   unknown: "未知",
 };
 

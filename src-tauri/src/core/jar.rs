@@ -60,7 +60,13 @@ pub fn parse_jar(path: &Path) -> Result<ModFile, JarError> {
     let file = File::open(path)?;
     let mut archive = ZipArchive::new(file)?;
 
-    let meta = read_mod_metadata(&mut archive)?;
+    // 顶层文件夹包装兼容：剥离公共根前缀后再做路径匹配
+    let names: Vec<String> = (0..archive.len())
+        .filter_map(|i| archive.by_index(i).ok().map(|f| f.name().to_string()))
+        .collect();
+    let root_prefix = super::pack::common_root_prefix(&names);
+
+    let meta = read_mod_metadata(&mut archive, root_prefix.as_deref())?;
     let file_name = path
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -78,7 +84,7 @@ pub fn parse_jar(path: &Path) -> Result<ModFile, JarError> {
 
     for i in 0..archive.len() {
         let mut f = archive.by_index(i)?;
-        let name = f.name().to_string();
+        let name = norm_name(f.name(), root_prefix.as_deref());
         let Some(caps) = LANG_PATH_RE.captures(&name) else {
             if name.ends_with(".json") && is_text_scan_target(&name) {
                 json_count += 1;
@@ -200,6 +206,7 @@ pub fn parse_jar(path: &Path) -> Result<ModFile, JarError> {
         &mut entries,
         &mut key_index,
         first_modid.as_deref().unwrap_or("unknown"),
+        root_prefix.as_deref(),
     )?;
 
     if entries.is_empty() {
@@ -341,10 +348,11 @@ fn scan_hardcoded(
     entries: &mut Vec<LangEntry>,
     key_index: &mut HashMap<String, usize>,
     default_modid: &str,
+    root_prefix: Option<&str>,
 ) -> Result<(), JarError> {
     for i in 0..archive.len() {
         let mut f = archive.by_index(i)?;
-        let name = f.name().to_string();
+        let name = norm_name(f.name(), root_prefix);
         if !is_text_scan_target(&name) {
             continue;
         }
@@ -372,7 +380,7 @@ fn scan_hardcoded(
             entries.push(LangEntry {
                 key,
                 source: s,
-                file_path: name.clone(),
+                file_path: name.to_string(),
                 modid: modid.clone(),
                 translation: None,
                 hardcoded: true,
@@ -387,12 +395,29 @@ fn scan_hardcoded(
 }
 
 /// 读取模组元数据，识别加载器
-fn read_mod_metadata(archive: &mut ZipArchive<File>) -> Result<ModMeta, JarError> {
+/// 去除 UTF-8 BOM：部分老 mcmod.info / fabric.mod.json 带 BOM，会导致 JSON 解析失败
+fn strip_bom(buf: &[u8]) -> &[u8] {
+    if buf.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        &buf[3..]
+    } else {
+        buf
+    }
+}
+
+/// 剥离顶层文件夹前缀（无前缀时原样返回）
+fn norm_name(n: &str, prefix: Option<&str>) -> String {
+    n.strip_prefix(prefix.unwrap_or("")).unwrap_or(n).to_string()
+}
+
+fn read_mod_metadata(
+    archive: &mut ZipArchive<File>,
+    root_prefix: Option<&str>,
+) -> Result<ModMeta, JarError> {
     let mut meta = ModMeta::default();
 
     for i in 0..archive.len() {
         let mut f = archive.by_index(i)?;
-        let name = f.name().to_string();
+        let name = norm_name(f.name(), root_prefix);
         let mut buf = Vec::new();
         f.read_to_end(&mut buf)?;
 
@@ -405,8 +430,42 @@ fn read_mod_metadata(archive: &mut ZipArchive<File>) -> Result<ModMeta, JarError
                 let parsed = parse_mods_toml(&buf);
                 merge_meta(&mut meta, parsed, Loader::Forge);
             }
+            "quilt.mod.json" => {
+                // Quilt：{ "quilt_loader": { id/version/depends[], metadata.name } }
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(strip_bom(&buf)) {
+                    let loader_obj = v.get("quilt_loader");
+                    let parsed = ModMeta {
+                        modid: loader_obj
+                            .and_then(|l| l.get("id"))
+                            .and_then(|x| x.as_str())
+                            .map(String::from),
+                        name: loader_obj
+                            .and_then(|l| l.get("metadata"))
+                            .and_then(|m| m.get("name"))
+                            .and_then(|x| x.as_str())
+                            .map(String::from),
+                        version: loader_obj
+                            .and_then(|l| l.get("version"))
+                            .and_then(|x| x.as_str())
+                            .map(String::from),
+                        mc_version: loader_obj
+                            .and_then(|l| l.get("depends"))
+                            .and_then(|d| d.as_array())
+                            .and_then(|arr| {
+                                arr.iter().find(|d| {
+                                    d.get("id").and_then(|x| x.as_str()) == Some("minecraft")
+                                })
+                            })
+                            .and_then(|d| d.get("versions"))
+                            .and_then(|x| x.as_str())
+                            .map(String::from),
+                        loader: Loader::Quilt,
+                    };
+                    merge_meta(&mut meta, parsed, Loader::Quilt);
+                }
+            }
             "fabric.mod.json" => {
-                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&buf) {
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(strip_bom(&buf)) {
                     let parsed = ModMeta {
                         modid: v.get("id").and_then(|x| x.as_str()).map(String::from),
                         name: v.get("name").and_then(|x| x.as_str()).map(String::from),
@@ -422,7 +481,7 @@ fn read_mod_metadata(archive: &mut ZipArchive<File>) -> Result<ModMeta, JarError
                 }
             }
             "mcmod.info" => {
-                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&buf) {
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(strip_bom(&buf)) {
                     if let Some(arr) = v.as_array() {
                         if let Some(first) = arr.first() {
                             let parsed = ModMeta {

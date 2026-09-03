@@ -108,6 +108,8 @@ interface FormValues {
   theme?: "light" | "dark";
   /** 界面语言：zh / en */
   language?: "zh" | "en";
+  /** 关闭行为：exit / minimize */
+  closeBehavior?: "exit" | "minimize";
 }
 
 /** 版本号兜底值（实际显示用 Tauri 返回的应用版本，避免与发布版本不一致） */
@@ -213,6 +215,7 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
         providerModels: settings.providerModels ?? {},
         theme: settings.theme ?? "light",
         language: settings.language ?? "zh",
+        closeBehavior: settings.closeBehavior === "minimize" ? "minimize" : "exit",
       });
       // 模型列表：用当前服务商缓存的列表（没拉取过则为空）
       const cur = settings.provider.provider;
@@ -360,6 +363,7 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
       deepScan: v.deepScan ?? false,
       theme: v.theme === "dark" ? "dark" : "light",
       language: v.language === "en" ? "en" : "zh",
+      closeBehavior: v.closeBehavior === "minimize" ? "minimize" : "exit",
       customPrompts: settings?.customPrompts ?? {},
     };
     try {
@@ -854,6 +858,18 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
                   <Radio.Group optionType="button" buttonStyle="solid">
                     <Radio.Button value="zh">中文</Radio.Button>
                     <Radio.Button value="en">English</Radio.Button>
+                  </Radio.Group>
+                </Form.Item>
+
+                <Form.Item
+                  name="closeBehavior"
+                  label={t("settings.appearance.closeBehavior")}
+                  style={{ marginBottom: 8 }}
+                  tooltip={t("settings.appearance.closeBehaviorTip")}
+                >
+                  <Radio.Group optionType="button" buttonStyle="solid">
+                    <Radio.Button value="exit">{t("settings.appearance.closeExit")}</Radio.Button>
+                    <Radio.Button value="minimize">{t("settings.appearance.closeMinimize")}</Radio.Button>
                   </Radio.Group>
                 </Form.Item>
               </Space>

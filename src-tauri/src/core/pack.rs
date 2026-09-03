@@ -66,6 +66,45 @@ pub enum PackError {
 }
 
 /// 扫描 zip 目录结构，判定内容包类型（不解析内容，杜绝误判）
+
+/// 计算 zip 的公共根目录前缀：所有文件都在单一顶层文件夹内时返回 "X/"，否则 None。
+/// 兼容"整个内容包被套了一层文件夹"的 zip（如 Bliss-Shader-Unstable/...）。
+/// 顶层名是标准根（assets/shaders/META-INF）时不剥离，杜绝误剥。
+/// 剥离顶层文件夹前缀（无前缀时原样返回，返回 owned 避免临时值生命周期问题）
+pub fn strip_root(n: &str, prefix: Option<&str>) -> String {
+    n.strip_prefix(prefix.unwrap_or("")).unwrap_or(n).to_string()
+}
+
+pub fn common_root_prefix(names: &[String]) -> Option<String> {
+    if names.len() < 2 {
+        return None;
+    }
+    let mut prefix: Option<String> = None;
+    for n in names {
+        if n.ends_with('/') {
+            continue; // 目录条目
+        }
+        let first = n.split('/').next()?;
+        if first.is_empty() || !n.contains('/') {
+            return None; // 存在根级散文件 → 不是文件夹包装
+        }
+        match &prefix {
+            None => prefix = Some(format!("{}/", first)),
+            Some(p) => {
+                if !n.starts_with(p.as_str()) {
+                    return None;
+                }
+            }
+        }
+    }
+    let p = prefix?;
+    let top = p.trim_end_matches('/');
+    if ["assets", "shaders", "META-INF"].contains(&top) {
+        return None;
+    }
+    Some(p)
+}
+
 pub fn detect_pack_type(path: &Path) -> Result<PackType, PackError> {
     let file = File::open(path)?;
     let mut archive = ZipArchive::new(file)?;
@@ -76,8 +115,13 @@ pub fn detect_pack_type(path: &Path) -> Result<PackType, PackError> {
     let mut has_mod_meta = false;
     let mut has_jar_assets = false;
 
+    let names: Vec<String> = (0..archive.len())
+        .filter_map(|i| archive.by_index(i).ok().map(|f| f.name().to_string()))
+        .collect();
+    let root_prefix = common_root_prefix(&names);
+
     for i in 0..archive.len() {
-        let name = archive.by_index(i)?.name().to_string();
+        let name = strip_root(archive.by_index(i)?.name(), root_prefix.as_deref());
         if name == "shaders/shaders.properties" {
             has_shader_props = true;
         } else if name.starts_with("shaders/lang/") && name.ends_with(".lang") {
@@ -126,12 +170,17 @@ pub fn parse_shader_pack(path: &Path) -> Result<ShaderPack, PackError> {
         .unwrap_or_default();
 
     let mut shader_props: Option<Vec<(String, String)>> = None;
-    let mut lang_source: Option<(String, Vec<(String, String)>)> = None;
-    let mut zh_map: HashMap<String, String> = HashMap::new();
+    // 全部语言文件（小写语言名 → 键值对）：大小写无关，zh_cn / zh_CN / ZH_cn 都认
+    // 小写语言名 → (原始文件名, 键值对)：大小写无关，zh_cn / zh_CN / ZH_cn 都认
+    let mut lang_map: HashMap<String, (String, Vec<(String, String)>)> = HashMap::new();
+    let names: Vec<String> = (0..archive.len())
+        .filter_map(|i| archive.by_index(i).ok().map(|f| f.name().to_string()))
+        .collect();
+    let root_prefix = common_root_prefix(&names);
 
     for i in 0..archive.len() {
         let mut f = archive.by_index(i)?;
-        let entry_name = f.name().to_string();
+        let entry_name = strip_root(f.name(), root_prefix.as_deref());
         if entry_name == "shaders/shaders.properties" {
             let mut buf = Vec::new();
             f.read_to_end(&mut buf)?;
@@ -144,26 +193,50 @@ pub fn parse_shader_pack(path: &Path) -> Result<ShaderPack, PackError> {
             f.read_to_end(&mut buf)?;
             let text = String::from_utf8_lossy(&buf);
             let pairs = lang::parse_properties_utf8(&text)?;
-            let is_zh = entry_name.contains("zh_CN") || entry_name.contains("zh_HK") || entry_name.contains("zh_TW");
-            if is_zh {
-                for (k, v) in pairs {
-                    zh_map.insert(k, v);
-                }
-            } else if lang_source.is_none() {
-                lang_source = Some((entry_name.clone(), pairs));
+            let lower_locale = entry_name
+                .rsplit_once('/')
+                .map(|(_, f)| f.trim_end_matches(".lang").to_ascii_lowercase())
+                .unwrap_or_default();
+            lang_map.insert(lower_locale, (entry_name.to_string(), pairs));
+        }
+    }
+
+    // 自带中文：任何 zh* 变体（大小写无关）；简体优先，繁体仅补缺
+    let mut zh_map: HashMap<String, String> = HashMap::new();
+    for locale in ["zh_cn", "zh_hk"] {
+        if let Some((_, pairs)) = lang_map.get(locale) {
+            for (k, v) in pairs {
+                zh_map.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    for (loc, (_, pairs)) in &lang_map {
+        if loc.starts_with("zh") {
+            for (k, v) in pairs {
+                zh_map.entry(k.clone()).or_insert_with(|| v.clone());
             }
         }
     }
 
-    // 文本来源：shaders.properties 优先；若为空（如空文件）回退 lang 文件
-    let (props, source_path) = match shader_props.as_ref().map(|p| p.is_empty()) {
-        Some(false) => (shader_props.unwrap(), "shaders/shaders.properties".to_string()),
-        _ => match lang_source {
-            Some((p, entries)) => (entries, p),
-            None => match shader_props {
-                Some(p) => (p, "shaders/shaders.properties".to_string()),
-                None => return Err(PackError::NotShaderPack),
-            },
+    // 源语言：en_us / en_gb 优先，其次其他 en*，最后第一个非中文语言
+    let pick = |pred: &dyn Fn(&str) -> bool| -> Option<(String, Vec<(String, String)>)> {
+        lang_map
+            .iter()
+            .find(|(loc, _)| !loc.starts_with("zh") && pred(loc))
+            .map(|(_, (name, pairs))| (name.clone(), pairs.clone()))
+    };
+    let lang_source = pick(&|l: &str| l == "en_us")
+        .or_else(|| pick(&|l: &str| l == "en_gb"))
+        .or_else(|| pick(&|l: &str| l.starts_with("en")))
+        .or_else(|| pick(&|_: &str| true));
+
+    // 文本来源：shaders/lang/*.lang 优先（option/value/screen 键即 OptiFine 可翻译文本）；
+    // 无语言文件时回退 shaders/shaders.properties（老结构光影）
+    let (props, source_path) = match lang_source {
+        Some((p, entries)) => (entries, p),
+        None => match shader_props {
+            Some(p) => (p, "shaders/shaders.properties".to_string()),
+            None => return Err(PackError::NotShaderPack),
         },
     };
 
@@ -230,9 +303,13 @@ pub fn parse_resource_pack(path: &Path) -> Result<ResourcePackInfo, PackError> {
 
     let mut description = String::new();
     let mut found = false;
+    let names: Vec<String> = (0..archive.len())
+        .filter_map(|i| archive.by_index(i).ok().map(|f| f.name().to_string()))
+        .collect();
+    let root_prefix = common_root_prefix(&names);
     for i in 0..archive.len() {
         let mut f = archive.by_index(i)?;
-        if f.name() != "pack.mcmeta" {
+        if strip_root(f.name(), root_prefix.as_deref()) != "pack.mcmeta" {
             continue;
         }
         found = true;
@@ -503,6 +580,32 @@ mod tests {
     }
 
     #[test]
+    fn parses_wrapped_folder_shader() {
+        // 整个内容包被套一层顶层文件夹（如 Bliss-Shader-Unstable/...）→ 应剥离前缀正常解析
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default();
+            w.add_directory("Bliss-Shader-Unstable/shaders/lang/", opts).unwrap();
+            w.start_file("Bliss-Shader-Unstable/shaders/lang/en_us.lang", opts).unwrap();
+            w.write_all(b"option.x=Hello Shader\n").unwrap();
+            w.start_file("Bliss-Shader-Unstable/shaders/lang/zh_cn.lang", opts).unwrap();
+            w.write_all("option.x=你好着色\n".as_bytes()).unwrap();
+            w.start_file("Bliss-Shader-Unstable/shaders/shaders.properties", opts).unwrap();
+            w.write_all(b"sliders=a\n").unwrap();
+            w.finish().unwrap();
+        }
+        let (_b, path) = parse_buf(&buf, "wrapped_shader.zip");
+        assert_eq!(detect_pack_type(&path).unwrap(), PackType::Shader);
+        let pack = parse_shader_pack(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(pack.entries.len(), 1);
+        assert_eq!(pack.entries[0].source, "Hello Shader");
+        assert_eq!(pack.entries[0].status, EntryStatus::ExistingZh);
+        assert_eq!(pack.zh_count, 1);
+    }
+
+    #[test]
     fn parses_shader_from_en_us_lang_fallback() {
         // 新版光影结构：无 shaders.properties，文本在 shaders/lang/en_US.lang
         let mut buf: Vec<u8> = Vec::new();
@@ -709,3 +812,4 @@ mod tests {
         let _ = std::fs::remove_file(&dest);
     }
 }
+

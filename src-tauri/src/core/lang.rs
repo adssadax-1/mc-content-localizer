@@ -49,13 +49,15 @@ fn parse_properties_lines(text: &str) -> Result<Vec<(String, String)>, LangError
             i += 1;
         }
 
-        // 拆分 key 与 value：第一个未转义的 =、: 或空白符
-        let (raw_key, raw_value) = split_key_value(&line);
+        // 拆分 key 与 value：第一个未转义的 =、: 或空白符（用 trim 后的行，避免行首缩进被当成分隔符把 key 截空）
+        let (raw_key, raw_value) = split_key_value(line.trim_start());
         let key = unescape_value(raw_key.trim())?;
         let value = unescape_value(raw_value.trim_start())?;
-        if !key.is_empty() {
-            entries.push((key, value));
+        // 无 = 的装饰横幅行（如 "§c⚠ READ DESCRIPTION§r" 在空白处截断）→ key 以 § 开头，跳过
+        if key.is_empty() || key.starts_with('\u{a7}') {
+            continue;
         }
+        entries.push((key, value));
     }
     Ok(entries)
 }
@@ -88,18 +90,20 @@ fn ends_with_continuation(line: &str) -> bool {
 
 /// 找到第一个未转义的分隔符（= : 或空白），返回 (key 部分, value 部分)
 fn split_key_value(line: &str) -> (&str, &str) {
-    let chars: Vec<char> = line.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
+    // 用 char_indices 保证多字节字符（§、⚠ 等）下切片安全（旧实现按字符索引切字节会 panic）
+    let mut escaped = false;
+    for (i, c) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
         if c == '\\' {
-            i += 2;
+            escaped = true;
             continue;
         }
         if c == '=' || c == ':' || c.is_whitespace() {
-            return (&line[..i], &line[i + 1..]);
+            return (&line[..i], &line[i + c.len_utf8()..]);
         }
-        i += 1;
     }
     (line, "")
 }

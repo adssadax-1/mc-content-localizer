@@ -57,6 +57,7 @@ pub enum Loader {
     Forge,
     Fabric,
     NeoForge,
+    Quilt,
     #[default]
     Unknown,
 }

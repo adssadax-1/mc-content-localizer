@@ -520,6 +520,67 @@ function AppInner({
   const [packProgress, setPackProgress] = useState<Record<string, { done: number; total: number }>>({});
   // 取消标志的同步 ref（并行池 worker 内读到最新值，不受闭包捕获限制）
   const cancelRequestedRef = useRef(false);
+  // 会话缓存：启动恢复只尝试一次
+  const sessionRestoreTriedRef = useRef(false);
+
+  // 启动恢复询问：有会话缓存（上次未清空就退出/崩溃）时询问是否恢复内容包列表
+  useEffect(() => {
+    if (!settings || sessionRestoreTriedRef.current) return;
+    sessionRestoreTriedRef.current = true;
+    api
+      .loadSessionCache()
+      .then((raw) => {
+        if (!raw) return;
+        try {
+          const data = JSON.parse(raw) as { packs?: PackItem[] };
+          const packs = (data.packs ?? []).filter(
+            (it) => it && typeof it.key === "string" && Array.isArray(it.entries),
+          );
+          if (packs.length === 0) return;
+          const totalEntries = packs.reduce((n, it) => n + it.entries.length, 0);
+          Modal.confirm({
+            title: "恢复上次的内容包列表？",
+            content: `检测到上次退出（或意外关闭）前有 ${packs.length} 个内容包、共 ${totalEntries} 条条目（含译文与进度）。是否恢复到列表？`,
+            okText: "恢复",
+            cancelText: "不恢复",
+            onOk: () => {
+              setQueue(
+                packs.map((it) => ({
+                  ...it,
+                  entries: (it.entries ?? []).map((e) => ({ ...e, translating: false })),
+                })),
+              );
+              message.success(`已恢复 ${packs.length} 个内容包`);
+            },
+            onCancel: () => {
+              void api.clearSessionCache();
+            },
+          });
+        } catch {
+          // 缓存损坏：静默清除
+          void api.clearSessionCache();
+        }
+      })
+      .catch(() => {});
+  }, [settings]);
+
+  // 会话缓存：列表变化防抖 1.5s 自动保存（崩溃/意外关闭后可恢复）
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (queue.length === 0) {
+        void api.clearSessionCache();
+        return;
+      }
+      const plain = queue.map((it) => ({
+        ...it,
+        entries: it.entries.map((e) => ({ ...e, translating: false })),
+      }));
+      void api
+        .saveSessionCache(JSON.stringify({ version: 1, savedAt: Date.now(), packs: plain }))
+        .catch(() => {});
+    }, 1500);
+    return () => clearTimeout(timer);
+  }, [queue]);
   // 术语表建议候选（翻译完成后一次性弹出）
   const [glossarySuggest, setGlossarySuggest] = useState<[string, string][] | null>(null);
   const [suggestChecked, setSuggestChecked] = useState<string[]>([]);
@@ -877,6 +938,8 @@ function AppInner({
         // 条目默认参与汉化
         item.entries = item.entries.map((e) => ({ ...e, selected: e.selected ?? true }));
         added.push(item);
+        // 增量入队：每解析完一个包立即加入列表，避免几百个包时内存峰值翻倍
+        setQueue((prev) => [...prev, item]);
         if (item.hasZh) {
           zhHits += 1;
           zhTotal += item.zhCount ?? 0;
@@ -906,7 +969,6 @@ function AppInner({
         }
       }
     }
-    setQueue((prev) => [...prev, ...added]);
     setParsing(false);
     // 自动批次 + 多线程时，条目过少的内容包会切出很小的批次（可能影响翻译质量），主动询问
     if (settings?.threading?.enabled && (settings.batchSizeAuto ?? true)) {
@@ -1350,6 +1412,7 @@ function AppInner({
         setSelectedKey(null);
         setProgress(null);
         setTranslating(false);
+        void api.clearSessionCache();
         message.success("已清空列表");
       },
     });
@@ -2064,6 +2127,7 @@ function App() {
           customPrompts: s.customPrompts ?? {},
           batchSizeAuto: s.batchSizeAuto ?? true,
           packParallelEnabled: s.packParallelEnabled ?? false,
+          closeBehavior: s.closeBehavior === "minimize" ? "minimize" : "exit",
           packParallelCount: s.packParallelCount ?? 2,
           deepScan: s.deepScan ?? false,
           theme: s.theme === "dark" ? "dark" : "light",

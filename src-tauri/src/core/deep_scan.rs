@@ -220,14 +220,26 @@ fn scan_zip<R: Read + Seek>(
         return; // 防止恶意深嵌套
     }
     let mut nested: Vec<(String, Vec<u8>)> = Vec::new();
+    // 顶层 zip：兼容"整个内容被套一层文件夹"的包装结构
+    let root_prefix: Option<String> = if prefix.is_empty() {
+        let names: Vec<String> = (0..archive.len())
+            .filter_map(|i| archive.by_index(i).ok().map(|f| f.name().to_string()))
+            .collect();
+        super::pack::common_root_prefix(&names)
+    } else {
+        None
+    };
     for i in 0..archive.len() {
         let mut f = match archive.by_index(i) {
             Ok(f) => f,
             Err(_) => continue,
         };
         let raw_name = f.name().to_string();
+        let stripped = raw_name
+            .strip_prefix(root_prefix.as_deref().unwrap_or(""))
+            .unwrap_or(&raw_name);
         let name = if prefix.is_empty() {
-            raw_name
+            stripped.to_string()
         } else {
             format!("{}/{}", prefix, raw_name)
         };

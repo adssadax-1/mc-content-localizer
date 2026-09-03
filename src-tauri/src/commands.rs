@@ -9,11 +9,41 @@ use crate::settings::{Settings, ThreadingConfig};
 use crate::translate::pipeline::{self, BatchItem, TranslateContext, TranslatedItem};
 use crate::translate::provider::{OpenAiProvider, ProviderConfig};
 
-fn settings_path(app: &AppHandle) -> PathBuf {
+pub fn settings_path(app: &AppHandle) -> PathBuf {
     app.path()
         .app_config_dir()
         .unwrap_or_else(|_| std::env::temp_dir())
         .join("settings.json")
+}
+
+/// 会话缓存文件（内容包列表，崩溃/意外关闭后恢复用），与 settings.json 同目录
+fn session_cache_path(app: &AppHandle) -> PathBuf {
+    app.path()
+        .app_config_dir()
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join("session-cache.json")
+}
+
+/// 保存会话缓存（前端防抖调用）
+#[tauri::command]
+pub fn save_session_cache(app: AppHandle, content: String) -> Result<(), String> {
+    let path = session_cache_path(&app);
+    std::fs::write(&path, content).map_err(|e| e.to_string())
+}
+
+/// 读取会话缓存（无缓存或为空返回 None）
+#[tauri::command]
+pub fn load_session_cache(app: AppHandle) -> Option<String> {
+    let path = session_cache_path(&app);
+    std::fs::read_to_string(path)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// 清除会话缓存（用户选择不恢复 / 清空列表时）
+#[tauri::command]
+pub fn clear_session_cache(app: AppHandle) {
+    let _ = std::fs::remove_file(session_cache_path(&app));
 }
 
 /// 翻译取消标志：前端调用 cancel_translation 置位，翻译循环每批检查
@@ -372,7 +402,10 @@ pub fn load_settings(app: AppHandle) -> Settings {
 #[tauri::command]
 pub fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
     let path = settings_path(&app);
-    settings.save(&path)
+    settings.save(&path)?;
+    // 关闭行为可能变化：刷新进程级缓存
+    crate::settings::set_close_behavior(&settings);
+    Ok(())
 }
 
 /// 拉取所选 provider 的可用模型列表

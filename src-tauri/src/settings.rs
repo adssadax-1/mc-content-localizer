@@ -41,6 +41,10 @@ fn default_batch_size_auto() -> bool {
     true
 }
 
+fn default_close_behavior() -> String {
+    "exit".to_string()
+}
+
 impl Default for ThreadingConfig {
     fn default() -> Self {
         Self {
@@ -93,6 +97,9 @@ pub struct Settings {
   /// 界面语言：zh（中文）/ en（英文）
   #[serde(default = "default_language")]
   pub language: String,
+  /// 主窗口关闭行为：exit（直接退出，默认）/ minimize（最小化到托盘）
+  #[serde(default = "default_close_behavior")]
+  pub close_behavior: String,
 }
 
 impl Default for Settings {
@@ -112,8 +119,21 @@ impl Default for Settings {
             custom_prompts: HashMap::new(),
             theme: default_theme(),
             language: default_language(),
+            close_behavior: default_close_behavior(),
         }
     }
+}
+
+/// 主窗口关闭行为是否为「最小化到托盘」（进程级缓存，启动时与保存设置时刷新）
+static CLOSE_MINIMIZE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_close_behavior(settings: &Settings) {
+    use std::sync::atomic::Ordering;
+    CLOSE_MINIMIZE.store(settings.close_behavior == "minimize", Ordering::Relaxed);
+}
+
+pub fn close_minimize_enabled() -> bool {
+    CLOSE_MINIMIZE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Settings {
