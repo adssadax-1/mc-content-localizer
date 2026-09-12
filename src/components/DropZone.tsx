@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { LoadingOutlined, SunOutlined, PictureOutlined, AppstoreOutlined } from "@ant-design/icons";
 import { Spin, Typography } from "antd";
 import { useTranslationContext } from "../i18n";
@@ -41,15 +41,12 @@ const KIND_TEXT: Record<
 export function DropZone({ dragOver, parsing, kind, onPick }: Props) {
   const { t } = useTranslationContext();
   const k = KIND_TEXT[kind];
-  // 切换内容包类型时才播三层错峰入场；首次挂载为静态（key 不变则不重播）
-  const [staggerOn, setStaggerOn] = useState(false);
-  const prevKindRef = useRef(kind);
-  useEffect(() => {
-    if (prevKindRef.current !== kind) {
-      prevKindRef.current = kind;
-      setStaggerOn(true);
-    }
-  }, [kind]);
+  // 错峰动画渲染期同步派生：切换类型的同一帧就带上动画类（避免先显示后重播的闪烁）
+  const [prevKind, setPrevKind] = useState(kind);
+  if (prevKind !== kind) {
+    setPrevKind(kind);
+  }
+  const staggerOn = prevKind !== kind;
   return (
     <div
       onClick={onPick}

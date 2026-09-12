@@ -127,6 +127,9 @@ body {
   top: 0;
   background: var(--slide-indicator-bg);
   border-radius: 6px;
+  transition:
+    transform var(--motion-dur-base) var(--motion-ease-slide),
+    height var(--motion-dur-base) var(--motion-ease-slide);
 }
 
 .slide-nav-item {

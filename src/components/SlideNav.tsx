@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useLayoutEffect, useRef, type ReactNode } from "react";
 
 export interface SlideNavItem {
   key: string;
@@ -15,42 +15,38 @@ interface SlideNavProps {
 /**
  * 垂直滑动指示器导航：选中高亮是列表内唯一的共享元素，
  * 点击时整块平滑滑动并伸缩到目标项（主界面内容包类型 + 设置弹窗分组两处共用）。
+ *
+ * 指示器位置用命令式 DOM 写入（不走 React state）：首次定位先关 transition、
+ * 强制 reflow 后恢复（报告 §1 要求），保证后续点击是真实的滑动过渡。
  */
 export function SlideNav({ items, activeKey, onSelect }: SlideNavProps) {
   const itemRefs = useRef<Record<string, HTMLButtonElement | null>>({});
-  const posRef = useRef({ top: 0, height: 0, ready: false });
-  const [pos, setPos] = useState({ top: 0, height: 0, ready: false });
+  const indRef = useRef<HTMLSpanElement>(null);
+  const armedRef = useRef(false);
 
   useLayoutEffect(() => {
     const el = itemRefs.current[activeKey];
-    if (!el) return;
+    const ind = indRef.current;
+    if (!el || !ind) return;
     const top = el.offsetTop;
     const height = el.offsetHeight;
-    const prev = posRef.current;
-    if (prev.ready && prev.top === top && prev.height === height) return;
-    posRef.current = { top, height, ready: prev.ready };
-    setPos({ ...posRef.current });
-    if (!prev.ready) {
-      // 首次渲染：本帧无过渡直接定位，下一帧再启用过渡，避免蓝块飞入
-      requestAnimationFrame(() => {
-        posRef.current = { ...posRef.current, ready: true };
-        setPos({ ...posRef.current });
-      });
+    if (!armedRef.current) {
+      // 首次渲染：关过渡 → 写定位 → 强制 reflow → 恢复过渡（蓝块原地出现，不飞入）
+      ind.style.transition = "none";
+      ind.style.transform = `translateY(${top}px)`;
+      ind.style.height = `${height}px`;
+      void ind.offsetHeight;
+      ind.style.transition = "";
+      armedRef.current = true;
+      return;
     }
+    ind.style.transform = `translateY(${top}px)`;
+    ind.style.height = `${height}px`;
   }, [activeKey]);
 
   return (
     <div className="slide-nav">
-      <span
-        className="slide-nav-indicator"
-        style={{
-          transform: `translateY(${pos.top}px)`,
-          height: pos.height,
-          transition: pos.ready
-            ? "transform var(--motion-dur-base) var(--motion-ease-slide), height var(--motion-dur-base) var(--motion-ease-slide)"
-            : "none",
-        }}
-      />
+      <span ref={indRef} className="slide-nav-indicator" />
       {items.map((it) => (
         <button
           key={it.key}
@@ -71,7 +67,7 @@ export function SlideNav({ items, activeKey, onSelect }: SlideNavProps) {
 
 /**
  * 设置面板错峰淡入块：index 为 DOM 阅读顺序块序号，延迟 40ms 步进、封顶 160ms。
- * 仅当父容器带 .panel-anim-root（面板切换时）才播动画，首次打开弹窗为静态。
+ * 仅当父容器带 .panel-anim-root（面板切换的同一帧渲染）才播动画，首次打开为静态。
  */
 export function PanelBlock({ index, children }: { index: number; children: ReactNode }) {
   return (

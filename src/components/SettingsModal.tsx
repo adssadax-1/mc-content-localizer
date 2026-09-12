@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -151,34 +151,26 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
   }, [open]);
   /** 当前展示的设置分组（默认页面设置；打开时按 initialSection 定位） */
   const [activeSection, setActiveSection] = useState<string>("appearance");
-  /** 面板错峰动画：首次打开不播，切换分组后开启；右侧内容区滚动复位用 */
-  const [panelAnim, setPanelAnim] = useState(false);
-  const prevSectionRef = useRef<string | null>(null);
+  /** 面板错峰动画：渲染期同步派生（首次打开不播，切换分组的同一帧带类，消除闪烁） */
+  const [prevSection, setPrevSection] = useState<string | null>(null);
+  let panelAnim = false;
+  if (open) {
+    if (prevSection !== null && prevSection !== activeSection) panelAnim = true;
+    if (prevSection !== activeSection) setPrevSection(activeSection);
+  } else if (prevSection !== null) {
+    setPrevSection(null);
+  }
   const panelScrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (open) setActiveSection(initialSection ?? "appearance");
   }, [open, initialSection]);
 
-  // 切换分组：开启错峰动画并复位右侧滚动位置；首次打开（prev 为空）不播
-  useEffect(() => {
-    if (!open) {
-      prevSectionRef.current = null;
-      setPanelAnim(false);
-      return;
-    }
-    if (panelScrollRef.current) {
+  // 切换分组时复位右侧滚动位置（提交后立即执行）
+  useLayoutEffect(() => {
+    if (open && panelScrollRef.current) {
       panelScrollRef.current.scrollTop = 0;
     }
-    if (prevSectionRef.current === null) {
-      prevSectionRef.current = activeSection;
-      return;
-    }
-    if (prevSectionRef.current !== activeSection) {
-      prevSectionRef.current = activeSection;
-      setPanelAnim(true);
-    }
   }, [open, activeSection]);
-
   /** 服务商切换联动：切换时载入该服务商保存的 key / 模型 / 模型列表 */
   const prevProviderRef = useRef<string | undefined>(undefined);
   useEffect(() => {
