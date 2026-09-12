@@ -36,6 +36,7 @@ import type { ModelInfo, ProviderConfig, Settings } from "../types";
 import { PROVIDER_PRESETS } from "../types";
 import { ProviderGrid, PROVIDER_HINTS } from "./ProviderIcon";
 import { PromptEditorModal } from "./PromptEditorModal";
+import { SlideNav, PanelBlock } from "./SlideNav";
 import { useTranslationContext } from "../i18n";
 
 /** 主题选项的简约 SVG 图标（替代 emoji） */
@@ -150,9 +151,33 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
   }, [open]);
   /** 当前展示的设置分组（默认页面设置；打开时按 initialSection 定位） */
   const [activeSection, setActiveSection] = useState<string>("appearance");
+  /** 面板错峰动画：首次打开不播，切换分组后开启；右侧内容区滚动复位用 */
+  const [panelAnim, setPanelAnim] = useState(false);
+  const prevSectionRef = useRef<string | null>(null);
+  const panelScrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (open) setActiveSection(initialSection ?? "appearance");
   }, [open, initialSection]);
+
+  // 切换分组：开启错峰动画并复位右侧滚动位置；首次打开（prev 为空）不播
+  useEffect(() => {
+    if (!open) {
+      prevSectionRef.current = null;
+      setPanelAnim(false);
+      return;
+    }
+    if (panelScrollRef.current) {
+      panelScrollRef.current.scrollTop = 0;
+    }
+    if (prevSectionRef.current === null) {
+      prevSectionRef.current = activeSection;
+      return;
+    }
+    if (prevSectionRef.current !== activeSection) {
+      prevSectionRef.current = activeSection;
+      setPanelAnim(true);
+    }
+  }, [open, activeSection]);
 
   /** 服务商切换联动：切换时载入该服务商保存的 key / 模型 / 模型列表 */
   const prevProviderRef = useRef<string | undefined>(undefined);
@@ -395,57 +420,51 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
             paddingTop: 4,
           }}
         >
-          {SECTIONS.map((s) => (
-            <Button
-              key={s.key}
-              block
-              className="sider-nav-btn"
-              type={activeSection === s.key ? "primary" : "text"}
-              icon={s.icon}
-              style={{
-                justifyContent: "flex-start",
-                textAlign: "left",
-                marginTop: 6,
-              }}
-              onClick={() => setActiveSection(s.key)}
-            >
-              {t(s.labelKey)}
-            </Button>
-          ))}
+          <SlideNav
+            items={SECTIONS.map((s) => ({ key: s.key, label: t(s.labelKey), icon: s.icon }))}
+            activeKey={activeSection}
+            onSelect={setActiveSection}
+          />
         </div>
 
         {/* 右侧内容区：antd Form 数据存于 form 实例（与 DOM 无关），
             分组切换即时渲染；字段值/校验状态不丢失 */}
         <div
+          ref={panelScrollRef}
           style={{
             flex: 1,
             minWidth: 0,
             maxHeight: 480,
             overflowY: "auto",
+            overflowX: "hidden",
             paddingTop: 4,
           }}
         >
           <Form form={form} layout="vertical">
-            <div key={activeSection}>
+            <div key={activeSection} className={panelAnim ? "panel-anim-root" : undefined}>
             {/* ===== 分组：服务商与模型 ===== */}
             {activeSection === "provider" && (
             <div>
-              <Typography.Text strong>{t("settings.provider.groupTitle")}</Typography.Text>
-              <Typography.Paragraph
-                type="secondary"
-                style={{ fontSize: 12, marginBottom: 12 }}
-              >
-                {t("settings.provider.groupDesc")}
-              </Typography.Paragraph>
-
-              <Form.Item name="provider" label={t("settings.provider.label")}>
-                <ProviderGrid />
-              </Form.Item>
-              {provider && PROVIDER_HINTS[provider] && (
-                <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: -8, marginBottom: 12 }}>
-                  {t(PROVIDER_HINTS[provider])}
+              <PanelBlock index={0}>
+                <Typography.Text strong>{t("settings.provider.groupTitle")}</Typography.Text>
+                <Typography.Paragraph
+                  type="secondary"
+                  style={{ fontSize: 12, marginBottom: 12 }}
+                >
+                  {t("settings.provider.groupDesc")}
                 </Typography.Paragraph>
-              )}
+              </PanelBlock>
+
+              <PanelBlock index={1}>
+                <Form.Item name="provider" label={t("settings.provider.label")}>
+                  <ProviderGrid />
+                </Form.Item>
+                {provider && PROVIDER_HINTS[provider] && (
+                  <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: -8, marginBottom: 12 }}>
+                    {t(PROVIDER_HINTS[provider])}
+                  </Typography.Paragraph>
+                )}
+              </PanelBlock>
 
               {/* 隐藏字段：各服务商保存的 key / 模型 / 模型列表 */}
               <Form.Item name="providerApiKeys" hidden>
@@ -458,6 +477,7 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
                 <Input />
               </Form.Item>
 
+              <PanelBlock index={3}>
               <Form.Item
                 name="apiKey"
                 label="API Key"
@@ -483,7 +503,9 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
                   }
                 />
               </Form.Item>
+              </PanelBlock>
 
+              <PanelBlock index={4}>
               <Form.Item
                 name="model"
                 label="模型"
@@ -567,7 +589,9 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
                   />
                 )}
               </Form.Item>
+              </PanelBlock>
 
+              <PanelBlock index={5}>
               {/* 连接验证（链接样式小按钮）+ 选中模型为免费时标注 */}
               <div
                 style={{
@@ -589,7 +613,9 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
                   {t("settings.provider.testConnection")}
                 </Button>
               </div>
+              </PanelBlock>
 
+              <PanelBlock index={6}>
               {/* Base URL 展示：自定义可编辑；预设只读灰色 + 官网跳转 */}
               {provider === "custom" ? (
                 <Form.Item name="baseUrl" label={t("settings.provider.baseUrl")}>
@@ -617,19 +643,23 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
                   </Form.Item>
                 )
               )}
+              </PanelBlock>
             </div>
             )}
 
             {/* ===== 分组：翻译参数 ===== */}
             {activeSection === "params" && (
             <div>
-              <Typography.Text strong>{t("settings.params.groupTitle")}</Typography.Text>
-              <Typography.Paragraph
-                type="secondary"
-                style={{ fontSize: 12, marginBottom: 12 }}
-              >
-                {t("settings.params.groupDesc")}
-              </Typography.Paragraph>
+              <PanelBlock index={0}>
+                <Typography.Text strong>{t("settings.params.groupTitle")}</Typography.Text>
+                <Typography.Paragraph
+                  type="secondary"
+                  style={{ fontSize: 12, marginBottom: 12 }}
+                >
+                  {t("settings.params.groupDesc")}
+                </Typography.Paragraph>
+              </PanelBlock>
+              <PanelBlock index={1}>
               <Space size="large" wrap>
                 <Form.Item name="temperature" label={t("settings.params.temperature")} style={{ marginBottom: 8 }}>
                   <InputNumber min={0} max={2} step={0.01} precision={2} />
@@ -652,20 +682,24 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
                   <InputNumber min={1} max={200} disabled={batchSizeAuto} />
                 </Form.Item>
               </Space>
+              </PanelBlock>
             </div>
             )}
 
             {/* ===== 分组：术语表 ===== */}
             {activeSection === "glossary" && (
             <div>
-              <Typography.Text strong>{t("settings.glossary.groupTitle")}</Typography.Text>
-              <Typography.Paragraph
-                type="secondary"
-                style={{ fontSize: 12, marginBottom: 12 }}
-              >
-                {t("settings.glossary.groupDesc")}
-              </Typography.Paragraph>
+              <PanelBlock index={0}>
+                <Typography.Text strong>{t("settings.glossary.groupTitle")}</Typography.Text>
+                <Typography.Paragraph
+                  type="secondary"
+                  style={{ fontSize: 12, marginBottom: 12 }}
+                >
+                  {t("settings.glossary.groupDesc")}
+                </Typography.Paragraph>
+              </PanelBlock>
 
+              <PanelBlock index={1}>
               <Form.Item
                 name="extractGlossary"
                 label={t("settings.glossary.extract")}
@@ -675,10 +709,14 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
               >
                 <Switch />
               </Form.Item>
+              </PanelBlock>
 
+              <PanelBlock index={2}>
               <Typography.Text type="secondary">
                 {t("settings.glossary.customDesc")}
               </Typography.Text>
+              </PanelBlock>
+              <PanelBlock index={3}>
               <Form.List name="userGlossary">
                 {(fields, { add, remove }) => (
                   <div style={{ marginTop: 8 }}>
@@ -709,8 +747,10 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
                   </div>
                 )}
               </Form.List>
+              </PanelBlock>
 
               {/* 自定义提示词入口（并入术语表分组：统一译名与翻译风格） */}
+              <PanelBlock index={4}>
               <Divider style={{ margin: "12px 0 8px" }} />
               <Button
                 block
@@ -720,23 +760,27 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
               >
                 {t("settings.glossary.openPrompts")}
               </Button>
+              </PanelBlock>
             </div>
             )}
 
             {/* ===== 分组：翻译加速 ===== */}
             {activeSection === "threading" && (
             <div>
-              <Typography.Text strong>{t("settings.threading.groupTitle")}</Typography.Text>
-              <Alert
-                type="warning"
-                showIcon
-                style={{ margin: "8px 0 12px" }}
-                message={
-                  <div style={{ fontSize: 12, lineHeight: 1.7 }}>
-                    {t("settings.threading.warn")}
-                  </div>
-                }
-              />
+              <PanelBlock index={0}>
+                <Typography.Text strong>{t("settings.threading.groupTitle")}</Typography.Text>
+                <Alert
+                  type="warning"
+                  showIcon
+                  style={{ margin: "8px 0 12px" }}
+                  message={
+                    <div style={{ fontSize: 12, lineHeight: 1.7 }}>
+                      {t("settings.threading.warn")}
+                    </div>
+                  }
+                />
+              </PanelBlock>
+              <PanelBlock index={1}>
               <Space size="large" wrap align="start">
                 <Form.Item
                   name="threadingEnabled"
@@ -775,7 +819,9 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
                   />
                 </Form.Item>
               </Space>
+              </PanelBlock>
 
+              <PanelBlock index={2}>
               <Divider style={{ margin: "8px 0 12px" }} />
 
               {/* 内容包并行翻译（与上面单包线程并行相互独立） */}
@@ -815,7 +861,9 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
                   </div>
                 }
               />
+              </PanelBlock>
 
+              <PanelBlock index={3}>
               <Divider style={{ margin: "8px 0 12px" }} />
               <Form.Item
                 name="deepScan"
@@ -832,20 +880,23 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
               >
                 {t("settings.threading.deepScanDesc")}
               </Typography.Paragraph>
+              </PanelBlock>
             </div>
             )}
 
             {/* ===== 分组：页面设置（主题 / 语言，两项独立配置互不影响） ===== */}
             {activeSection === "appearance" && (
             <div>
-              <Typography.Text strong>{t("settings.appearance.groupTitle")}</Typography.Text>
-              <Typography.Paragraph
-                type="secondary"
-                style={{ fontSize: 12, marginBottom: 16 }}
-              >
-                {t("settings.appearance.groupDesc")}
-              </Typography.Paragraph>
-
+              <PanelBlock index={0}>
+                <Typography.Text strong>{t("settings.appearance.groupTitle")}</Typography.Text>
+                <Typography.Paragraph
+                  type="secondary"
+                  style={{ fontSize: 12, marginBottom: 16 }}
+                >
+                  {t("settings.appearance.groupDesc")}
+                </Typography.Paragraph>
+              </PanelBlock>
+              <PanelBlock index={1}>
               <Space size="large" wrap align="start">
                 <Form.Item name="theme" label={t("settings.appearance.theme")} style={{ marginBottom: 8 }}>
                   <Radio.Group optionType="button" buttonStyle="solid">
@@ -873,6 +924,7 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
                   </Radio.Group>
                 </Form.Item>
               </Space>
+              </PanelBlock>
             </div>
             )}
 
@@ -880,6 +932,7 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
             {activeSection === "about" && (
             <div>
               {/* about:author：作者 / 项目信息（纯展示） */}
+              <PanelBlock index={0}>
               <div style={{ textAlign: "center", paddingTop: 24 }}>
                 <Typography.Title level={5} style={{ marginBottom: 4 }}>
                   <img src="/app-icon.svg" alt="" style={{ height: 22, marginRight: 8, verticalAlign: "middle" }} /> {t("settings.about.title")} v{appVersion}
@@ -897,7 +950,9 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
                   <img src="/github.svg" alt="" style={{ height: 14, marginRight: 4, verticalAlign: "middle" }} /> GitHub：github.com/adssadax-1/mc-content-localizer
                 </Typography.Link>
               </div>
+              </PanelBlock>
 
+              <PanelBlock index={1}>
               <Divider style={{ margin: "16px 0 12px" }} />
 
               {/* about:update：检查更新 */}
@@ -911,6 +966,7 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
                   <img src="/refresh.svg" alt="" style={{ height: 12, marginRight: 4, verticalAlign: "middle" }} /> {t("settings.about.checkUpdate", { version: appVersion })}
                 </Button>
               </div>
+              </PanelBlock>
             </div>
             )}
             </div>

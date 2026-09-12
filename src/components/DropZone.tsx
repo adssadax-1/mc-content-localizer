@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import { LoadingOutlined, SunOutlined, PictureOutlined, AppstoreOutlined } from "@ant-design/icons";
 import { Spin, Typography } from "antd";
 import { useTranslationContext } from "../i18n";
@@ -40,6 +41,15 @@ const KIND_TEXT: Record<
 export function DropZone({ dragOver, parsing, kind, onPick }: Props) {
   const { t } = useTranslationContext();
   const k = KIND_TEXT[kind];
+  // 切换内容包类型时才播三层错峰入场；首次挂载为静态（key 不变则不重播）
+  const [staggerOn, setStaggerOn] = useState(false);
+  const prevKindRef = useRef(kind);
+  useEffect(() => {
+    if (prevKindRef.current !== kind) {
+      prevKindRef.current = kind;
+      setStaggerOn(true);
+    }
+  }, [kind]);
   return (
     <div
       onClick={onPick}
@@ -61,20 +71,32 @@ export function DropZone({ dragOver, parsing, kind, onPick }: Props) {
           <div style={{ padding: 48 }} />
         </Spin>
       ) : (
-        <div style={{ textAlign: "center", padding: 48 }}>
-          <span style={{ fontSize: 64, color: dragOver ? "#4A90D9" : "#bfbfbf" }}>
+        <div
+          key={kind}
+          className={staggerOn ? "dz-stagger" : undefined}
+          style={{
+            textAlign: "center",
+            padding: 48,
+            maxWidth: 420,
+            marginLeft: "auto",
+            marginRight: "auto",
+          }}
+        >
+          <span className="dz-layer" style={{ fontSize: 64, color: dragOver ? "#4A90D9" : "#bfbfbf" }}>
             {k.icon}
           </span>
-          <Typography.Title level={4} style={{ marginTop: 16 }} className="dropzone-text">
+          <Typography.Title level={4} style={{ marginTop: 16 }} className="dropzone-text dz-layer dz-delay-1">
             {t(dragOver ? k.dragTitle : k.title)}
           </Typography.Title>
-          <Typography.Text type="secondary" className="dropzone-text">
-            {t(k.desc)}
-          </Typography.Text>
-          <div style={{ marginTop: 8 }}>
-            <Typography.Text type="secondary" style={{ fontSize: 12 }} className="dropzone-text">
-              {t("app.tipSettings")}
+          <div className="dz-layer dz-delay-2">
+            <Typography.Text type="secondary" className="dropzone-text">
+              {t(k.desc)}
             </Typography.Text>
+            <div style={{ marginTop: 8 }}>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }} className="dropzone-text">
+                {t("app.tipSettings")}
+              </Typography.Text>
+            </div>
           </div>
         </div>
       )}

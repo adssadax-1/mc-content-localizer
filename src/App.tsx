@@ -44,6 +44,7 @@ import enUS from "antd/locale/en_US";
 
 import { api as rawApi, createDevApi, onFileDropped, onGlossaryDone, onTranslateProgress, onTranslationBatch } from "./api";
 import { DropZone } from "./components/DropZone";
+import { SlideNav } from "./components/SlideNav";
 import { EntryTable } from "./components/EntryTable";
 import { ContextPanel } from "./components/ContextPanel";
 import { SettingsModal } from "./components/SettingsModal";
@@ -1700,23 +1701,15 @@ function AppInner({
             <Typography.Text type="secondary" style={{ fontSize: 12, paddingLeft: 8 }} className="sider-label-text">
               {t("app.contentKind")}
             </Typography.Text>
-            {(Object.keys(KIND_META) as PackKind[]).map((k) => (
-              <Button
-                key={k}
-                block
-                className="sider-nav-btn"
-                type={activeTab === k ? "primary" : "text"}
-                icon={KIND_META[k].icon}
-                style={{
-                  marginTop: 6,
-                  justifyContent: "flex-start",
-                  textAlign: "left",
-                }}
-                onClick={() => setActiveTab(k)}
-              >
-                {t(KIND_META[k].labelKey)}
-              </Button>
-            ))}
+            <SlideNav
+              items={(Object.keys(KIND_META) as PackKind[]).map((k) => ({
+                key: k,
+                label: t(KIND_META[k].labelKey),
+                icon: KIND_META[k].icon,
+              }))}
+              activeKey={activeTab}
+              onSelect={(k) => setActiveTab(k as PackKind)}
+            />
             <Typography.Text
               type="secondary"
               style={{ fontSize: 12, display: "block", marginTop: 16, paddingLeft: 8 }}

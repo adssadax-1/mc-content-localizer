@@ -33,6 +33,7 @@ body {
 }
 
 [data-theme="dark"] {
+  --slide-indicator-bg: #6cb3ff;
   --border-color: #303030;
   --card-bg: #1f1f1f;
   --row-translating: #11294d;
@@ -88,6 +89,16 @@ body {
   --dur-fast: 0.2s;
   --dur-base: 0.26s;
   --dur-slow: 0.32s;
+  --motion-dur-fast: 180ms;
+  --motion-dur-base: 240ms;
+  --motion-dur-panel: 260ms;
+  --motion-ease-enter: cubic-bezier(0, 0, 0.2, 1);
+  --motion-ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  --motion-ease-slide: cubic-bezier(0.4, 0, 0.2, 1);
+  --motion-rise: 10px;
+  --motion-stagger-step: 40ms;
+  --motion-stagger-cap: 160ms;
+  --slide-indicator-bg: #4a90d9;
 }
 
 /* 场景 1：内容包卡片——导入列表时淡入上浮；多卡片按序交错入场 */
@@ -104,16 +115,78 @@ body {
 .pack-card:nth-child(3) { animation-delay: 0.1s; }
 .pack-card:nth-child(n + 4) { animation-delay: 0.15s; }
 
-/* 场景 4：左侧导航按钮 hover/按压反馈 */
-.sider-nav-btn {
-  transition:
-    background-color var(--dur-fast) ease,
-    color var(--dur-fast) ease,
-    transform var(--dur-fast) var(--ease-out);
+/* 场景 4：滑动指示器导航（主界面内容包类型 + 设置弹窗分组共用） */
+.slide-nav {
+  position: relative;
 }
 
-.sider-nav-btn:active {
-  transform: scale(0.97);
+.slide-nav-indicator {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  background: var(--slide-indicator-bg);
+  border-radius: 6px;
+}
+
+.slide-nav-item {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin-top: 6px;
+  padding: 5px 12px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  font-family: inherit;
+  text-align: left;
+  color: inherit;
+  transition: color 150ms ease;
+}
+
+.slide-nav-item:hover {
+  color: var(--slide-indicator-bg);
+}
+
+.slide-nav-item.active {
+  color: #fff;
+}
+
+.slide-nav-item .anticon {
+  font-size: 14px;
+}
+
+/* 设置面板 / 中央空态：分层错峰淡入（仅 opacity + transform） */
+@keyframes motion-rise {
+  from {
+    opacity: 0;
+    transform: translateY(var(--motion-rise));
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.panel-anim-root .panel-anim {
+  animation: motion-rise var(--motion-dur-panel) var(--motion-ease-enter) both;
+}
+
+.dz-stagger .dz-layer {
+  animation: motion-rise var(--motion-dur-panel) var(--motion-ease-enter) both;
+}
+
+.dz-stagger .dz-delay-1 {
+  animation-delay: 55ms;
+}
+
+.dz-stagger .dz-delay-2 {
+  animation-delay: 110ms;
 }
 
 /* 场景 5：服务商网格卡片 hover/选中过渡 */
@@ -166,7 +239,9 @@ body {
   .pack-card-expanded-content,
   .alert-slide,
   .provider-grid-card,
-  .sider-nav-btn {
+  .slide-nav-indicator,
+  .panel-anim-root .panel-anim,
+  .dz-stagger .dz-layer {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
