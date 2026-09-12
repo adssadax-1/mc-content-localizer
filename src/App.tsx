@@ -1813,8 +1813,9 @@ function AppInner({
 
         <Content style={{ padding: 12, overflow: "auto" }}>
           <div style={{ display: workMode === "gamedir" ? "block" : "none" }}>
+          {settings && (
           <GameDirView
-              settings={settings!}
+              settings={settings}
               onSettingsUpdate={setSettings}
               autoScanDir={gamedirAutoScan}
               onAutoScanConsumed={() => setGamedirAutoScan(null)}
@@ -1922,6 +1923,7 @@ function AppInner({
                 return { added: added.length, skipped };
               }}
             />
+          )}
           </div>
           {workMode === "free" && (
           <>
