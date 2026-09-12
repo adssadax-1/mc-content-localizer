@@ -34,6 +34,7 @@ export const api = {
     batchSize?: number,
     extractGlossary?: boolean,
     threading?: ThreadingConfig,
+    packLabel?: string,
   ) =>
     invoke<TranslatedItem[]>("run_translation", {
       config,
@@ -43,6 +44,7 @@ export const api = {
       batchSize,
       extractGlossary,
       threading,
+      packLabel,
     }),
 
   exportResourcePack: (

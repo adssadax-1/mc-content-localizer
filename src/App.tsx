@@ -481,7 +481,7 @@ function deepEntryGroup(e: LangEntry): string | null {
 }
 
 /** 队列中的单个内容包（模组 / 光影包 / 资源包统一结构） */
-interface PackItem {
+export interface PackItem {
   key: string;
   kind: PackKind;
   name: string;
@@ -1705,7 +1705,8 @@ function AppInner({
       </Header>
 
       <Layout>
-        {/* 左侧导航：三类内容包 */}
+        {/* 左侧导航：自由导入 = 内容包类型；游戏目录 = 版本列表（GameDirView 内置） */}
+        {workMode === "free" && (
         <Sider width={200} style={{ borderRight: "1px solid var(--border-color, #E6E8EB)", paddingTop: 12 }}>
           <div style={{ padding: "0 12px" }}>
             <Typography.Text type="secondary" style={{ fontSize: 12, paddingLeft: 8 }} className="sider-label-text">
@@ -1729,23 +1730,31 @@ function AppInner({
             </Typography.Text>
           </div>
         </Sider>
+        )}
 
         <Content style={{ padding: 12, overflow: "auto" }}>
-          <Segmented
-            style={{ marginBottom: 10 }}
-            value={workMode}
-            onChange={(v) => setWorkMode(v as "free" | "gamedir")}
-            options={[
-              { label: "自由导入", value: "free" },
-              { label: "游戏目录", value: "gamedir" },
-            ]}
-          />
           {workMode === "gamedir" ? (
-            <>
-              {settings && (
-                <GameDirView settings={settings} onSettingsUpdate={setSettings} />
+            <GameDirView
+              settings={settings!}
+              onSettingsUpdate={setSettings}
+              renderPackCard={(item, handlers, opts) => (
+                <PackCard
+                  item={item}
+                  translating={translating}
+                  thisTranslating={opts.thisTranslating}
+                  packProgress={opts.packProgress}
+                  onToggleExpanded={handlers.onToggleExpanded}
+                  onToggleChecked={handlers.onToggleChecked}
+                  onEdit={handlers.onEdit}
+                  onSelect={handlers.onSelect}
+                  onClear={handlers.onClear}
+                  onToggleSelected={handlers.onToggleSelected}
+                  onToggleAllSelected={handlers.onToggleAllSelected}
+                  onToggleManySelected={handlers.onToggleManySelected}
+                  onResize={handlers.onResize}
+                />
               )}
-            </>
+            />
           ) : (
           <>
           {visibleQueue.length === 0 ? (
@@ -1794,7 +1803,15 @@ function AppInner({
                 >
                   {t("app.checkAll")}
                 </Checkbox>
-              </Space>
+                <Segmented
+              value={workMode}
+              onChange={(v) => setWorkMode((v as string) === "gamedir" ? "gamedir" : "free")}
+              options={[
+                { label: "自由导入", value: "free" },
+                { label: "游戏目录", value: "gamedir" },
+              ]}
+            />
+          </Space>
 
               {translating && progress && (
                 <Space style={{ marginBottom: 8 }} align="center">

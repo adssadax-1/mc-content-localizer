@@ -131,7 +131,10 @@ pub async fn run_translation(
     batch_size: Option<usize>,
     extract_glossary: Option<bool>,
     threading: Option<ThreadingConfig>,
+    // 事件显示名（游戏目录模式 = 版本·类别·包名）；缺省用 ctx.mod_name
+    pack_label: Option<String>,
 ) -> Result<Vec<TranslatedItem>, String> {
+    let pack_label = pack_label.unwrap_or_else(|| ctx.mod_name.clone());
     let provider = OpenAiProvider::new(config);
     // devtools：设置全局 emitter，供 provider/pipeline 插桩 emit
     #[cfg(feature = "devtools")]
@@ -185,7 +188,7 @@ pub async fn run_translation(
             "workerId": 0,
             "chunkCount": batch_count,
             "packKey": pack_key,
-            "packName": ctx.mod_name,
+            "packName": pack_label,
         }));
         let mut results: Vec<TranslatedItem> = Vec::with_capacity(total);
         let mut done = 0;
@@ -241,7 +244,7 @@ pub async fn run_translation(
             "workerId": wid,
             "chunkCount": wchunks.len(),
             "packKey": pack_key,
-            "packName": ctx.mod_name,
+            "packName": pack_label,
         }));
         #[cfg(not(feature = "devtools"))]
         let _ = wid;

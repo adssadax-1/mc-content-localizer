@@ -8,6 +8,7 @@ import {
   Progress,
   Select,
   Space,
+  Spin,
   Tag,
   Tooltip,
   Typography,
@@ -16,7 +17,6 @@ import {
 import {
   ExportOutlined,
   FolderOpenOutlined,
-  ReloadOutlined,
   SearchOutlined,
   TranslationOutlined,
 } from "@ant-design/icons";
@@ -27,19 +27,35 @@ import type {
   GamePackEntry,
   GameVersionGroup,
   LangEntry,
-  LangFormat,
-  ResourcePackBundle,
   Settings,
 } from "../types";
 import { LOADER_LABEL, packFormatForMc } from "../types";
-import { EntryTable } from "./EntryTable";
+import type { PackItem } from "../App";
 
 interface Props {
   settings: Settings;
   onSettingsUpdate: (s: Settings) => void;
+  /** App 提供：用自由导入同款 PackCard 渲染内容包详情（全功能 EntryTable） */
+  renderPackCard: (
+    item: PackItem,
+    handlers: GamePackHandlers,
+    opts: { thisTranslating: boolean; packProgress?: { done: number; total: number } },
+  ) => React.ReactNode;
 }
 
 type Kind = "mod" | "shader" | "resourcepack";
+
+export interface GamePackHandlers {
+  onToggleExpanded: (key: string) => void;
+  onToggleChecked: (key: string, v: boolean) => void;
+  onEdit: (packKey: string, entryKey: string, value: string) => void;
+  onSelect: (key: string) => void;
+  onClear: (packKey: string, entryKey: string) => void;
+  onToggleSelected: (packKey: string, entryKey: string, sel: boolean) => void;
+  onToggleAllSelected: (packKey: string, sel: boolean) => void;
+  onToggleManySelected: (packKey: string, keys: string[], sel: boolean) => void;
+  onResize: (key: string, e: React.MouseEvent) => void;
+}
 
 interface ParsedPack {
   kind: Kind;
@@ -60,6 +76,7 @@ interface PackCount {
 }
 
 const KIND_LABEL: Record<Kind, string> = { mod: "模组", shader: "光影包", resourcepack: "资源包" };
+
 function packsOf(g: GameVersionGroup, kind: Kind): GamePackEntry[] {
   if (kind === "mod") return g.mods;
   if (kind === "resourcepack") return g.resourcepacks;
@@ -68,21 +85,20 @@ function packsOf(g: GameVersionGroup, kind: Kind): GamePackEntry[] {
 
 const fileKey = (p: GamePackEntry) => `${p.fileName}|${p.size}`;
 
-export function GameDirView({ settings, onSettingsUpdate }: Props) {
+export function GameDirView({ settings, onSettingsUpdate, renderPackCard }: Props) {
   const [root, setRoot] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number; current: string } | null>(null);
   const [scan, setScan] = useState<GameDirScan | null>(null);
   const [summaryOpen, setSummaryOpen] = useState(false);
+  const [scanSummary, setScanSummary] = useState<{ scan: GameDirScan; packTotal: number; dup: number } | null>(null);
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [search, setSearch] = useState("");
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [expandedPack, setExpandedPack] = useState<string | null>(null);
-  const [parsingPack, setParsingPack] = useState<string | null>(null);
+  const [activeGroupKey, setActiveGroupKey] = useState<string | null>(null);
+  const [detailId, setDetailId] = useState<string | null>(null);
   const [parsed, setParsed] = useState<Record<string, ParsedPack>>({});
+  const [parsingId, setParsingId] = useState<string | null>(null);
   const [packError, setPackError] = useState<Record<string, string>>({});
-  const [reuseCount, setReuseCount] = useState<Record<string, number>>({});
-  void reuseCount;
   const [packCounts, setPackCounts] = useState<Record<string, PackCount>>({});
   const [translated, setTranslated] = useState<Record<string, Record<string, string>>>({});
   const [translatingKeys, setTranslatingKeys] = useState<Record<string, boolean>>({});
@@ -90,15 +106,16 @@ export function GameDirView({ settings, onSettingsUpdate }: Props) {
   const [reportOpen, setReportOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportJars, setExportJars] = useState(false);
-  void setExportJars;
+  const [reuseCount, setReuseCount] = useState<Record<string, number>>({});
+  void reuseCount;
 
   const reuseRef = useRef<Map<string, Record<string, string>>>(new Map());
   const gamedirKeysRef = useRef<Set<string>>(new Set());
   const countsRef = useRef<Record<string, PackCount>>({});
   const translatedRef = useRef<Record<string, Record<string, string>>>({});
-  const restoringRef = useRef(false);
+  const fileKeysRef = useRef<Record<string, string>>({});
 
-  // ── 扫描进度事件 ──
+  // ── 事件监听 ──
   useEffect(() => {
     const un = onGameScanProgress((p) => setProgress(p));
     return () => {
@@ -106,7 +123,6 @@ export function GameDirView({ settings, onSettingsUpdate }: Props) {
     };
   }, []);
 
-  // ── 批次实时事件：按包累计计数与译文 ──
   useEffect(() => {
     const un = onTranslationBatch(({ packKey, items }) => {
       if (!gamedirKeysRef.current.has(packKey)) return;
@@ -137,7 +153,6 @@ export function GameDirView({ settings, onSettingsUpdate }: Props) {
     };
   }, []);
 
-  // ── 翻译进度事件 ──
   useEffect(() => {
     const un = onTranslateProgress((p) => {
       if (p.packKey && translatingKeys[p.packKey]) {
@@ -152,7 +167,7 @@ export function GameDirView({ settings, onSettingsUpdate }: Props) {
     };
   }, [translatingKeys]);
 
-  // ── 会话缓存（gamedir）：恢复询问 ──
+  // ── 会话缓存恢复（gamedir 独立缓存）──
   useEffect(() => {
     api
       .loadSessionCache("gamedir")
@@ -165,6 +180,7 @@ export function GameDirView({ settings, onSettingsUpdate }: Props) {
             selected?: Record<string, boolean>;
             translated?: Record<string, Record<string, string>>;
             packCounts?: Record<string, PackCount>;
+            fileKeys?: Record<string, string>;
           };
           if (!data.scan || !data.root) return;
           Modal.confirm({
@@ -173,7 +189,6 @@ export function GameDirView({ settings, onSettingsUpdate }: Props) {
             okText: "恢复",
             cancelText: "不恢复",
             onOk: () => {
-              restoringRef.current = true;
               setRoot(data.root!);
               setScan(data.scan!);
               setSelected(data.selected ?? {});
@@ -181,11 +196,10 @@ export function GameDirView({ settings, onSettingsUpdate }: Props) {
               translatedRef.current = data.translated ?? {};
               countsRef.current = data.packCounts ?? {};
               setPackCounts(data.packCounts ?? {});
-              // 重建跨版本复用表
-              for (const [path, tr] of Object.entries(data.translated ?? {})) {
-                const pack = findPack(data.scan!, path);
-                if (!pack) continue;
-                const fk = fileKey(pack);
+              fileKeysRef.current = data.fileKeys ?? {};
+              for (const [id, tr] of Object.entries(data.translated ?? {})) {
+                const fk = (data.fileKeys ?? {})[id];
+                if (!fk) continue;
                 const store = reuseRef.current.get(fk) ?? {};
                 for (const [k, v] of Object.entries(tr)) store[k] = v;
                 reuseRef.current.set(fk, store);
@@ -201,7 +215,7 @@ export function GameDirView({ settings, onSettingsUpdate }: Props) {
       .catch(() => {});
   }, []);
 
-  // ── 会话缓存：防抖保存 ──
+  // ── 会话缓存防抖保存 ──
   useEffect(() => {
     const timer = setTimeout(() => {
       if (!scan || !root) return;
@@ -215,6 +229,7 @@ export function GameDirView({ settings, onSettingsUpdate }: Props) {
             selected,
             translated: translatedRef.current,
             packCounts: countsRef.current,
+            fileKeys: fileKeysRef.current,
           }),
         )
         .catch(() => {});
@@ -247,10 +262,26 @@ export function GameDirView({ settings, onSettingsUpdate }: Props) {
         translatedRef.current = {};
         countsRef.current = {};
         setPackCounts({});
-        setReuseCount({});
-        setExpanded({});
-        setExpandedPack(null);
+        setDetailId(null);
+        setActiveGroupKey(null);
+        gamedirKeysRef.current.clear();
+        fileKeysRef.current = {};
         persistRecent(dir);
+        const dupKeys = new Map<string, number>();
+        const reg = (p: GamePackEntry) => {
+          const fk = fileKey(p);
+          dupKeys.set(fk, (dupKeys.get(fk) ?? 0) + 1);
+        };
+        for (const p of result.rootGroup.mods) reg(p);
+        for (const p of result.rootGroup.resourcepacks) reg(p);
+        for (const p of result.rootGroup.shaderpacks) reg(p);
+        for (const v of result.versions) {
+          for (const p of v.mods) reg(p);
+          for (const p of v.resourcepacks) reg(p);
+          for (const p of v.shaderpacks) reg(p);
+        }
+        let dup = 0;
+        for (const n of dupKeys.values()) if (n > 1) dup += n - 1;
         const packTotal =
           result.rootGroup.mods.length +
           result.rootGroup.resourcepacks.length +
@@ -259,8 +290,8 @@ export function GameDirView({ settings, onSettingsUpdate }: Props) {
             (n, v) => n + v.mods.length + v.resourcepacks.length + v.shaderpacks.length,
             0,
           );
+        setScanSummary({ scan: result, packTotal, dup });
         setSummaryOpen(true);
-        setScanSummary({ scan: result, packTotal });
       } catch (e) {
         if (String(e).includes("已取消")) message.info("已取消扫描");
         else message.error(String(e));
@@ -271,14 +302,13 @@ export function GameDirView({ settings, onSettingsUpdate }: Props) {
     },
     [persistRecent],
   );
-  const [scanSummary, setScanSummary] = useState<{ scan: GameDirScan; packTotal: number } | null>(null);
 
   const pickRoot = useCallback(async () => {
     const dir = await open({ directory: true, title: "选择 .minecraft 目录或任意游戏目录（会自动向下扫描）" });
     if (dir && typeof dir === "string") void startScan(dir);
   }, [startScan]);
 
-  // ── 分组与筛选 ──
+  // ── 分组与 displayId ──
   interface GroupRow {
     key: string;
     name: string;
@@ -289,80 +319,45 @@ export function GameDirView({ settings, onSettingsUpdate }: Props) {
     if (!scan) return [];
     return [
       { key: "__root__", name: "公共目录", group: scan.rootGroup, isRoot: true },
-      ...scan.versions.map((v) => ({ key: "v:" + v.dirName, name: v.dirName, group: v, isRoot: false })),
+      ...scan.versions.map((v) => ({ key: "v:" + v.dirName, name: v.dirName ?? v.dirName, group: v, isRoot: false })),
     ];
   }, [scan]);
 
-  const allPacks = useMemo(() => {
-    const out: { group: GroupRow; kind: Kind; pack: GamePackEntry }[] = [];
+  const dispId = (g: GroupRow, kind: Kind, pack: GamePackEntry) =>
+    `${g.name}·${KIND_LABEL[kind]}·${pack.fileName}`;
+
+  const packByDisp = useMemo(() => {
+    const m = new Map<string, { pack: GamePackEntry; group: GroupRow; kind: Kind }>();
     for (const g of groups) {
       for (const kind of ["mod", "resourcepack", "shader"] as Kind[]) {
-        for (const pack of packsOf(g.group, kind)) out.push({ group: g, kind, pack });
+        for (const pack of packsOf(g.group, kind)) {
+          const id = dispId(g, kind, pack);
+          fileKeysRef.current[id] = fileKey(pack);
+          m.set(id, { pack, group: g, kind });
+        }
       }
     }
-    return out;
+    return m;
   }, [groups]);
 
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return null;
-    return allPacks.filter(({ pack }) => pack.fileName.toLowerCase().includes(q));
-  }, [allPacks, search]);
+  const selectedIds = useMemo(
+    () => new Set(Object.keys(selected).filter((id) => selected[id] && packByDisp.has(id))),
+    [selected, packByDisp],
+  );
 
-  const dupFileKeys = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const { pack } of allPacks) {
-      const fk = fileKey(pack);
-      m.set(fk, (m.get(fk) ?? 0) + 1);
-    }
-    let dup = 0;
-    for (const n of m.values()) if (n > 1) dup += n - 1;
-    return dup;
-  }, [allPacks]);
-
-  const donePacks = Object.entries(packCounts).filter(([, c]) => c.ok + c.reused > 0).length;
-  const failedPaths = Object.entries(packCounts)
-    .filter(([, c]) => c.error > 0)
-    .map(([p]) => p);
-  const translatingCount = Object.keys(translatingKeys).length;
-
-  // ── 勾选与批量操作 ──
-  const setSel = (path: string, v: boolean) => setSelected((prev) => ({ ...prev, [path]: v }));
-  const selectAllFiltered = () => {
-    const list = filtered ?? allPacks;
-    const next = { ...selected };
-    for (const { pack } of list) next[pack.path] = true;
-    setSelected(next);
-  };
-  const selectNone = () => setSelected({});
-  const selectKind = (kind: Kind) => {
-    const list = filtered ?? allPacks;
-    const next = { ...selected };
-    for (const { pack } of list) if (pack.kind === kind) next[pack.path] = true;
-    setSelected(next);
-  };
-  const selectUntranslated = () => {
-    const next: Record<string, boolean> = {};
-    for (const { pack } of allPacks) {
-      const tr = translated[pack.path] ?? {};
-      const data = parsed[pack.path];
-      const hasTr = data && data.entries.some((e) => tr[e.key]);
-      if (!data || !hasTr) next[pack.path] = true;
-    }
-    setSelected(next);
-    message.info("提示：未展开解析过的包会一并勾选，翻译时自动解析");
-  };
 
   // ── 懒解析 ──
   const ensureParsed = useCallback(
-    async (pack: GamePackEntry, group: GroupRow): Promise<ParsedPack | null> => {
-      const cached = parsed[pack.path];
+    async (id: string): Promise<ParsedPack | null> => {
+      const cached = parsed[id];
       if (cached) return cached;
-      if (parsingPack) return null;
-      setParsingPack(pack.path);
+      const hit = packByDisp.get(id);
+      if (!hit || parsingId) return null;
+      setParsingId(id);
+      const { pack, group, kind } = hit;
       try {
         let data: ParsedPack;
-        if (pack.kind === "mod") {
+        if (kind === "mod") {
           const mf = await api.parseJar(pack.path);
           data = {
             kind: "mod",
@@ -372,7 +367,7 @@ export function GameDirView({ settings, onSettingsUpdate }: Props) {
             loader: mf.loader,
             entries: mf.entries,
           };
-        } else if (pack.kind === "shader") {
+        } else if (kind === "shader") {
           const sp = await api.parseShaderPack(pack.path);
           data = {
             kind: "shader",
@@ -406,150 +401,129 @@ export function GameDirView({ settings, onSettingsUpdate }: Props) {
             return e;
           });
         }
-        setParsed((prev) => ({ ...prev, [pack.path]: data }));
-        if (reused > 0) setReuseCount((prev) => ({ ...prev, [pack.path]: reused }));
+        setParsed((prev) => ({ ...prev, [id]: data }));
+        if (reused > 0) setReuseCount((prev) => ({ ...prev, [id]: reused }));
         return data;
       } catch (e) {
-        setPackError((prev) => ({ ...prev, [pack.path]: String(e) }));
+        setPackError((prev) => ({ ...prev, [id]: String(e) }));
         return null;
       } finally {
-        setParsingPack(null);
+        setParsingId(null);
       }
     },
-    [parsed, parsingPack],
+    [parsed, parsingId, packByDisp],
   );
 
-  const togglePackDetail = (pack: GamePackEntry, group: GroupRow) => {
-    if (expandedPack === pack.path) {
-      setExpandedPack(null);
-      return;
-    }
-    setExpandedPack(pack.path);
-    void ensureParsed(pack, group);
-  };
-
-  // ── 翻译（并行池，复用 free 模式机制）──
-  const translateSelected = useCallback(async () => {
-    if (!settings) return;
-    const targets = allPacks.filter(({ pack }) => selected[pack.path]);
-    if (targets.length === 0) {
-      message.info("请先勾选内容包");
-      return;
-    }
-    const provider = {
-      ...settings.provider,
-      temperature:
-        settings.provider.temperature == null
-          ? 0.7
-          : Math.round(settings.provider.temperature * 100) / 100,
-    };
-    // 确保全部已解析（懒解析：翻译时才读语言文件）
-    for (const { pack, group } of targets) {
-      await ensureParsed(pack, group);
-    }
-    interface Task {
-      path: string;
-      name: string;
-      kind: Kind;
-      ctx: Parameters<typeof api.runTranslation>[1];
-      items: { key: string; source: string }[];
-      batchN: number;
-    }
-    const tasks: Task[] = [];
-    for (const { pack, group, kind } of targets) {
-      const data = parsed[pack.path];
-      if (!data || packError[pack.path]) continue;
-      const reuse = reuseRef.current.get(fileKey(pack)) ?? {};
-      const entries = data.entries.map((e) => {
-        const tr = reuse[e.key];
-        if (tr && !e.translation) {
-          return { ...e, translation: tr, status: "aiTranslated" as const, notes: ["跨版本复用译文"] };
-        }
-        return e;
-      });
-      const untranslated = entries.filter((e) => (e.selected ?? true) && !e.translation);
-      if (untranslated.length === 0) continue;
-      tasks.push({
-        path: pack.path,
-        name: pack.fileName,
-        kind,
-        ctx: {
-          modName: data.modName,
-          modid: data.modid,
-          mcVersion: group.group.mcVersion ?? data.mcVersion,
-          loader: LOADER_LABEL[data.loader as keyof typeof LOADER_LABEL] ?? "未知",
-          packType: kind,
-          customPrompt: settings.customPrompts?.[kind] ?? null,
-          userGlossary: settings.userGlossary,
-        },
-        items: untranslated.map((e) => ({ key: e.key, source: e.source })),
-        batchN: untranslated.length,
-      });
-    }
-    if (tasks.length === 0) {
-      message.info("勾选的内容包没有需要翻译的条目（可能已全部翻译或复用译文）");
-      return;
-    }
-    // 初始化计数与翻译中状态
-    for (const t of tasks) {
-      gamedirKeysRef.current.add(t.path);
-      countsRef.current[t.path] ??= { ok: 0, empty: 0, error: 0, error429: 0, warn: 0, reused: 0 };
-      setTranslatingKeys((prev) => ({ ...prev, [t.path]: true }));
-      setPackProgress((prev) => ({ ...prev, [t.path]: { done: 0, total: t.batchN } }));
-    }
-    const threads = settings.threading?.enabled ? settings.threading.threadCount : 1;
-    const packLimit = (settings.packParallelEnabled ?? false)
-      ? (settings.packParallelCount ?? 2) === 0
-        ? Infinity
-        : Math.max(1, settings.packParallelCount ?? 2)
-      : 1;
-    let nextIdx = 0;
-    const worker = async (): Promise<void> => {
-      while (nextIdx < tasks.length) {
-        const t = tasks[nextIdx++];
-        const effectiveBatch =
-          settings.batchSizeAuto ?? true
-            ? Math.max(1, Math.ceil(t.items.length / threads))
-            : settings.batchSize;
-        try {
-          await api.runTranslation(
-            provider,
-            t.ctx,
-            t.items,
-            t.path,
-            effectiveBatch,
-            settings.extractGlossary,
-            settings.threading,
-          );
-        } catch (e) {
-          const c = (countsRef.current[t.path] ??= { ok: 0, empty: 0, error: 0, error429: 0, warn: 0, reused: 0 });
-          c.error += t.items.length;
-          countsRef.current[t.path] = c;
-          setPackError((prev) => ({ ...prev, [t.path]: String(e) }));
-        } finally {
-          setTranslatingKeys((prev) => {
-            const next = { ...prev };
-            delete next[t.path];
-            return next;
-          });
-          setPackCounts({ ...countsRef.current });
-        }
+  // ── 翻译（并行池）──
+  const translateIds = useCallback(
+    async (ids: string[]) => {
+      if (!settings || ids.length === 0) return;
+      const provider = {
+        ...settings.provider,
+        temperature:
+          settings.provider.temperature == null
+            ? 0.7
+            : Math.round(settings.provider.temperature * 100) / 100,
+      };
+      interface Task {
+        id: string;
+        ctx: Parameters<typeof api.runTranslation>[1];
+        items: { key: string; source: string }[];
+        batchN: number;
       }
-    };
-    await Promise.all(Array.from({ length: Math.min(packLimit, tasks.length) }, () => worker()));
-    setReportOpen(true);
-  }, [settings, allPacks, selected, parsed, packError, ensureParsed]);
+      const tasks: Task[] = [];
+      for (const id of ids) {
+        const hit = packByDisp.get(id);
+        const data = parsed[id];
+        if (!hit || !data || packError[id]) continue;
+        const reuse = reuseRef.current.get(fileKey(hit.pack)) ?? {};
+        const entries = data.entries.map((e) => {
+          const r = reuse[e.key];
+          if (r && !e.translation) {
+            return { ...e, translation: r, status: "aiTranslated" as const, notes: ["跨版本复用译文"] };
+          }
+          return e;
+        });
+        const untranslated = entries.filter((e) => (e.selected ?? true) && !e.translation);
+        if (untranslated.length === 0) continue;
+        tasks.push({
+          id,
+          ctx: {
+            modName: data.modName,
+            modid: data.modid,
+            mcVersion: data.mcVersion,
+            loader: LOADER_LABEL[data.loader as keyof typeof LOADER_LABEL] ?? "未知",
+            packType: hit.kind,
+            customPrompt: settings.customPrompts?.[hit.kind] ?? null,
+            userGlossary: settings.userGlossary,
+          },
+          items: untranslated.map((e) => ({ key: e.key, source: e.source })),
+          batchN: untranslated.length,
+        });
+      }
+      if (tasks.length === 0) {
+        message.info("勾选的内容包没有需要翻译的条目（可能已全部翻译或复用译文）");
+        return;
+      }
+      for (const t of tasks) {
+        gamedirKeysRef.current.add(t.id);
+        countsRef.current[t.id] ??= { ok: 0, empty: 0, error: 0, error429: 0, warn: 0, reused: 0 };
+        setTranslatingKeys((prev) => ({ ...prev, [t.id]: true }));
+        setPackProgress((prev) => ({ ...prev, [t.id]: { done: 0, total: t.batchN } }));
+      }
+      const threads = settings.threading?.enabled ? settings.threading.threadCount : 1;
+      const packLimit = (settings.packParallelEnabled ?? false)
+        ? (settings.packParallelCount ?? 2) === 0
+          ? Infinity
+          : Math.max(1, settings.packParallelCount ?? 2)
+        : 1;
+      let nextIdx = 0;
+      const worker = async (): Promise<void> => {
+        while (nextIdx < tasks.length) {
+          const t = tasks[nextIdx++];
+          const effectiveBatch =
+            settings.batchSizeAuto ?? true
+              ? Math.max(1, Math.ceil(t.items.length / threads))
+              : settings.batchSize;
+          try {
+            await api.runTranslation(
+              provider,
+              t.ctx,
+              t.items,
+              t.id,
+              effectiveBatch,
+              settings.extractGlossary,
+              settings.threading,
+              t.id, // packLabel：开发者工具显示 版本·类别·包名
+            );
+          } catch (e) {
+            const c = (countsRef.current[t.id] ??= { ok: 0, empty: 0, error: 0, error429: 0, warn: 0, reused: 0 });
+            c.error += t.items.length;
+            countsRef.current[t.id] = c;
+            setPackError((prev) => ({ ...prev, [t.id]: String(e) }));
+          } finally {
+            setTranslatingKeys((prev) => {
+              const next = { ...prev };
+              delete next[t.id];
+              return next;
+            });
+            setPackCounts({ ...countsRef.current });
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(packLimit, tasks.length) }, () => worker()));
+      setReportOpen(true);
+    },
+    [settings, packByDisp, parsed, packError],
+  );
 
-  // ── 重试失败项 ──
   const retryFailed = useCallback(() => {
     const failed = Object.entries(packCounts)
       .filter(([, c]) => c.error > 0)
-      .map(([p]) => p);
+      .map(([id]) => id);
     if (failed.length === 0) return;
-    const next: Record<string, boolean> = {};
-    for (const p of failed) next[p] = true;
-    for (const p of failed) {
-      const c = countsRef.current[p];
+    for (const id of failed) {
+      const c = countsRef.current[id];
       if (c) {
         c.error = 0;
         c.error429 = 0;
@@ -557,69 +531,55 @@ export function GameDirView({ settings, onSettingsUpdate }: Props) {
     }
     countsRef.current = { ...countsRef.current };
     setPackCounts({ ...countsRef.current });
-    setSelected(next);
     setReportOpen(false);
-    message.info(`已重置 ${failed.length} 个失败包，重新点击「开始翻译勾选项」重试`);
-  }, [packCounts]);
+    void translateIds(failed);
+  }, [packCounts, translateIds]);
 
-  // ── 导出：一个根目录 / 版本子文件夹 / 版本内合并资源包 + 光影 + 资源包 ──
+  // ── 导出 ──
   const exportSelected = useCallback(async () => {
-    const targets = allPacks.filter(({ pack }) => selected[pack.path]);
-    if (targets.length === 0) {
-      message.info("请先勾选内容包");
-      return;
-    }
+    const ids = [...selectedIds];
+    if (ids.length === 0) return;
     const destRoot = await open({ directory: true, title: "选择导出根目录（将按版本建立子文件夹）" });
     if (!destRoot || typeof destRoot !== "string") return;
     setExporting(true);
     let okVersions = 0;
     try {
-      const byGroup = new Map<string, { name: string; group: GroupRow; packs: typeof targets }>();
-      for (const t of targets) {
-        const key = t.group.key;
-        if (!byGroup.has(key)) byGroup.set(key, { name: t.group.name, group: t.group, packs: [] });
-        byGroup.get(key)!.packs.push(t);
+      const byGroup = new Map<string, { name: string; group: GroupRow; ids: string[] }>();
+      for (const id of ids) {
+        const hit = packByDisp.get(id);
+        if (!hit) continue;
+        const gk = hit.group.key;
+        if (!byGroup.has(gk)) byGroup.set(gk, { name: hit.group.name, group: hit.group, ids: [] });
+        byGroup.get(gk)!.ids.push(id);
       }
-      for (const [, { name, group, packs }] of byGroup) {
+      for (const [, { name, group, ids: gIds }] of byGroup) {
         const verDir = `${destRoot}/${name}`;
-        // 模组：合并导出一个资源包
-        const bundles: ResourcePackBundle[] = [];
-        for (const { pack, kind } of packs) {
-          if (kind !== "mod") continue;
-          const data = parsed[pack.path];
-          const tr = translated[pack.path] ?? {};
-          const entries = (data?.entries ?? [])
+        const bundles: Parameters<typeof api.exportResourcePackMulti>[1] = [];
+        for (const id of gIds) {
+          const hit = packByDisp.get(id);
+          const data = parsed[id];
+          const tr = translated[id] ?? {};
+          if (!hit || !data) continue;
+          const entries = data.entries
             .map((e) => ({ ...e, translation: tr[e.key] ?? e.translation }))
             .filter((e) => e.translation && e.translation.trim() !== "");
-          if (entries.length === 0) continue;
-          bundles.push({
-            modid: data?.modid || pack.fileName.replace(/\.jar$/i, ""),
-            modName: data?.modName || pack.fileName,
-            entries,
-            langFormat: "json" as LangFormat,
-          });
+          if (hit.kind === "mod" && entries.length > 0) {
+            bundles.push({ modid: data.modid, modName: data.modName, entries, langFormat: "json" });
+          }
+          if (hit.kind === "shader" && entries.length > 0) {
+            const dest = `${verDir}/光影包/${hit.pack.fileName.replace(/\.zip$/i, "")}_zh_CN.zip`;
+            await api.exportShaderZh(hit.pack.path, dest, entries);
+          }
+          if (hit.kind === "resourcepack" && entries.length > 0) {
+            const dest = `${verDir}/资源包/${hit.pack.fileName.replace(/\.zip$/i, "")}_改描述.zip`;
+            await api.exportResourcePackDesc(hit.pack.path, dest, entries);
+          }
+          if (hit.kind === "mod" && exportJars && entries.length > 0) {
+            await api.exportModJar(hit.pack.path, `${verDir}/汉化jar`, data.modid, entries, "json");
+          }
         }
-        const fmt = packFormatForMc(group.group.mcVersion) ?? 15;
         if (bundles.length > 0) {
-          await api.exportResourcePackMulti(verDir, bundles, fmt);
-        }
-        for (const { pack, kind } of packs) {
-          const data = parsed[pack.path];
-          const tr = translated[pack.path] ?? {};
-          const entries = (data?.entries ?? [])
-            .map((e) => ({ ...e, translation: tr[e.key] ?? e.translation }))
-            .filter((e) => e.translation && e.translation.trim() !== "");
-          if (kind === "shader" && entries.length > 0) {
-            const dest = `${verDir}/光影包/${pack.fileName.replace(/\.zip$/i, "")}_zh_CN.zip`;
-            await api.exportShaderZh(pack.path, dest, entries);
-          }
-          if (kind === "resourcepack" && entries.length > 0) {
-            const dest = `${verDir}/资源包/${pack.fileName.replace(/\.zip$/i, "")}_改描述.zip`;
-            await api.exportResourcePackDesc(pack.path, dest, entries);
-          }
-          if (kind === "mod" && exportJars && entries.length > 0) {
-            await api.exportModJar(pack.path, `${verDir}/汉化jar`, data?.modid || "mod", entries, "json");
-          }
+          await api.exportResourcePackMulti(verDir, bundles, packFormatForMc(group.group.mcVersion) ?? 15);
         }
         okVersions += 1;
       }
@@ -629,22 +589,22 @@ export function GameDirView({ settings, onSettingsUpdate }: Props) {
     } finally {
       setExporting(false);
     }
-  }, [allPacks, selected, parsed, translated, exportJars]);
+  }, [selectedIds, packByDisp, parsed, translated, exportJars]);
 
   // ── 渲染辅助 ──
-  const statusTag = (path: string, pack: GamePackEntry) => {
-    if (translatingKeys[path]) {
-      const p = packProgress[path];
+  const statusTag = (id: string) => {
+    if (translatingKeys[id]) {
+      const p = packProgress[id];
       return (
         <Tag color="processing" className="dev-pulse-tag">
           翻译中 {p ? `${p.done}/${p.total}` : ""}
         </Tag>
       );
     }
-    const c = packCounts[path];
-    if (packError[path]) {
+    const c = packCounts[id];
+    if (packError[id]) {
       return (
-        <Tooltip title={packError[path]}>
+        <Tooltip title={packError[id]}>
           <Tag color="red">失败</Tag>
         </Tooltip>
       );
@@ -657,276 +617,321 @@ export function GameDirView({ settings, onSettingsUpdate }: Props) {
         </Tag>
       );
     }
-    const fk = fileKey(pack);
-    const reuse = reuseRef.current.get(fk);
-    if (parsed[path] && reuse && Object.keys(reuse).length > 0) {
-      return <Tag color="cyan">已有可复用译文</Tag>;
-    }
     return <Tag>未翻译</Tag>;
   };
 
-  const packRow = (pack: GamePackEntry, group: GroupRow, showOrigin: boolean) => (
-    <div
-      key={pack.path}
-      style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 8px 3px 20px" }}
-    >
-      <Checkbox
-        checked={!!selected[pack.path]}
-        onChange={(e) => setSel(pack.path, e.target.checked)}
-      />
-      <Typography.Text
-        style={{ cursor: "pointer", flex: 1, minWidth: 0, fontSize: 13 }}
-        ellipsis={{ tooltip: pack.fileName }}
-        onClick={() => togglePackDetail(pack, group)}
-      >
-        {pack.fileName}
-      </Typography.Text>
-      {showOrigin && (
-        <Tag style={{ marginRight: 0 }}>
-          {group.name} · {KIND_LABEL[pack.kind as Kind]}
-        </Tag>
-      )}
-      <Typography.Text type="secondary" style={{ fontSize: 11, flexShrink: 0 }}>
-        {(pack.size / 1024 / 1024).toFixed(2)} MB
-      </Typography.Text>
-      {statusTag(pack.path, pack)}
-    </div>
-  );
+  const activeGroupRow: GroupRow | null = groups.find((g) => g.key === activeGroupKey) ?? null;
 
-  const kindSection = (group: GroupRow, kind: Kind) => {
-    const packs = packsOf(group.group, kind);
-    if (packs.length === 0) return null;
-    return (
-      <div key={kind} style={{ marginTop: 4 }}>
-        <Typography.Text type="secondary" style={{ fontSize: 12, paddingLeft: 12 }}>
-          {KIND_LABEL[kind]}（{packs.length}）
-        </Typography.Text>
-        {packs.map((p) => packRow(p, group, false))}
-      </div>
-    );
+  const activePacks = useMemo(() => {
+    if (!activeGroupRow) return null;
+    const q = search.trim().toLowerCase();
+    const out: { kind: Kind; pack: GamePackEntry }[] = [];
+    for (const kind of ["mod", "resourcepack", "shader"] as Kind[]) {
+      for (const pack of packsOf(activeGroupRow.group, kind)) {
+        if (q && !pack.fileName.toLowerCase().includes(q)) continue;
+        out.push({ kind, pack });
+      }
+    }
+    return { group: activeGroupRow, packs: out };
+  }, [activeGroupRow, search]);
+
+  const translatingCount = Object.keys(translatingKeys).length;
+  const detailData = detailId ? parsed[detailId] : null;
+  const detailHit = detailId ? packByDisp.get(detailId) : null;
+
+  const buildDetailItem = (): PackItem | null => {
+    if (!detailId || !detailData || !detailHit) return null;
+    const tr = translated[detailId] ?? {};
+    return {
+      key: detailId,
+      kind: detailData.kind,
+      name: detailHit.pack.fileName,
+      fileName: detailHit.pack.fileName,
+      sourcePath: detailHit.pack.path,
+      expanded: true,
+      checked: selectedIds.has(detailId),
+      height: 480,
+      entries: detailData.entries.map((e) => ({ ...e, translation: tr[e.key] ?? e.translation })),
+      modFile: {
+        fileName: detailHit.pack.fileName,
+        modName: detailData.modName,
+        modid: detailData.modid,
+        version: null,
+        loader: (detailData.loader as "forge" | "fabric" | "neoForge" | "quilt" | "unknown") ?? "unknown",
+        mcVersion: detailData.mcVersion,
+        langFormat: "json",
+        entries: detailData.entries,
+      },
+      langFormat: "json",
+      hasZh: false,
+      zhCount: 0,
+    };
   };
 
-  const renderGroup = (g: GroupRow) => {
-    const total =
-      g.group.mods.length + g.group.resourcepacks.length + g.group.shaderpacks.length;
-    return (
-      <div key={g.key} style={{ border: "1px solid var(--border-color)", borderRadius: 8, padding: "6px 10px", marginBottom: 10 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <Checkbox
-            checked={total > 0 && [...packsOf(g.group, "mod"), ...packsOf(g.group, "resourcepack"), ...packsOf(g.group, "shader")].every((p) => selected[p.path])}
-            indeterminate={
-              [...packsOf(g.group, "mod"), ...packsOf(g.group, "resourcepack"), ...packsOf(g.group, "shader")].some((p) => selected[p.path]) &&
-              ![...packsOf(g.group, "mod"), ...packsOf(g.group, "resourcepack"), ...packsOf(g.group, "shader")].every((p) => selected[p.path])
-            }
-            onChange={(e) => {
-              const next = { ...selected };
-              for (const p of [...packsOf(g.group, "mod"), ...packsOf(g.group, "resourcepack"), ...packsOf(g.group, "shader")]) {
-                if (e.target.checked) next[p.path] = true;
-                else delete next[p.path];
-              }
-              setSelected(next);
-            }}
-            disabled={total === 0}
-          />
-          <span
-            style={{ cursor: "pointer", userSelect: "none" }}
-            onClick={() => setExpanded((prev) => ({ ...prev, [g.key]: !prev[g.key] }))}
-          >
-            <Typography.Text strong>
-              {expanded[g.key] ? "▾ " : "▸ "}
-              {g.name}
-            </Typography.Text>
-            {g.group.mcVersion && <Tag color="blue">{g.group.mcVersion}</Tag>}
-            {!g.isRoot && !g.group.valid && <Tag color="default">无可翻译文本</Tag>}
-            <Tag>模组 {g.group.mods.length}</Tag>
-            <Tag>资源包 {g.group.resourcepacks.length}</Tag>
-            <Tag>光影 {g.group.shaderpacks.length}</Tag>
-          </span>
-        </div>
-        {expanded[g.key] && (
-          <div style={{ marginTop: 4 }}>
-            {kindSection(g, "mod")}
-            {kindSection(g, "resourcepack")}
-            {kindSection(g, "shader")}
-            {total === 0 && <Empty description="此版本没有内容包" image={Empty.PRESENTED_IMAGE_SIMPLE} />}
-          </div>
-        )}
-      </div>
-    );
+  const detailHandlers: GamePackHandlers = {
+    onToggleExpanded: () => setDetailId(null), // 收起 = 返回列表
+    onToggleChecked: (id, v) => setSelected((prev) => ({ ...prev, [id]: v })),
+    onEdit: (id, key, v) => {
+      setTranslated((prev) => ({ ...prev, [id]: { ...(prev[id] ?? {}), [key]: v } }));
+      translatedRef.current[id] = { ...(translatedRef.current[id] ?? {}), [key]: v };
+    },
+    onSelect: () => {},
+    onClear: (id, key) => {
+      setTranslated((prev) => {
+        const inner = { ...(prev[id] ?? {}) };
+        delete inner[key];
+        return { ...prev, [id]: inner };
+      });
+      const tr = (translatedRef.current[id] ??= {});
+      delete tr[key];
+    },
+    onToggleSelected: (id, key, sel) => {
+      setParsed((prev) => {
+        const d = prev[id];
+        if (!d) return prev;
+        return { ...prev, [id]: { ...d, entries: d.entries.map((e) => (e.key === key ? { ...e, selected: sel } : e)) } };
+      });
+    },
+    onToggleAllSelected: (id, sel) => {
+      setParsed((prev) => {
+        const d = prev[id];
+        if (!d) return prev;
+        return { ...prev, [id]: { ...d, entries: d.entries.map((e) => ({ ...e, selected: sel })) } };
+      });
+    },
+    onToggleManySelected: (id, keys, sel) => {
+      setParsed((prev) => {
+        const d = prev[id];
+        if (!d) return prev;
+        const ks = new Set(keys);
+        return { ...prev, [id]: { ...d, entries: d.entries.map((e) => (ks.has(e.key) ? { ...e, selected: sel } : e)) } };
+      });
+    },
+    onResize: () => {},
   };
 
   return (
-    <div style={{ padding: 12 }}>
-      <Space wrap style={{ marginBottom: 12 }}>
-        <Button icon={<FolderOpenOutlined />} loading={scanning} onClick={() => void pickRoot()}>
-          打开游戏目录
-        </Button>
-        {(settings.recentGameDirs ?? []).length > 0 && (
-          <Select
-            placeholder="最近打开的目录"
-            style={{ width: 280 }}
-            value={root ?? undefined}
-            options={(settings.recentGameDirs ?? []).map((d) => ({ label: d, value: d }))}
-            onChange={(v) => void startScan(v)}
-          />
-        )}
-        {scan && (
-          <Button icon={<ReloadOutlined />} disabled={scanning} onClick={() => void startScan(root!)}>
-            重新扫描
+    <div style={{ display: "flex", minHeight: 0, flex: 1 }}>
+      {/* 左侧：版本列表 */}
+      <div
+        style={{
+          width: 220,
+          flexShrink: 0,
+          borderRight: "1px solid var(--border-color, #E6E8EB)",
+          paddingTop: 12,
+          overflowY: "auto",
+        }}
+      >
+        <div style={{ padding: "0 12px" }}>
+          <Button block icon={<FolderOpenOutlined />} loading={scanning} onClick={() => void pickRoot()}>
+            打开游戏目录
           </Button>
-        )}
-        {scanning && (
-          <Button danger onClick={() => void api.cancelGameScan()}>
-            取消扫描
-          </Button>
-        )}
-        {scan && (
-          <>
-            <Button
-              type="primary"
-              icon={<TranslationOutlined />}
-              loading={translatingCount > 0}
-              disabled={Object.keys(selected).length === 0}
-              onClick={() => void translateSelected()}
-            >
-              开始翻译勾选项（{Object.keys(selected).length}）
-            </Button>
-            <Button
-              icon={<ExportOutlined />}
-              loading={exporting}
-              disabled={Object.keys(selected).length === 0 || translatingCount > 0}
-              onClick={() => void exportSelected()}
-            >
-              导出勾选项
-            </Button>
-          </>
-        )}
-      </Space>
-
-      {scan && (
-        <Space wrap style={{ marginBottom: 12 }}>
-          <Input
-            prefix={<SearchOutlined />}
-            placeholder="搜索内容包（结果显示所属版本）"
-            style={{ width: 260 }}
-            allowClear
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
-          <Button size="small" onClick={selectAllFiltered}>
-            全选
-          </Button>
-          <Button size="small" onClick={selectNone}>
-            全不选
-          </Button>
-          <Button size="small" onClick={() => selectKind("mod")}>
-            选所有模组
-          </Button>
-          <Button size="small" onClick={() => selectKind("resourcepack")}>
-            选所有资源包
-          </Button>
-          <Button size="small" onClick={() => selectKind("shader")}>
-            选所有光影包
-          </Button>
-          <Button size="small" onClick={selectUntranslated}>
-            只选未翻译的
-          </Button>
-          <Checkbox
-            checked={exportJars}
-            onChange={(e) => setExportJars(e.target.checked)}
-          >
-            导出时同时生成单个汉化 jar
-          </Checkbox>
-        </Space>
-      )}
-
-      {scanning && progress && (
-        <div style={{ marginBottom: 12 }}>
-          <Progress
-            percent={Math.round((progress.done / Math.max(1, progress.total)) * 100)}
-            format={() => `扫描版本 ${progress.done}/${progress.total}：${progress.current}`}
-          />
-        </div>
-      )}
-
-      {translatingCount > 0 && (
-        <div
-          onClick={() => setReportOpen(true)}
-          style={{
-            marginBottom: 12,
-            padding: "6px 12px",
-            border: "1px solid var(--border-color)",
-            borderLeft: "3px solid var(--slide-indicator-bg)",
-            borderRadius: 6,
-            cursor: "pointer",
-            fontSize: 13,
-          }}
-        >
-          翻译中：进行中 {translatingCount} 包 · 完成 {donePacks} 包 ·{" "}
-          {Object.values(packCounts).reduce((n, c) => n + c.ok + c.reused, 0)} 条成功 ·{" "}
-          {Object.values(packCounts).reduce((n, c) => n + c.error, 0)} 条失败（点击查看报告）
-        </div>
-      )}
-
-      {!scan && !scanning && (
-        <Empty description="选择 .minecraft 目录（或任意游戏目录 / 版本文件夹），自动向下扫描 mods、resourcepacks、shaderpacks" />
-      )}
-
-      {scan && filtered && (
-        <div>
-          <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 6 }}>
-            搜索"{search}"：{filtered.length} 个结果
-          </Typography.Text>
-          {filtered.length === 0 ? (
-            <Empty description="没有匹配的内容包" image={Empty.PRESENTED_IMAGE_SIMPLE} />
-          ) : (
-            filtered.map(({ group, pack }) => packRow(pack, group, true))
+          {(settings.recentGameDirs ?? []).length > 0 && (
+            <Select
+              placeholder="最近目录"
+              style={{ width: "100%", marginTop: 8 }}
+              value={root ?? undefined}
+              options={(settings.recentGameDirs ?? []).map((d) => ({ label: d, value: d }))}
+              onChange={(v) => void startScan(v)}
+            />
           )}
         </div>
-      )}
+        {scanning && progress && (
+          <div style={{ padding: "12px 12px 0" }}>
+            <Progress
+              percent={Math.round((progress.done / Math.max(1, progress.total)) * 100)}
+              size="small"
+              format={() => `${progress.done}/${progress.total}`}
+            />
+            <Button size="small" danger block onClick={() => void api.cancelGameScan()}>
+              取消扫描
+            </Button>
+          </div>
+        )}
+        {!scan && !scanning && (
+          <Typography.Text
+            type="secondary"
+            style={{ fontSize: 12, display: "block", padding: "12px 12px 0", lineHeight: 1.7 }}
+          >
+            选择 .minecraft 目录（或任意游戏目录 / 版本文件夹），自动向下扫描 mods、resourcepacks、shaderpacks
+          </Typography.Text>
+        )}
+        {scan && (
+          <div style={{ marginTop: 10 }}>
+            {[
+              { key: "__root__", name: "公共目录", g: scan.rootGroup },
+              ...scan.versions.map((v) => ({ key: "v:" + v.dirName, name: v.dirName, g: v })),
+            ].map((row) => (
+              <div
+                key={row.key}
+                onClick={() => {
+                  setActiveGroupKey(row.key);
+                  setDetailId(null);
+                }}
+                style={{
+                  padding: "6px 12px",
+                  cursor: "pointer",
+                  background: activeGroupKey === row.key ? "var(--slide-indicator-bg)" : "transparent",
+                  color: activeGroupKey === row.key ? "#fff" : "inherit",
+                }}
+              >
+                <div style={{ fontWeight: activeGroupKey === row.key ? 600 : 400 }}>{row.name}</div>
+                <div style={{ fontSize: 11, opacity: 0.8 }}>
+                  模组 {row.g.mods.length} · 资源包 {row.g.resourcepacks.length} · 光影 {row.g.shaderpacks.length}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
-      {scan && !filtered && (
-        <div>
-          {groups.map(renderGroup)}
-        </div>
-      )}
+      {/* 右侧主区 */}
+      <div style={{ flex: 1, minWidth: 0, padding: 12, overflowY: "auto" }}>
+        {!scan && !scanning && <Empty description="先在左侧打开并扫描游戏目录" />}
+        {scanning && !progress && <Spin style={{ display: "block", margin: "60px auto" }} />}
+        {scan && !activeGroupRow && <Empty description="在左侧选择一个版本查看内容包" />}
 
-      {expandedPack && parsed[expandedPack] && (
-        <Modal
-          title={`内容包详情：${expandedPack.split(/[\\/]/).pop()}`}
-          open
-          width={960}
-          footer={null}
-          destroyOnClose
-          onCancel={() => setExpandedPack(null)}
-        >
-          <EntryTable
-            entries={parsed[expandedPack].entries.map((e) => ({
-              ...e,
-              translation: translated[expandedPack]?.[e.key] ?? e.translation,
-            }))}
-            onEdit={(key, v) => {
-              setTranslated((prev) => ({
-                ...prev,
-                [expandedPack]: { ...(prev[expandedPack] ?? {}), [key]: v },
-              }));
-              translatedRef.current[expandedPack] = {
-                ...(translatedRef.current[expandedPack] ?? {}),
-                [key]: v,
-              };
-            }}
-            onSelect={() => {}}
-            onClear={(key) => {
-              const next = { ...(translated[expandedPack] ?? {}) };
-              delete next[key];
-              setTranslated({ ...translated, [expandedPack]: next });
-              const tr = (translatedRef.current[expandedPack] ??= {});
-              delete tr[key];
-            }}
-            scrollY={420}
-          />
-        </Modal>
-      )}
+        {scan && activeGroupRow && activePacks && !detailId && (
+          <div>
+            <Space wrap style={{ marginBottom: 10 }}>
+              <Typography.Text strong>
+                {activeGroupRow.name}
+                {activeGroupRow.group.mcVersion && (
+                  <Tag color="blue" style={{ marginLeft: 6 }}>
+                    {activeGroupRow.group.mcVersion}
+                  </Tag>
+                )}
+              </Typography.Text>
+              <Input
+                prefix={<SearchOutlined />}
+                placeholder="搜索内容包"
+                style={{ width: 220 }}
+                allowClear
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+              <Button
+                size="small"
+                onClick={() => {
+                  const next = { ...selected };
+                  for (const { pack } of activePacks.packs)
+                    next[dispId(activeGroupRow, pack.kind, pack)] = true;
+                  setSelected(next);
+                }}
+              >
+                全选本版本
+              </Button>
+              <Button size="small" onClick={() => setSelected({})}>
+                全不选
+              </Button>
+              <Button
+                type="primary"
+                size="small"
+                icon={<TranslationOutlined />}
+                disabled={selectedIds.size === 0}
+                loading={translatingCount > 0}
+                onClick={() => {
+                  const ids = activePacks.packs
+                    .map((p) => dispId(activeGroupRow, p.kind, p.pack))
+                    .filter((id) => selectedIds.has(id));
+                  void translateIds(ids);
+                }}
+              >
+                翻译本版本勾选项
+              </Button>
+              <Button
+                size="small"
+                icon={<ExportOutlined />}
+                loading={exporting}
+                disabled={selectedIds.size === 0 || translatingCount > 0}
+                onClick={() => void exportSelected()}
+              >
+                导出勾选项
+              </Button>
+              <Checkbox
+                checked={exportJars}
+                onChange={(e) => setExportJars(e.target.checked)}
+              >
+                同时导出单个汉化 jar
+              </Checkbox>
+            </Space>
+            {activePacks.packs.length === 0 ? (
+              <Empty description="此版本没有内容包" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+            ) : (
+              ["mod", "resourcepack", "shader"].map((kind) => {
+                const list = activePacks.packs.filter((p) => p.kind === (kind as Kind));
+                if (list.length === 0) return null;
+                return (
+                  <div key={kind} style={{ marginBottom: 14 }}>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      {KIND_LABEL[kind as Kind]}（{list.length}）
+                    </Typography.Text>
+                    {list.map(({ pack }) => {
+                      const kindK = kind as Kind;
+                      const id = dispId(activeGroupRow, kindK, pack);
+                      return (
+                        <div key={pack.path} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 8px" }}>
+                          <Checkbox
+                            checked={selectedIds.has(id)}
+                            onChange={(e) => setSelected((prev) => ({ ...prev, [id]: e.target.checked }))}
+                          />
+                          <Typography.Text
+                            style={{ cursor: "pointer", flex: 1, minWidth: 0, fontSize: 13 }}
+                            ellipsis={{ tooltip: pack.fileName }}
+                            onClick={() => {
+                              setDetailId(id);
+                              void ensureParsed(id);
+                            }}
+                          >
+                            {pack.fileName}
+                          </Typography.Text>
+                          <Typography.Text type="secondary" style={{ fontSize: 11, flexShrink: 0 }}>
+                            {(pack.size / 1024 / 1024).toFixed(2)} MB
+                          </Typography.Text>
+                          {statusTag(id)}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })
+            )}
+          </div>
+        )}
+
+        {detailId && (
+          <div>
+            <Space wrap style={{ marginBottom: 8 }} align="center">
+              <Button onClick={() => setDetailId(null)}>← 返回列表</Button>
+              <Typography.Text strong>{detailHit?.pack.fileName}</Typography.Text>
+              <Tag color="blue">{activeGroupRow?.name}</Tag>
+              {statusTag(detailId)}
+              <Button
+                type="primary"
+                size="small"
+                icon={<TranslationOutlined />}
+                loading={!!translatingKeys[detailId]}
+                onClick={() => void translateIds([detailId])}
+              >
+                翻译此包
+              </Button>
+            </Space>
+            {packError[detailId] && (
+              <Typography.Paragraph type="danger">{packError[detailId]}</Typography.Paragraph>
+            )}
+            {!detailData && <Spin style={{ display: "block", margin: "40px auto" }} />}
+            {detailData && detailHit && (
+              <div>
+                {renderPackCard(
+                  buildDetailItem()!,
+                  detailHandlers,
+                  { thisTranslating: !!translatingKeys[detailId], packProgress: packProgress[detailId] },
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* 扫描汇总弹窗 */}
       <Modal
@@ -943,10 +948,10 @@ export function GameDirView({ settings, onSettingsUpdate }: Props) {
             <Typography.Paragraph>
               共 {scanSummary.scan.versions.length + 1} 个分组（含公共目录）、
               <b>{scanSummary.packTotal}</b> 个内容包。
-              {dupFileKeys > 0 && (
+              {scanSummary.dup > 0 && (
                 <>
                   <br />
-                  跨版本重复 {dupFileKeys} 个（同名同大小），翻译时将自动复用译文。
+                  跨版本重复 {scanSummary.dup} 个（同名同大小），翻译时将自动复用译文。
                 </>
               )}
             </Typography.Paragraph>
@@ -960,13 +965,13 @@ export function GameDirView({ settings, onSettingsUpdate }: Props) {
         )}
       </Modal>
 
-      {/* 翻译报告弹窗（实时/结束后均可查看） */}
+      {/* 翻译报告弹窗 */}
       <Modal
         title="翻译报告"
         open={reportOpen}
         onCancel={() => setReportOpen(false)}
         footer={[
-          failedPaths.length > 0 && (
+          Object.entries(packCounts).some(([, c]) => c.error > 0) && (
             <Button key="retry" onClick={retryFailed}>
               重试失败项
             </Button>
@@ -981,38 +986,28 @@ export function GameDirView({ settings, onSettingsUpdate }: Props) {
           <Empty description="暂无数据" image={Empty.PRESENTED_IMAGE_SIMPLE} />
         ) : (
           <div style={{ maxHeight: 380, overflowY: "auto" }}>
-            {allPacks
-              .filter(({ pack }) => packCounts[pack.path])
-              .map(({ pack, group }) => {
-                const err = packError[pack.path];
-                return (
-                  <div key={pack.path} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
-                    <Tag style={{ marginRight: 0 }}>{group.name}</Tag>
-                    <Typography.Text style={{ flex: 1, minWidth: 0 }} ellipsis={{ tooltip: pack.fileName }}>
-                      {pack.fileName}
+            {Object.entries(packCounts).map(([id, c]) => {
+              const err = packError[id];
+              return (
+                <div key={id} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
+                  <Typography.Text style={{ flex: 1, minWidth: 0, fontSize: 12 }} ellipsis={{ tooltip: id }}>
+                    {id}
+                  </Typography.Text>
+                  {statusTag(id)}
+                  <Tag color="green" style={{ marginRight: 0 }}>
+                    {c.ok + c.reused} 条
+                  </Tag>
+                  {err && (
+                    <Typography.Text type="danger" style={{ fontSize: 11 }}>
+                      {err.slice(0, 60)}
                     </Typography.Text>
-                    {statusTag(pack.path, pack)}
-                    {err && (
-                      <Typography.Text type="danger" style={{ fontSize: 11 }}>
-                        {err.slice(0, 60)}
-                      </Typography.Text>
-                    )}
-                  </div>
-                );
-              })}
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </Modal>
     </div>
   );
-}
-
-function findPack(scan: GameDirScan, path: string): GamePackEntry | null {
-  const all = [scan.rootGroup, ...scan.versions];
-  for (const g of all) {
-    for (const p of [...g.mods, ...g.resourcepacks, ...g.shaderpacks]) {
-      if (p.path === path) return p;
-    }
-  }
-  return null;
 }
