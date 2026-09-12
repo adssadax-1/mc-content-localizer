@@ -133,6 +133,7 @@ pub fn run() {
             commands::clear_session_cache,
             game_dir::scan_game_dir,
             game_dir::cancel_game_scan,
+            game_dir::path_is_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

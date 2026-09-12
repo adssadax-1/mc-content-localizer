@@ -179,6 +179,7 @@ export const api = {
   /** 游戏目录模式：扫描 .minecraft / versions（后台 + 进度事件，可取消） */
   scanGameDir: (root: string) => invoke<GameDirScan>("scan_game_dir", { root }),
   cancelGameScan: () => invoke<void>("cancel_game_scan"),
+  pathIsDir: (path: string) => invoke<boolean>("path_is_dir", { path }),
   devReadTextFile: (path: string) => invoke<string>("dev_read_text_file", { path }),
   devEncodePairs: (format: string, pairs: [string, string][]) =>
     invoke<string>("dev_encode_pairs", { format, pairs }),

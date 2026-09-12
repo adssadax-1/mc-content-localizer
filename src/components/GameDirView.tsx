@@ -35,6 +35,9 @@ import type { PackItem } from "../App";
 interface Props {
   settings: Settings;
   onSettingsUpdate: (s: Settings) => void;
+  /** 外部（拖入/选择文件夹）请求自动扫描的目录；消费后由 App 置回 null */
+  autoScanDir?: string | null;
+  onAutoScanConsumed?: () => void;
   /** App 提供：用自由导入同款 PackCard 渲染内容包详情（全功能 EntryTable） */
   renderPackCard: (
     item: PackItem,
@@ -85,7 +88,7 @@ function packsOf(g: GameVersionGroup, kind: Kind): GamePackEntry[] {
 
 const fileKey = (p: GamePackEntry) => `${p.fileName}|${p.size}`;
 
-export function GameDirView({ settings, onSettingsUpdate, renderPackCard }: Props) {
+export function GameDirView({ settings, onSettingsUpdate, autoScanDir, onAutoScanConsumed, renderPackCard }: Props) {
   const [root, setRoot] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number; current: string } | null>(null);
@@ -114,6 +117,7 @@ export function GameDirView({ settings, onSettingsUpdate, renderPackCard }: Prop
   const countsRef = useRef<Record<string, PackCount>>({});
   const translatedRef = useRef<Record<string, Record<string, string>>>({});
   const fileKeysRef = useRef<Record<string, string>>({});
+  const startScanRef = useRef<(dir: string) => Promise<void>>(async () => {});
 
   // ── 事件监听 ──
   useEffect(() => {
@@ -166,6 +170,14 @@ export function GameDirView({ settings, onSettingsUpdate, renderPackCard }: Prop
       un.then((f) => f());
     };
   }, [translatingKeys]);
+
+  // 外部触发的自动扫描（导入文件夹时切页并扫描）
+  useEffect(() => {
+    if (autoScanDir) {
+      void startScanRef.current(autoScanDir);
+      onAutoScanConsumed?.();
+    }
+  }, [autoScanDir]);
 
   // ── 会话缓存恢复（gamedir 独立缓存）──
   useEffect(() => {
@@ -302,6 +314,7 @@ export function GameDirView({ settings, onSettingsUpdate, renderPackCard }: Prop
     },
     [persistRecent],
   );
+  startScanRef.current = startScan;
 
   const pickRoot = useCallback(async () => {
     const dir = await open({ directory: true, title: "选择 .minecraft 目录或任意游戏目录（会自动向下扫描）" });

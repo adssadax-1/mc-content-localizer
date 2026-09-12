@@ -529,6 +529,8 @@ function AppInner({
   const [workMode, setWorkMode] = useState<"free" | "gamedir">("free");
   const workModeRef = useRef<"free" | "gamedir">("free");
   if (workModeRef.current !== workMode) workModeRef.current = workMode;
+  // 拖入/选择文件夹后自动进入游戏目录模式并扫描（GameDirView 消费后清空）
+  const [gamedirAutoScan, setGamedirAutoScan] = useState<string | null>(null);
 
   // 启动恢复询问：有会话缓存（上次未清空就退出/崩溃）时询问是否恢复内容包列表
   useEffect(() => {
@@ -928,11 +930,19 @@ function AppInner({
   }
 
   async function addFiles(paths: string[]) {
-    if (workModeRef.current === "gamedir") {
-      message.info("当前为游戏目录模式：请切换到「自由导入」后再导入单个内容包");
-      return;
+    // 导入路由：文件夹 → 切换游戏目录并扫描；内容包文件 → 自由导入
+    const dirPaths: string[] = [];
+    const filePaths: string[] = [];
+    for (const p of paths) {
+      if (await api.pathIsDir(p)) dirPaths.push(p);
+      else filePaths.push(p);
     }
-    const files = paths.filter(
+    if (dirPaths.length > 0) {
+      setWorkMode("gamedir");
+      setGamedirAutoScan(dirPaths[0]);
+      if (filePaths.length === 0) return;
+    }
+    const files = filePaths.filter(
       (p) => p.toLowerCase().endsWith(".jar") || p.toLowerCase().endsWith(".zip"),
     );
     if (files.length === 0) {
@@ -1679,6 +1689,14 @@ function AppInner({
           </Typography.Title>
           {queue.length > 0 && <Tag color="blue">{queue.length} {t("app.tag")}</Tag>}
         </Space>
+        <Segmented
+          value={workMode}
+          onChange={(v) => setWorkMode((v as string) === "gamedir" ? "gamedir" : "free")}
+          options={[
+            { label: "自由导入", value: "free" },
+            { label: "游戏目录", value: "gamedir" },
+          ]}
+        />
         <Space>
           <Button type="text" icon={<GithubOutlined />} onClick={openGithub} className="app-github-btn">
             {t("app.github")}
@@ -1737,6 +1755,8 @@ function AppInner({
             <GameDirView
               settings={settings!}
               onSettingsUpdate={setSettings}
+              autoScanDir={gamedirAutoScan}
+              onAutoScanConsumed={() => setGamedirAutoScan(null)}
               renderPackCard={(item, handlers, opts) => (
                 <PackCard
                   item={item}

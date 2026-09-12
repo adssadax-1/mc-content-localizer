@@ -199,6 +199,12 @@ pub fn cancel_game_scan() {
     GAME_SCAN_CANCEL.store(true, Ordering::Relaxed);
 }
 
+/// 判断路径是否为文件夹（前端导入路由：文件夹→游戏目录模式，文件→自由导入）
+#[tauri::command]
+pub fn path_is_dir(path: String) -> bool {
+    std::path::Path::new(&path).is_dir()
+}
+
 /// 供前端检查应用配置目录（会话缓存等）
 pub fn app_config_dir_exists(app: &AppHandle) -> bool {
     app.path().app_config_dir().is_ok()
