@@ -160,7 +160,7 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
     if (!scan) return [];
     const seen = new Map<string, number>();
     return scan.groups.map((g) => {
-      let name = g.dirName;
+      let name = g.relPath === "" ? t("gamedir.publicDir") : g.dirName;
       const c = seen.get(name) ?? 0;
       seen.set(name, c + 1);
       if (c > 0) name = `${name} (${c + 1})`;
@@ -328,6 +328,12 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
                       e.stopPropagation();
                       const list = (settings.recentGameDirs ?? []).filter((x) => x !== d);
                       onSettingsUpdate({ ...settings, recentGameDirs: list });
+                      if (root === d) {
+                        setScan(null);
+                        setRoot(null);
+                        setSelected({});
+                        setActiveGroup(null);
+                      }
                     }}
                   />
                 </div>

@@ -80,6 +80,80 @@ fn scan_dir_packs(dir: &std::path::Path, kind: &str) -> Vec<GamePackEntry> {
     out
 }
 
+/// 直接扫描目录内的内容包文件（文件夹名作为分类提示，名称不匹配时读 zip 内容判定）
+fn scan_dir_packs_direct(
+    dir: &std::path::Path,
+) -> (Vec<GamePackEntry>, Vec<GamePackEntry>, Vec<GamePackEntry>) {
+    let name_hint = dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default();
+
+    let mut mods = Vec::new();
+    let mut rps = Vec::new();
+    let mut sps = Vec::new();
+
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_file() {
+                continue;
+            }
+            let ext = p
+                .extension()
+                .and_then(|x| x.to_str())
+                .map(|x| x.to_lowercase());
+
+            let kind: &str = match (name_hint.as_str(), ext.as_deref()) {
+                // 文件夹名为 mods → .jar = mod
+                ("mods", Some("jar")) => "mod",
+                // 文件夹名为 resourcepacks → .zip = resourcepack
+                ("resourcepacks", Some("zip")) => "resourcepack",
+                // 文件夹名为 shaderpacks → .zip = shader
+                ("shaderpacks", Some("zip")) => "shader",
+                // 通用文件夹：.jar = mod
+                (_, Some("jar")) => "mod",
+                // 通用文件夹：.zip → 读 zip 中央目录判定类型
+                (_, Some("zip")) => {
+                    match crate::core::pack::detect_pack_type(&p) {
+                        Ok(crate::core::pack::PackType::Shader) => "shader",
+                        Ok(crate::core::pack::PackType::ResourcePack) => "resourcepack",
+                        Ok(crate::core::pack::PackType::Mod) => "mod",
+                        Err(_) => "resourcepack", // 无法识别时默认资源包
+                    }
+                }
+                _ => continue,
+            };
+
+            let entry = GamePackEntry {
+                path: p.to_string_lossy().to_string(),
+                file_name: p
+                    .file_name()
+                    .map(|x| x.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                size: e.metadata().map(|m| m.len()).unwrap_or(0),
+                kind: kind.to_string(),
+            };
+            match kind {
+                "mod" => mods.push(entry),
+                "resourcepack" => rps.push(entry),
+                "shader" => sps.push(entry),
+                _ => {}
+            }
+        }
+    }
+
+    let cmp = |a: &GamePackEntry, b: &GamePackEntry| {
+        a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase())
+    };
+    mods.sort_by(cmp);
+    rps.sort_by(|a, b| a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase()));
+    sps.sort_by(|a, b| a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase()));
+
+    (mods, rps, sps)
+}
+
 /// 递归向下扫描：找到所有含 mods / resourcepacks / shaderpacks 的文件夹作为版本分组
 fn collect_groups(
     dir: &std::path::Path,
@@ -113,6 +187,33 @@ fn collect_groups(
             "game-scan-progress",
             serde_json::json!({ "done": out.len(), "total": 0, "current": rel }),
         );
+    } else {
+        // 回退：目录本身不含 mods/resourcepacks/shaderpacks 子目录时，
+        // 直接扫描当前目录内的 .jar/.zip 文件（支持直接指向 mods 文件夹等场景）
+        let (dm, dr, ds) = scan_dir_packs_direct(dir);
+        if !dm.is_empty() || !dr.is_empty() || !ds.is_empty() {
+            let dir_name = if rel.is_empty() {
+                dir.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "root".to_string())
+            } else {
+                rel.split('/').next_back().unwrap_or(rel).to_string()
+            };
+            out.push(GameVersionGroup {
+                rel_path: rel.to_string(),
+                dir_name,
+                mc_version: None,
+                valid: false,
+                mods: dm,
+                resourcepacks: dr,
+                shaderpacks: ds,
+            });
+            let _ = app.emit(
+                "game-scan-progress",
+                serde_json::json!({ "done": out.len(), "total": 0, "current": rel }),
+            );
+        }
     }
 
     // 继续向下递归（跳过已识别的内容包目录与无关大目录）
@@ -123,7 +224,7 @@ fn collect_groups(
                 continue;
             }
             let name = e.file_name().to_string_lossy().to_string();
-            // 精确跳过无关大目录（不再一刀切跳过隐藏目录——.minecraft 本身就是隐藏名）
+            // 精确跳过无关大目录 + 内容包子目录（父级已扫描，防止重复）
             if matches!(
                 name.as_str(),
                 "libraries"
@@ -140,6 +241,9 @@ fn collect_groups(
                     | ".cache"
                     | "Cache"
                     | "cococa"
+                    | "mods"
+                    | "resourcepacks"
+                    | "shaderpacks"
             ) || name.ends_with("-natives")
                 || name == ".voxy"
                 || name == ".physics_mod_cache"
