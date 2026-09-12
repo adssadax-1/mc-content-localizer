@@ -241,10 +241,7 @@ body {
   .pack-card,
   .pack-card-expanded-content,
   .alert-slide,
-  .provider-grid-card,
-  .slide-nav-indicator,
-  .panel-anim-root .panel-anim,
-  .dz-stagger .dz-layer {
+  .provider-grid-card {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
