@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from "react";
 import {
   Button,
   Card,
@@ -1545,6 +1545,27 @@ function ExportPreviewTab() {
 
 // ── 主面板 ────────────────────────────────────────────────────────────────────
 /**
+ * 标签页内容包装：挂载时给直接子块分配左右交替滑入动画（min(i,4)*40ms 封顶）。
+ * Tabs 设 destroyInactiveTabPane，每次切换都重新挂载 → 动画重播。
+ */
+function DevTabBody({ k, animate, children }: { k: string; animate: boolean; children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el || !animate) return;
+    [].slice.call(el.children).forEach((c: HTMLElement, i: number) => {
+      c.classList.add(i % 2 === 0 ? "dev-tab-l" : "dev-tab-r");
+      c.style.animationDelay = `${Math.min(i, 4) * 40}ms`;
+    });
+  }, [k]);
+  return (
+    <div ref={ref} style={{ height: "100%" }}>
+      {children}
+    </div>
+  );
+}
+
+/**
  * 开发者工具窗口内容（渲染在独立第二窗口中，见 src/devtools/DevToolsRoot.tsx）。
  * 独立窗口有自己的 React 实例：主题/语言由 DevToolsRoot 单独接线；
  * Tauri 事件（含 dev-*）是 app 级广播，本窗口能直接收到；
@@ -1552,6 +1573,8 @@ function ExportPreviewTab() {
  */
 export function DevToolsWindow() {
   const { t } = useTranslationContext();
+  // 标签页错峰动画：首次打开不播，之后每次切换重播
+  const [tabSwitched, setTabSwitched] = useState(false);
 
   // 订阅 Tauri 事件（挂载即注册，卸载时清理）
   useEffect(() => {
@@ -1585,24 +1608,21 @@ export function DevToolsWindow() {
     };
   }, []);
 
-  const tabItems = useMemo(
-    () => [
-      { key: "eventStream", label: t("devtools.tab.eventStream"), children: <EventStreamTab /> },
-      { key: "invokeLog", label: t("devtools.tab.invokeLog"), children: <InvokeLogTab /> },
-      { key: "requestResponse", label: t("devtools.tab.requestResponse"), children: <RequestResponseTab /> },
-      { key: "retryChain", label: t("devtools.tab.retryChain"), children: <RetryChainTab /> },
-      { key: "threadSchedule", label: t("devtools.tab.threadSchedule"), children: <ThreadScheduleTab /> },
-      { key: "injection", label: t("devtools.tab.injection"), children: <InjectionTab /> },
-      { key: "parserTestbed", label: t("devtools.tab.parserTestbed"), children: <ParserTestbedTab /> },
-      { key: "exportPreview", label: t("devtools.tab.exportPreview"), children: <ExportPreviewTab /> },
-    ],
-    [t]
-  );
+  const tabItems = [
+    { key: "eventStream", label: t("devtools.tab.eventStream"), children: <DevTabBody k="eventStream" animate={tabSwitched}><EventStreamTab /></DevTabBody> },
+    { key: "invokeLog", label: t("devtools.tab.invokeLog"), children: <DevTabBody k="invokeLog" animate={tabSwitched}><InvokeLogTab /></DevTabBody> },
+    { key: "requestResponse", label: t("devtools.tab.requestResponse"), children: <DevTabBody k="requestResponse" animate={tabSwitched}><RequestResponseTab /></DevTabBody> },
+    { key: "retryChain", label: t("devtools.tab.retryChain"), children: <DevTabBody k="retryChain" animate={tabSwitched}><RetryChainTab /></DevTabBody> },
+    { key: "threadSchedule", label: t("devtools.tab.threadSchedule"), children: <DevTabBody k="threadSchedule" animate={tabSwitched}><ThreadScheduleTab /></DevTabBody> },
+    { key: "injection", label: t("devtools.tab.injection"), children: <DevTabBody k="injection" animate={tabSwitched}><InjectionTab /></DevTabBody> },
+    { key: "parserTestbed", label: t("devtools.tab.parserTestbed"), children: <DevTabBody k="parserTestbed" animate={tabSwitched}><ParserTestbedTab /></DevTabBody> },
+    { key: "exportPreview", label: t("devtools.tab.exportPreview"), children: <DevTabBody k="exportPreview" animate={tabSwitched}><ExportPreviewTab /></DevTabBody> },
+  ];
 
   return (
     <div style={{ height: "100vh", display: "flex", flexDirection: "column", overflow: "hidden" }}>
       <div style={{ padding: "10px 16px 0" }}>
-        <Tabs items={tabItems} size="small" style={{ height: "100%" }} />
+        <Tabs items={tabItems} size="small" style={{ height: "100%" }} destroyInactiveTabPane onChange={() => setTabSwitched(true)} />
       </div>
     </div>
   );
