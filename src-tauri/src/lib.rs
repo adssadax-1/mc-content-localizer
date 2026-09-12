@@ -1,6 +1,7 @@
 mod commands;
 mod core;
 mod export;
+mod game_dir;
 mod settings;
 mod translate;
 #[cfg(feature = "devtools")]
@@ -130,6 +131,8 @@ pub fn run() {
             commands::save_session_cache,
             commands::load_session_cache,
             commands::clear_session_cache,
+            game_dir::scan_game_dir,
+            game_dir::cancel_game_scan,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

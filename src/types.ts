@@ -177,6 +177,32 @@ export interface Settings {
   language: 'zh' | 'en';
   /** 主窗口关闭行为：exit 直接退出 / minimize 最小化到托盘 */
   closeBehavior: 'exit' | 'minimize';
+  /** 最近打开的游戏目录（游戏目录模式快速重选） */
+  recentGameDirs: string[];
+}
+
+/** 游戏目录模式：扫描结果 */
+export interface GamePackEntry {
+  path: string;
+  fileName: string;
+  size: number;
+  kind: 'mod' | 'shader' | 'resourcepack';
+}
+
+export interface GameVersionGroup {
+  dirName: string;
+  mcVersion: string | null;
+  /** 版本文件夹是否含版本 jar/json（否则无可翻译内容） */
+  valid: boolean;
+  mods: GamePackEntry[];
+  resourcepacks: GamePackEntry[];
+  shaderpacks: GamePackEntry[];
+}
+
+export interface GameDirScan {
+  root: string;
+  rootGroup: GameVersionGroup;
+  versions: GameVersionGroup[];
 }
 
 /** 多线程翻译配置（实验性） */

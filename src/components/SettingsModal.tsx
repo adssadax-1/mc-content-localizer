@@ -379,6 +379,7 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
         requestIntervalSec: Math.min(Math.max(v.requestIntervalSec ?? 4, 1), 60),
       },
       packParallelEnabled: v.packParallelEnabled ?? false,
+      recentGameDirs: settings?.recentGameDirs ?? [],
       packParallelCount: Math.max(v.packParallelCount ?? 2, 0),
       deepScan: v.deepScan ?? false,
       theme: v.theme === "dark" ? "dark" : "light",

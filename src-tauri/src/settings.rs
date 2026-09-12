@@ -100,6 +100,9 @@ pub struct Settings {
   /// 主窗口关闭行为：exit（直接退出，默认）/ minimize（最小化到托盘）
   #[serde(default = "default_close_behavior")]
   pub close_behavior: String,
+  /// 最近打开的游戏目录（游戏目录模式快速重选，最多保留 5 个）
+  #[serde(default)]
+  pub recent_game_dirs: Vec<String>,
 }
 
 impl Default for Settings {
@@ -120,6 +123,7 @@ impl Default for Settings {
             theme: default_theme(),
             language: default_language(),
             close_behavior: default_close_behavior(),
+            recent_game_dirs: Vec::new(),
         }
     }
 }

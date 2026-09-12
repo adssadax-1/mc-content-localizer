@@ -7,6 +7,7 @@ import {
   Drawer,
   InputNumber,
   Layout,
+  Segmented,
   message,
   Modal,
   notification,
@@ -45,6 +46,7 @@ import enUS from "antd/locale/en_US";
 import { api as rawApi, createDevApi, onFileDropped, onGlossaryDone, onTranslateProgress, onTranslationBatch } from "./api";
 import { DropZone } from "./components/DropZone";
 import { SlideNav } from "./components/SlideNav";
+import { GameDirView } from "./components/GameDirView";
 import { EntryTable } from "./components/EntryTable";
 import { ContextPanel } from "./components/ContextPanel";
 import { SettingsModal } from "./components/SettingsModal";
@@ -523,13 +525,17 @@ function AppInner({
   const cancelRequestedRef = useRef(false);
   // 会话缓存：启动恢复只尝试一次
   const sessionRestoreTriedRef = useRef(false);
+  // 主界面模式：free 自由导入（原逻辑）/ gamedir 游戏目录（.minecraft 扫描）
+  const [workMode, setWorkMode] = useState<"free" | "gamedir">("free");
+  const workModeRef = useRef<"free" | "gamedir">("free");
+  if (workModeRef.current !== workMode) workModeRef.current = workMode;
 
   // 启动恢复询问：有会话缓存（上次未清空就退出/崩溃）时询问是否恢复内容包列表
   useEffect(() => {
     if (!settings || sessionRestoreTriedRef.current) return;
     sessionRestoreTriedRef.current = true;
     api
-      .loadSessionCache()
+      .loadSessionCache("free")
       .then((raw) => {
         if (!raw) return;
         try {
@@ -554,12 +560,12 @@ function AppInner({
               message.success(`已恢复 ${packs.length} 个内容包`);
             },
             onCancel: () => {
-              void api.clearSessionCache();
+              void api.clearSessionCache("free");
             },
           });
         } catch {
           // 缓存损坏：静默清除
-          void api.clearSessionCache();
+          void api.clearSessionCache("free");
         }
       })
       .catch(() => {});
@@ -569,7 +575,7 @@ function AppInner({
   useEffect(() => {
     const timer = setTimeout(() => {
       if (queue.length === 0) {
-        void api.clearSessionCache();
+        void api.clearSessionCache("free");
         return;
       }
       const plain = queue.map((it) => ({
@@ -577,7 +583,7 @@ function AppInner({
         entries: it.entries.map((e) => ({ ...e, translating: false })),
       }));
       void api
-        .saveSessionCache(JSON.stringify({ version: 1, savedAt: Date.now(), packs: plain }))
+        .saveSessionCache("free", JSON.stringify({ version: 1, savedAt: Date.now(), packs: plain }))
         .catch(() => {});
     }, 1500);
     return () => clearTimeout(timer);
@@ -922,6 +928,10 @@ function AppInner({
   }
 
   async function addFiles(paths: string[]) {
+    if (workModeRef.current === "gamedir") {
+      message.info("当前为游戏目录模式：请切换到「自由导入」后再导入单个内容包");
+      return;
+    }
     const files = paths.filter(
       (p) => p.toLowerCase().endsWith(".jar") || p.toLowerCase().endsWith(".zip"),
     );
@@ -1413,7 +1423,7 @@ function AppInner({
         setSelectedKey(null);
         setProgress(null);
         setTranslating(false);
-        void api.clearSessionCache();
+        void api.clearSessionCache("free");
         message.success("已清空列表");
       },
     });
@@ -1721,6 +1731,23 @@ function AppInner({
         </Sider>
 
         <Content style={{ padding: 12, overflow: "auto" }}>
+          <Segmented
+            style={{ marginBottom: 10 }}
+            value={workMode}
+            onChange={(v) => setWorkMode(v as "free" | "gamedir")}
+            options={[
+              { label: "自由导入", value: "free" },
+              { label: "游戏目录", value: "gamedir" },
+            ]}
+          />
+          {workMode === "gamedir" ? (
+            <>
+              {settings && (
+                <GameDirView settings={settings} onSettingsUpdate={setSettings} />
+              )}
+            </>
+          ) : (
+          <>
           {visibleQueue.length === 0 ? (
             <div style={{ height: "100%" }}>
               <DropZone
@@ -1822,6 +1849,8 @@ function AppInner({
                 ))}
               </div>
             </div>
+          )}
+          </>
           )}
         </Content>
       </Layout>
@@ -2120,6 +2149,7 @@ function App() {
           customPrompts: s.customPrompts ?? {},
           batchSizeAuto: s.batchSizeAuto ?? true,
           packParallelEnabled: s.packParallelEnabled ?? false,
+          recentGameDirs: s.recentGameDirs ?? [],
           closeBehavior: s.closeBehavior === "minimize" ? "minimize" : "exit",
           packParallelCount: s.packParallelCount ?? 2,
           deepScan: s.deepScan ?? false,

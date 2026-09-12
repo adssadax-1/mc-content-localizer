@@ -20,6 +20,7 @@ import type {
   TranslateContext,
   TranslatedItem,
   UpdateInfo,
+  GameDirScan,
 } from "./types";
 
 export const api = {
@@ -168,15 +169,29 @@ export const api = {
     }),
   devClearFault: () => invoke<void>("dev_clear_fault"),
   /** 会话缓存：崩溃/关闭后恢复内容包列表 */
-  saveSessionCache: (content: string) => invoke<void>("save_session_cache", { content }),
-  loadSessionCache: () => invoke<string | null>("load_session_cache"),
-  clearSessionCache: () => invoke<void>("clear_session_cache"),
+  /** 会话缓存：崩溃/关闭后恢复内容包列表（name: free / gamedir 两种模式独立） */
+  saveSessionCache: (name: string, content: string) =>
+    invoke<void>("save_session_cache", { name, content }),
+  loadSessionCache: (name: string) => invoke<string | null>("load_session_cache", { name }),
+  clearSessionCache: (name: string) => invoke<void>("clear_session_cache", { name }),
+  /** 游戏目录模式：扫描 .minecraft / versions（后台 + 进度事件，可取消） */
+  scanGameDir: (root: string) => invoke<GameDirScan>("scan_game_dir", { root }),
+  cancelGameScan: () => invoke<void>("cancel_game_scan"),
   devReadTextFile: (path: string) => invoke<string>("dev_read_text_file", { path }),
   devEncodePairs: (format: string, pairs: [string, string][]) =>
     invoke<string>("dev_encode_pairs", { format, pairs }),
   devWriteTextFile: (path: string, content: string) =>
     invoke<void>("dev_write_text_file", { path, content }),
 };
+
+/** 监听游戏目录扫描进度 */
+export async function onGameScanProgress(
+  handler: (p: { done: number; total: number; current: string }) => void,
+): Promise<UnlistenFn> {
+  return listen("game-scan-progress", (e) =>
+    handler(e.payload as { done: number; total: number; current: string }),
+  );
+}
 
 /** 监听翻译进度事件 */
 export async function onTranslateProgress(
