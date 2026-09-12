@@ -11,7 +11,7 @@ import {
   Typography,
   message,
 } from "antd";
-import { FolderOpenOutlined, SearchOutlined, CloseOutlined } from "@ant-design/icons";
+import { FolderOpenOutlined, SearchOutlined, CloseOutlined, DownOutlined, RightOutlined } from "@ant-design/icons";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useTranslationContext } from "../i18n";
 // hook 在组件内使用
@@ -48,6 +48,10 @@ function packsOf(g: GameVersionGroup, kind: Kind): GamePackEntry[] {
   return g.shaderpacks;
 }
 
+function groupAllPacks(g: GameVersionGroup): GamePackEntry[] {
+  return [...g.mods, ...g.resourcepacks, ...g.shaderpacks];
+}
+
 export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQueue, autoScanDir, onAutoScanConsumed }: Props) {
   const { t } = useTranslationContext();
   const [root, setRoot] = useState<string | null>(null);
@@ -62,6 +66,10 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
   const [adding, setAdding] = useState(false);
   // 展开式选择面板：null 关闭 / "all" 全部版本 / 具体类别
   const [selPanel, setSelPanel] = useState<null | "all" | Kind>(null);
+  // 折叠状态：版本详情页分类（key = "activeGroup:kind"）
+  const [catExpanded, setCatExpanded] = useState<Record<string, boolean>>({});
+  // 折叠状态：面板版本分组（key = panel group key）
+  const [panelGroupExpanded, setPanelGroupExpanded] = useState<Record<string, boolean>>({});
 
   const startScanRef = useRef<(dir: string) => Promise<void>>(async () => {});
 
@@ -180,7 +188,6 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
     for (const { pack } of filtered ?? allPacks) next[pack.path] = true;
     setSelected(next);
   };
-  const selectNone = () => setSelected({});
   // ── 加入队列：交给 App 解析注入（去重 + 带版本标记），完成后 App 跳转自由导入页 ──
   const addToQueue = useCallback(async () => {
     const ids = Object.keys(selected).filter((id) => selected[id]);
@@ -261,6 +268,18 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
     return [...m.values()];
   }, [panelScope]);
 
+  // 当前版本第一个有内容的分类（用于默认展开）
+  const firstNonEmptyKind = useMemo<Kind | null>(() => {
+    if (!activeGroupRow) return null;
+    for (const k of ["mod", "resourcepack", "shader"] as Kind[]) {
+      if (packsOf(activeGroupRow.group, k).length > 0) return k;
+    }
+    return null;
+  }, [activeGroupRow]);
+
+  // 面板第一个分组的 key（用于默认展开）
+  const firstPanelGroupKey = panelGroups.length > 0 ? panelGroups[0].key : null;
+
   return (
     <div style={{ display: "flex", minHeight: 0, flex: 1 }}>
       {/* 左侧：版本列表 */}
@@ -339,11 +358,10 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
         )}
         {scan && (
           <div style={{ marginTop: 10 }} className="panel-anim">
-            {scan.groups.map((g) => ({
-              key: "g:" + g.relPath,
-              name: g.relPath === "" ? t("gamedir.publicDir") : g.dirName,
-              g,
-            })).map((row) => {
+            {groups.map((row) => {
+              const gp = groupAllPacks(row.group);
+              const allSel = gp.length > 0 && gp.every((p) => selected[p.path]);
+              const someSel = gp.some((p) => selected[p.path]) && !allSel;
               return (
                 <div
                   key={row.key}
@@ -354,13 +372,30 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
                   style={{
                     padding: "6px 12px",
                     cursor: "pointer",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
                     background: activeGroup === row.key ? "var(--slide-indicator-bg)" : "transparent",
                     color: activeGroup === row.key ? "#fff" : "inherit",
                   }}
                 >
-                  <div style={{ fontWeight: activeGroup === row.key ? 600 : 400 }}>{row.name}</div>
-                  <div style={{ fontSize: 11, opacity: 0.8 }}>
-                    {t("gamedir.counts", { mods: row.g.mods.length, rp: row.g.resourcepacks.length, sp: row.g.shaderpacks.length })}
+                  <Checkbox
+                    checked={allSel}
+                    indeterminate={someSel}
+                    style={{ flexShrink: 0 }}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => {
+                      const next = { ...selected };
+                      if (e.target.checked) for (const p of gp) next[p.path] = true;
+                      else for (const p of gp) delete next[p.path];
+                      setSelected(next);
+                    }}
+                  />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: activeGroup === row.key ? 600 : 400 }}>{row.name}</div>
+                    <div style={{ fontSize: 11, opacity: 0.8 }}>
+                      {t("gamedir.counts", { mods: row.group.mods.length, rp: row.group.resourcepacks.length, sp: row.group.shaderpacks.length })}
+                    </div>
                   </div>
                 </div>
               );
@@ -405,11 +440,12 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
               />
-              <Button size="small" onClick={selectAll}>
-                {t("gamedir.btnAll")}
-              </Button>
-              <Button size="small" onClick={selectNone}>
-                {t("gamedir.btnNone")}
+              <Button size="small" onClick={() => {
+                const allSel = allPacks.length > 0 && allPacks.every((p) => selected[p.pack.path]);
+                if (allSel) setSelected({});
+                else selectAll();
+              }}>
+                {(allPacks.length > 0 && allPacks.every((p) => selected[p.pack.path])) ? t("gamedir.btnNone") : t("gamedir.btnAll")}
               </Button>
               {(["mod", "resourcepack", "shader"] as Kind[]).map((k) => (
                 <Button
@@ -433,18 +469,19 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
                     {selPanel === "all" ? t("gamedir.panelAllTitle") : `${t(KIND_LABEL_KEY[selPanel as Kind])} · ${t("gamedir.panelByVersion")}`}
                   </Typography.Text>
                   <Button size="small" onClick={() => {
+                    const panelAllPacks = panelGroups.flatMap((row) => row.packs);
+                    const allSel = panelAllPacks.length > 0 && panelAllPacks.every((p) => selected[p.path]);
                     const next = { ...selected };
-                    for (const row of panelGroups) for (const p of row.packs) next[p.path] = true;
+                    if (allSel) for (const p of panelAllPacks) delete next[p.path];
+                    else for (const p of panelAllPacks) next[p.path] = true;
                     setSelected(next);
                   }}>
-                    {t("gamedir.panelCheckAll")}
-                  </Button>
-                  <Button size="small" onClick={() => {
-                    const next = { ...selected };
-                    for (const row of panelGroups) for (const p of row.packs) delete next[p.path];
-                    setSelected(next);
-                  }}>
-                    {t("gamedir.panelUncheckAll")}
+                    {(() => {
+                      const panelAllPacks = panelGroups.flatMap((row) => row.packs);
+                      return panelAllPacks.length > 0 && panelAllPacks.every((p) => selected[p.path])
+                        ? t("gamedir.panelUncheckAll")
+                        : t("gamedir.panelCheckAll");
+                    })()}
                   </Button>
                 </Space>
                 {panelGroups.length === 0 && (
@@ -452,24 +489,47 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
                     {t("gamedir.noPacks")}
                   </Typography.Text>
                 )}
-                {panelGroups.map((g) => (
-                  <div key={g.key} style={{ marginBottom: 8 }}>
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                      {g.name}（{g.packs.length}）
-                    </Typography.Text>
-                    {g.packs.map((pack) => (
-                      <div key={pack.path} style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 8px" }}>
-                        <Checkbox checked={!!selected[pack.path]} onChange={(e) => setSelected((prev) => ({ ...prev, [pack.path]: e.target.checked }))} />
-                        <Typography.Text style={{ flex: 1, minWidth: 0, fontSize: 12 }} ellipsis={{ tooltip: pack.fileName }}>
-                          {pack.fileName}
+                {panelGroups.map((g) => {
+                  const allSel = g.packs.length > 0 && g.packs.every((p) => selected[p.path]);
+                  const someSel = g.packs.some((p) => selected[p.path]) && !allSel;
+                  const isExpanded = panelGroupExpanded[g.key] ?? (g.key === firstPanelGroupKey);
+                  return (
+                    <div key={g.key} style={{ marginBottom: 8 }}>
+                      <div
+                        style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", padding: "2px 0" }}
+                        onClick={() => setPanelGroupExpanded((prev) => ({ ...prev, [g.key]: !isExpanded }))}
+                      >
+                        <Checkbox
+                          checked={allSel}
+                          indeterminate={someSel}
+                          style={{ flexShrink: 0 }}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => {
+                            const next = { ...selected };
+                            if (e.target.checked) for (const p of g.packs) next[p.path] = true;
+                            else for (const p of g.packs) delete next[p.path];
+                            setSelected(next);
+                          }}
+                        />
+                        <Typography.Text type="secondary" style={{ fontSize: 12, flex: 1 }}>
+                          {g.name}（{g.packs.length}）
                         </Typography.Text>
-                        <Typography.Text type="secondary" style={{ fontSize: 11, flexShrink: 0 }}>
-                          {(pack.size / 1024 / 1024).toFixed(2)} MB
-                        </Typography.Text>
+                        {isExpanded ? <DownOutlined style={{ fontSize: 10, color: "var(--ant-color-text-secondary)" }} /> : <RightOutlined style={{ fontSize: 10, color: "var(--ant-color-text-secondary)" }} />}
                       </div>
-                    ))}
-                  </div>
-                ))}
+                      {isExpanded && g.packs.map((pack) => (
+                        <div key={pack.path} style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 8px" }}>
+                          <Checkbox checked={!!selected[pack.path]} onChange={(e) => setSelected((prev) => ({ ...prev, [pack.path]: e.target.checked }))} />
+                          <Typography.Text style={{ flex: 1, minWidth: 0, fontSize: 12 }} ellipsis={{ tooltip: pack.fileName }}>
+                            {pack.fileName}
+                          </Typography.Text>
+                          <Typography.Text type="secondary" style={{ fontSize: 11, flexShrink: 0 }}>
+                            {(pack.size / 1024 / 1024).toFixed(2)} MB
+                          </Typography.Text>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })}
               </div>
             )}
 
@@ -513,12 +573,34 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
                   const k = kind as Kind;
                   const list = activePacks.packs.filter((p) => p.kind === k);
                   if (list.length === 0) return null;
+                  const catKey = `${activeGroup}:${k}`;
+                  const isExpanded = catExpanded[catKey] ?? (k === firstNonEmptyKind);
+                  const allSel = list.every(({ pack }) => selected[pack.path]);
+                  const someSel = list.some(({ pack }) => selected[pack.path]) && !allSel;
                   return (
                     <div key={kind} style={{ marginBottom: 16 }}>
-                      <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 4 }}>
-                        {t(KIND_LABEL_KEY[k])}（{list.length}）
-                      </Typography.Text>
-                      {list.map(({ pack }) => packRow(activeGroupRow, k, pack, false))}
+                      <div
+                        style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", padding: "2px 0", marginBottom: 4 }}
+                        onClick={() => setCatExpanded((prev) => ({ ...prev, [catKey]: !isExpanded }))}
+                      >
+                        <Checkbox
+                          checked={allSel}
+                          indeterminate={someSel}
+                          style={{ flexShrink: 0 }}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => {
+                            const next = { ...selected };
+                            if (e.target.checked) for (const { pack } of list) next[pack.path] = true;
+                            else for (const { pack } of list) delete next[pack.path];
+                            setSelected(next);
+                          }}
+                        />
+                        <Typography.Text type="secondary" style={{ fontSize: 12, flex: 1 }}>
+                          {t(KIND_LABEL_KEY[k])}（{list.length}）
+                        </Typography.Text>
+                        {isExpanded ? <DownOutlined style={{ fontSize: 10, color: "var(--ant-color-text-secondary)" }} /> : <RightOutlined style={{ fontSize: 10, color: "var(--ant-color-text-secondary)" }} />}
+                      </div>
+                      {isExpanded && list.map(({ pack }) => packRow(activeGroupRow, k, pack, false))}
                     </div>
                   );
                 })
