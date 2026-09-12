@@ -41,6 +41,7 @@ pub fn export_resource_pack_multi(
 ) -> Result<String, String> {
     let file_name = "mods_zh_cn.zip".to_string();
     let zip_path = dest_dir.join(&file_name);
+    let _ = std::fs::create_dir_all(dest_dir);
     let file = File::create(&zip_path).map_err(|e| {
         format!(
             "无法将翻译结果保存到「{}」：可能原因：磁盘空间不足 / 无写入权限 / 文件被其他程序占用。请排查后重试。（原始错误：{}）",
@@ -228,6 +229,9 @@ pub fn export_mod_jar(
 
     let src_file = File::open(source).map_err(|e| format!("无法打开源 jar: {}", e))?;
     let mut src = zip::ZipArchive::new(src_file).map_err(|e| e.to_string())?;
+    if let Some(parent) = dest.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let dest_file = File::create(dest).map_err(|e| {
         format!(
             "无法将翻译结果保存到「{}」：可能原因：磁盘空间不足 / 无写入权限 / 文件被其他程序占用。请排查后重试。（原始错误：{}）",

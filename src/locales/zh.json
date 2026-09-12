@@ -156,7 +156,8 @@
     "msgParseNotPack": "「{name}」无法识别为可翻译内容：它既不是标准模组，也不是资源包/光影包，或内部没有可翻译的文本。请确认文件来源，或尝试对该模组使用「深度扫描」。",
     "msgParseOther": "「{name}」解析失败：{error}",
     "msgNoExportItem": "「{name}」没有可导出译文：该模组下没有\"已勾选且翻译成功\"的条目，已跳过。",
-    "msgSettingsLoadFailed": "设置加载失败，已使用默认配置，可到「设置」中重新调整。"
+    "msgSettingsLoadFailed": "设置加载失败，已使用默认配置，可到「设置」中重新调整。",
+    "noExportItem": "勾选的条目中没有可导出的译文"
   },
   "settings": {
     "title": "设置",

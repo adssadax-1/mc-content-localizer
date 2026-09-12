@@ -337,3 +337,11 @@ body {
 .dev-tab-r {
   animation: motion-slide-r var(--motion-dur-panel) var(--motion-ease-enter) both;
 }
+
+/* ===== 游戏目录页：版本切换主区入场 ===== */
+.gd-main-anim > * {
+  animation: motion-rise var(--motion-dur-panel) var(--motion-ease-enter) both;
+}
+.gd-main-anim > * + * {
+  animation-delay: 55ms;
+}

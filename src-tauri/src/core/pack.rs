@@ -398,6 +398,9 @@ pub fn export_shader_zh(source: &Path, dest: &Path, entries: &[LangEntry]) -> Re
 
     let src_file = File::open(source).map_err(|e| format!("无法打开源光影包: {}", e))?;
     let mut src = ZipArchive::new(src_file).map_err(|e| e.to_string())?;
+    if let Some(parent) = dest.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let dest_file = File::create(dest).map_err(|e| {
         format!(
             "无法将翻译结果保存到「{}」：可能原因：磁盘空间不足 / 无写入权限 / 文件被其他程序占用。请排查后重试。（原始错误：{}）",
@@ -468,6 +471,9 @@ pub fn export_resource_pack_desc(
 
     let src_file = File::open(source).map_err(|e| format!("无法打开源资源包: {}", e))?;
     let mut src = ZipArchive::new(src_file).map_err(|e| e.to_string())?;
+    if let Some(parent) = dest.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let dest_file = File::create(dest).map_err(|e| {
         format!(
             "无法将翻译结果保存到「{}」：可能原因：磁盘空间不足 / 无写入权限 / 文件被其他程序占用。请排查后重试。（原始错误：{}）",

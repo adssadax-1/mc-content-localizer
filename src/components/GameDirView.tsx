@@ -289,7 +289,7 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
           </Typography.Text>
         )}
         {scan && (
-          <div style={{ marginTop: 10 }}>
+          <div style={{ marginTop: 10 }} className="panel-anim">
             {scan.groups.map((g) => ({
               key: "g:" + g.relPath,
               name: g.dirName,
@@ -321,7 +321,11 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
       </div>
 
       {/* 右侧主区：勾选要汉化的内容包 */}
-      <div style={{ flex: 1, minWidth: 0, padding: 12, overflowY: "auto" }}>
+      <div
+        key={"m:" + (activeGroup ?? "none")}
+        className="gd-main-anim"
+        style={{ flex: 1, minWidth: 0, padding: 12, overflowY: "auto" }}
+      >
         {!scan && !scanning && <Empty description="先在左侧打开并扫描游戏目录" />}
         {scanning && progress && (
           <div style={{ marginBottom: 12 }}>
@@ -335,7 +339,7 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
 
         {scan && activeGroupRow && activePacks && (
           <div>
-            <Space wrap style={{ marginBottom: 10 }}>
+            <Space wrap style={{ marginBottom: 10 }} className="panel-anim">
               <Typography.Text strong>
                 {activeGroupRow.name}
                 {activeGroupRow.group.mcVersion && (
@@ -402,45 +406,23 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
                 )}
               </>
             ) : (
-              groups.map((g) => {
-                const total = g.group.mods.length + g.group.resourcepacks.length + g.group.shaderpacks.length;
-                const all = [...packsOf(g.group, "mod"), ...packsOf(g.group, "resourcepack"), ...packsOf(g.group, "shader")];
-                return (
-                  <div
-                    key={g.key}
-                    style={{ border: "1px solid var(--border-color)", borderRadius: 8, padding: "6px 10px", marginBottom: 10 }}
-                  >
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <Checkbox
-                        checked={total > 0 && all.every((p) => selected[p.path])}
-                        indeterminate={all.some((p) => selected[p.path]) && !all.every((p) => selected[p.path])}
-                        onChange={(e) => {
-                          const next = { ...selected };
-                          for (const p of all) {
-                            if (e.target.checked) next[p.path] = true;
-                            else delete next[p.path];
-                          }
-                          setSelected(next);
-                        }}
-                        disabled={total === 0}
-                      />
-                      <Typography.Text strong>
-                        {g.name}
-                        {g.group.mcVersion && <Tag color="blue" style={{ marginLeft: 6 }}>{g.group.mcVersion}</Tag>}
+              activePacks.packs.length === 0 ? (
+                <Empty description="此版本没有内容包" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+              ) : (
+                ["mod", "resourcepack", "shader"].map((kind) => {
+                  const k = kind as Kind;
+                  const list = activePacks.packs.filter((p) => p.kind === k);
+                  if (list.length === 0) return null;
+                  return (
+                    <div key={kind} style={{ marginBottom: 16 }}>
+                      <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 4 }}>
+                        {KIND_LABEL[k]}（{list.length}）
                       </Typography.Text>
-                      {!g.isRoot && !g.group.valid && <Tag color="default">无可翻译文本</Tag>}
-                      <Tag>模组 {g.group.mods.length}</Tag>
-                      <Tag>资源包 {g.group.resourcepacks.length}</Tag>
-                      <Tag>光影 {g.group.shaderpacks.length}</Tag>
+                      {list.map(({ pack }) => packRow(activeGroupRow, k, pack, false))}
                     </div>
-                    {total === 0 && (
-                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                        此版本没有内容包
-                      </Typography.Text>
-                    )}
-                  </div>
-                );
-              })
+                  );
+                })
+              )
             )}
           </div>
         )}

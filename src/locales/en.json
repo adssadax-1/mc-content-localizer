@@ -156,7 +156,8 @@
     "msgParseNotPack": "\"{name}\" is not recognized as translatable content: it is neither a standard mod nor a resource/shader pack, or contains no translatable text. Verify the file source, or try \"Deep Scan\" on the mod.",
     "msgParseOther": "\"{name}\" parse failed: {error}",
     "msgNoExportItem": "\"{name}\" has no translatable entries to export: no \"checked and translated\" entries under this mod, skipped.",
-    "msgSettingsLoadFailed": "Failed to load settings, using defaults. You can adjust them in \"Settings\"."
+    "msgSettingsLoadFailed": "Failed to load settings, using defaults. You can adjust them in \"Settings\".",
+    "noExportItem": "No translatable entries among the selected ones"
   },
   "settings": {
     "title": "Settings",
