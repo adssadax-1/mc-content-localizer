@@ -368,7 +368,8 @@ export const EntryTable = memo(function EntryTable({
 
   const allSelected = entries.length > 0 && entries.every((e) => e.selected !== false);
 
-  const columns: ColumnsType<LangEntry> = [
+  // 列定义 memo 化：避免每次渲染重建列（含排序/筛选闭包）导致大包展开卡顿
+  const columns: ColumnsType<LangEntry> = useMemo(() => [
     {
       title: (
         <span onClick={(e) => e.stopPropagation()}>
@@ -472,7 +473,7 @@ export const EntryTable = memo(function EntryTable({
         </div>
       ),
     },
-  ];
+  ], [tr, entries.length]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column" }}>

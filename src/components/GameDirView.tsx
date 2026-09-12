@@ -6,7 +6,6 @@ import {
   Input,
   Modal,
   Progress,
-  Select,
   Space,
   Tag,
   Typography,
@@ -14,6 +13,8 @@ import {
 } from "antd";
 import { FolderOpenOutlined, SearchOutlined } from "@ant-design/icons";
 import { open } from "@tauri-apps/plugin-dialog";
+import { useTranslationContext } from "../i18n";
+// hook 在组件内使用
 import { api, onGameScanProgress } from "../api";
 import type { GameDirScan, GamePackEntry, GameVersionGroup, Settings } from "../types";
 
@@ -48,7 +49,8 @@ function packsOf(g: GameVersionGroup, kind: Kind): GamePackEntry[] {
 }
 
 export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQueue, autoScanDir, onAutoScanConsumed }: Props) {
-  const [root, setRoot] = useState<string | null>(null);
+  const { t } = useTranslationContext();
+  const [, setRoot] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number; current: string } | null>(null);
   const [scan, setScan] = useState<GameDirScan | null>(null);
@@ -200,7 +202,7 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
     setAdding(true);
     try {
       const { added, skipped } = await onAddToQueue(packs);
-      message.success(`已加入列表 ${added} 个内容包${skipped > 0 ? `（跳过已在列表 ${skipped} 个）` : ""}`);
+      message.success(skipped > 0 ? t("gamedir.addedSkipped", { n: added, m: skipped }) : t("gamedir.added", { n: added }));
       setSelected({});
     } catch (e) {
       message.error(String(e));
@@ -256,17 +258,9 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
       >
         <div style={{ padding: "0 12px" }}>
           <Button block icon={<FolderOpenOutlined />} loading={scanning} onClick={() => void pickRoot()}>
-            打开游戏目录
+            {t("gamedir.open")}
           </Button>
-          {(settings.recentGameDirs ?? []).length > 0 && (
-            <Select
-              placeholder="最近目录"
-              style={{ width: "100%", marginTop: 8 }}
-              value={root ?? undefined}
-              options={(settings.recentGameDirs ?? []).map((d) => ({ label: d, value: d }))}
-              onChange={(v) => void startScan(v)}
-            />
-          )}
+
         </div>
         {scanning && progress && (
           <div style={{ padding: "12px 12px 0" }}>
@@ -276,7 +270,7 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
               format={() => `${progress.done}/${progress.total}`}
             />
             <Button size="small" danger block onClick={() => void api.cancelGameScan()}>
-              取消扫描
+              {t("gamedir.cancel")}
             </Button>
           </div>
         )}
@@ -285,14 +279,14 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
             type="secondary"
             style={{ fontSize: 12, display: "block", padding: "12px 12px 0", lineHeight: 1.7 }}
           >
-            选择 .minecraft 目录（或任意游戏目录 / 版本文件夹），自动向下扫描 mods、resourcepacks、shaderpacks
+            {t("gamedir.scanHint")}
           </Typography.Text>
         )}
         {scan && (
           <div style={{ marginTop: 10 }} className="panel-anim">
             {scan.groups.map((g) => ({
               key: "g:" + g.relPath,
-              name: g.dirName,
+              name: g.relPath === "" ? t("gamedir.publicDir") : g.dirName,
               g,
             })).map((row) => {
               return (
@@ -311,7 +305,7 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
                 >
                   <div style={{ fontWeight: activeGroup === row.key ? 600 : 400 }}>{row.name}</div>
                   <div style={{ fontSize: 11, opacity: 0.8 }}>
-                    模组 {row.g.mods.length} · 资源包 {row.g.resourcepacks.length} · 光影 {row.g.shaderpacks.length}
+                    {t("gamedir.counts", { mods: row.g.mods.length, rp: row.g.resourcepacks.length, sp: row.g.shaderpacks.length })}
                   </div>
                 </div>
               );
@@ -326,7 +320,7 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
         className="gd-main-anim"
         style={{ flex: 1, minWidth: 0, padding: 12, overflowY: "auto" }}
       >
-        {!scan && !scanning && <Empty description="先在左侧打开并扫描游戏目录" />}
+        {!scan && !scanning && <Empty description={t("gamedir.scanHint")} />}
         {scanning && progress && (
           <div style={{ marginBottom: 12 }}>
             <Progress
@@ -335,7 +329,7 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
             />
           </div>
         )}
-        {scan && !activeGroup && <Empty description="在左侧选择一个版本查看内容包" />}
+        {scan && !activeGroup && <Empty description={t("gamedir.pickVersion")} />}
 
         {scan && activeGroupRow && activePacks && (
           <div>
@@ -350,26 +344,26 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
               </Typography.Text>
               <Input
                 prefix={<SearchOutlined />}
-                placeholder="搜索内容包"
+                placeholder={t("gamedir.search")}
                 style={{ width: 220 }}
                 allowClear
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
               />
               <Button size="small" onClick={selectAll}>
-                全选（含跨版本）
+                {t("gamedir.selectAllVersions")}
               </Button>
               <Button size="small" onClick={selectNone}>
-                全不选
+                {t("gamedir.selectNone")}
               </Button>
               <Button size="small" onClick={() => selectKind("mod")}>
-                选所有模组
+                {t("gamedir.selAllMods")}
               </Button>
               <Button size="small" onClick={() => selectKind("resourcepack")}>
-                选所有资源包
+                {t("gamedir.selAllRp")}
               </Button>
               <Button size="small" onClick={() => selectKind("shader")}>
-                选所有光影包
+                {t("gamedir.selAllSp")}
               </Button>
             </Space>
 
@@ -382,14 +376,14 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
                 disabled={selectedCount === 0}
                 onClick={() => void addToQueue()}
               >
-                解析并加入列表（{selectedCount}）
+                {t("gamedir.addToQueue", { n: selectedCount })}
               </Button>
               <Typography.Text type="secondary" style={{ fontSize: 12, marginLeft: 10 }}>
-                加入后切到「自由导入」页开始翻译；跨版本重复的包将自动复用译文
+                {t("gamedir.addToQueueHint")}
               </Typography.Text>
               {addProgress && (
                 <Typography.Text style={{ fontSize: 12 }}>
-                  解析中 {addProgress.done}/{addProgress.total}：{addProgress.current}
+                  {t("gamedir.addProgress", { done: addProgress.done, total: addProgress.total, current: addProgress.current })}
                 </Typography.Text>
               )}
             </div>
@@ -430,28 +424,28 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
 
       {/* 扫描汇总弹窗 */}
       <Modal
-        title="扫描完成"
+        title={t("gamedir.scanDone")}
         open={summaryOpen}
         onCancel={() => setSummaryOpen(false)}
         onOk={() => setSummaryOpen(false)}
-        okText="开始选择"
-        cancelText="关闭"
+        okText={t("gamedir.startSelect")}
+        cancelText={t("gamedir.close")}
         width={520}
       >
         {scanSummary && (
           <>
             <Typography.Paragraph>
-              共 {scanSummary.versions} 个分组（含公共目录）、<b>{scanSummary.packTotal}</b> 个内容包。
+              {t("gamedir.groups", { n: scanSummary.versions })}、<b>{t("gamedir.packs", { n: scanSummary.packTotal })}</b>。
               {scanSummary.dup > 0 && (
                 <>
                   <br />
-                  跨版本重复 {scanSummary.dup} 个（同名同大小），翻译时将自动复用译文。
+                  {t("gamedir.dup", { n: scanSummary.dup })}
                 </>
               )}
             </Typography.Paragraph>
             {(settings.threading?.enabled ?? false) && (settings.batchSizeAuto ?? true) && (
               <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
-                提示：已开启「跟随线程数最优条数」，条目较少的包批次会偏小，可能影响翻译质量；可在翻译参数中调整。
+                {t("gamedir.batchHint")}
               </Typography.Paragraph>
             )}
           </>

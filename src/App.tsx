@@ -5,6 +5,7 @@ import {
   Checkbox,
   ConfigProvider,
   Drawer,
+  Dropdown,
   InputNumber,
   Layout,
   Segmented,
@@ -540,6 +541,9 @@ function AppInner({
   if (workModeRef.current !== workMode) workModeRef.current = workMode;
   // 拖入/选择文件夹后自动进入游戏目录模式并扫描（GameDirView 消费后清空）
   const [gamedirAutoScan, setGamedirAutoScan] = useState<string | null>(null);
+  // 自由导入：解析完成精简汇总
+  const [importSummary, setImportSummary] = useState<{ added: number; failures: { name: string; reason: string }[]; deepFound: number } | null>(null);
+  const [importSummaryOpen, setImportSummaryOpen] = useState(false);
   // 游戏目录「解析并加入列表」的解析进度（GameDirView 显示）
   const [gdAddProgress, setGdAddProgress] = useState<{ done: number; total: number; current: string } | null>(null);
 
@@ -966,6 +970,7 @@ function AppInner({
     }
     setParsing(true);
     const added: PackItem[] = [];
+    const importFailures: { name: string; reason: string }[] = [];
     let zhHits = 0;
     let zhTotal = 0;
     for (const p of files) {
@@ -983,13 +988,15 @@ function AppInner({
       } catch (e) {
         const fileName = p.split(/[\\/]/).pop() ?? p;
         const err = String(e);
+        let reason: string;
         if (/zip 读取失败|无法打开文件/.test(err)) {
-          message.error(t("app.msgParseCorrupt", { name: fileName }));
+          reason = t("app.msgParseCorrupt", { name: fileName });
         } else if (/未能识别为可翻译的模组|不是可翻译/.test(err)) {
-          message.error(t("app.msgParseNotPack", { name: fileName }));
+          reason = t("app.msgParseNotPack", { name: fileName });
         } else {
-          message.error(t("app.msgParseOther", { name: fileName, error: err }));
+          reason = t("app.msgParseOther", { name: fileName, error: err });
         }
+        importFailures.push({ name: fileName, reason });
       }
     }
     // 自动深度扫描（设置开关开启时）：普通解析为空的模组
@@ -1026,9 +1033,13 @@ function AppInner({
       }
     }
     if (added.length > 0) {
-      message.success(
-        `已导入 ${added.length} 个内容包${deepFound > 0 ? `（模组深度扫描发现 ${deepFound} 条内嵌文本，默认未勾选）` : ""}`,
-      );
+      if (importFailures.length > 0 || deepFound > 0) {
+        // 有失败或深度扫描信息 → 精简汇总弹窗（避免逐包刷屏）
+        setImportSummary({ added: added.length, failures: importFailures, deepFound });
+        setImportSummaryOpen(true);
+      } else {
+        message.success(`已导入 ${added.length} 个内容包`);
+      }
     }
     // 导入后校验：解析为空的内容包，给出明确、可操作的提示
     const emptyPacks = added.filter((it) => it.entries.length === 0);
@@ -1165,7 +1176,10 @@ function AppInner({
   }, []);
 
   function toggleAll(checked: boolean) {
-    setQueue((prev) => prev.map((it) => ({ ...it, checked })));
+    // 全选只作用于当前内容类型页（模组/光影包/资源包互不影响）
+    setQueue((prev) =>
+      prev.map((it) => (it.kind === activeTab ? { ...it, checked } : it)),
+    );
   }
 
   const toggleExpanded = useCallback((key: string) => {
@@ -1469,20 +1483,46 @@ function AppInner({
     message.success(useTags ? "已清除带所选标签的译文" : "已清除全部译文");
   }
 
-  function handleClearQueue() {
+  /** 清空当前内容类型页的列表（只移除当前类型的包） */
+  function handleClearCurrentTab() {
+    const kindLabel = t(KIND_META[activeTab].labelKey);
     Modal.confirm({
-      title: "清空内容包列表？",
-      content: "将移除全部内容包及其译文（不影响已保存的设置），此操作不可撤销。",
-      okText: "清空列表",
+      title: `清空${kindLabel}页的列表？`,
+      content: `将移除${kindLabel}页的全部内容包及其译文（不影响其他页），此操作不可撤销。`,
+      okText: "清空",
       okButtonProps: { danger: true },
       cancelText: "取消",
       onOk: () => {
-        setQueue([]);
-        setSelectedKey(null);
+        setQueue((prev) => prev.filter((it) => it.kind !== activeTab));
+        if (selectedKey && queue.find((q) => q.key === selectedKey)?.kind === activeTab) {
+          setSelectedKey(null);
+        }
         setProgress(null);
         setTranslating(false);
         void api.clearSessionCache("free");
-        message.success("已清空列表");
+        message.success(`已清空${kindLabel}页的列表`);
+      },
+    });
+  }
+
+  /** 清除当前内容类型页勾选的内容包 */
+  function handleRemoveChecked() {
+    const checkedInTab = queue.filter((it) => it.kind === activeTab && it.checked);
+    if (checkedInTab.length === 0) {
+      message.info("当前页没有勾选的内容包");
+      return;
+    }
+    Modal.confirm({
+      title: `清除勾选的 ${checkedInTab.length} 个内容包？`,
+      content: "将移除勾选的内容包及其译文（未勾选的保留），此操作不可撤销。",
+      okText: "清除",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: () => {
+        const removedKeys = new Set(checkedInTab.map((it) => it.key));
+        setQueue((prev) => prev.filter((it) => !removedKeys.has(it.key)));
+        if (selectedKey && removedKeys.has(selectedKey)) setSelectedKey(null);
+        message.success(`已清除 ${checkedInTab.length} 个内容包`);
       },
     });
   }
@@ -1533,11 +1573,51 @@ function AppInner({
       message.info("请先勾选要导出的内容包");
       return;
     }
+    const hasGamedir = checked.some((it) => it.gameVersion);
     const kinds = new Set(checked.map((c) => c.kind));
-    if (kinds.size > 1) {
-      message.warning("请在同一类型内勾选导出（模组/光影包/资源包分开导出）");
+
+    // 混合类型或含游戏目录来源 → 统一按 版本/类别 子文件夹逐包导出
+    if (hasGamedir || kinds.size > 1) {
+      const dir = asDir(await open({
+        directory: true,
+        title: "选择导出根目录（自动按 版本/类别 建立子文件夹）",
+      }));
+      if (!dir) return;
+      let ok = 0;
+      let skipped = 0;
+      const generated: string[] = [];
+      const kindFolder: Record<PackKind, string> = { mod: "mods", shader: "shaderpacks", resourcepack: "resourcepacks" };
+      for (const it of checked) {
+        const translated = it.entries.filter((e) => (e.selected ?? true) && e.translation);
+        if (translated.length === 0) {
+          skipped += 1;
+          continue;
+        }
+        try {
+          const base = sanitizeFileName(it.fileName.replace(/\.(zip|jar)$/i, ""));
+          const ver = it.gameVersion ?? "公共目录";
+          if (it.kind === "mod") {
+            const dest = `${vdirFor(dir, it)}/mods/${sanitizeFileName(it.modFile?.modid ?? base)}_zh_cn.jar`;
+            await api.exportModJar(it.sourcePath, dest, it.modFile?.modid ?? "mod", translated, it.langFormat ?? "json");
+          } else if (it.kind === "shader") {
+            const dest = `${vdirFor(dir, it)}/shaderpacks/${base}_zh_CN.zip`;
+            await api.exportShaderZh(it.sourcePath, dest, translated);
+          } else {
+            const dest = `${vdirFor(dir, it)}/resourcepacks/${base}_改描述.zip`;
+            await api.exportResourcePackDesc(it.sourcePath, dest, translated);
+          }
+          generated.push(`${dir}/${ver}/${kindFolder[it.kind]}/`);
+          ok += 1;
+        } catch (e) {
+          message.error(`「${it.name}」导出失败：${String(e)}`);
+        }
+      }
+      if (ok > 0) notifyExport(`已导出 ${ok} 个内容包（按版本分类）`, [...new Set(generated)]);
+      if (skipped > 0) message.warning(`${skipped} 个内容包没有可导出的译文（请先翻译）`);
       return;
     }
+
+    // 纯自由导入：保留原有分支（光影 / 资源包直接导出，模组走合并/单包弹窗）
     const kind = checked[0].kind;
     if (kind === "shader") {
       const dir = asDir(await open({ directory: true, title: "选择导出目录（生成汉化光影包）" }));
@@ -1555,7 +1635,7 @@ function AppInner({
         }
         try {
           const base = it.fileName.replace(/\.(zip|jar)$/i, "");
-          const dest = `${vdirFor(dir, it)}/${sanitizeFileName(base)}_zh_CN.zip`;
+          const dest = `${dir}/${sanitizeFileName(base)}_zh_CN.zip`;
           await api.exportShaderZh(it.sourcePath, dest, translated);
           generated.push(dest);
           ok += 1;
@@ -1588,7 +1668,7 @@ function AppInner({
         }
         try {
           const base = it.fileName.replace(/\.(zip|jar)$/i, "");
-          const dest = `${vdirFor(dir, it)}/${sanitizeFileName(base)}_zh_CN.zip`;
+          const dest = `${dir}/${sanitizeFileName(base)}_zh_CN.zip`;
           await api.exportResourcePackDesc(it.sourcePath, dest, translated);
           generated.push(dest);
           ok += 1;
@@ -1959,9 +2039,23 @@ function AppInner({
                 <Button danger icon={<ClearOutlined />} disabled={translating} onClick={handleClear}>
                   {t("app.clearTranslations")}
                 </Button>
-                <Button danger icon={<DeleteOutlined />} disabled={translating} onClick={handleClearQueue}>
-                  {t("app.clearList")}
-                </Button>
+                <Dropdown
+                  disabled={translating}
+                  menu={{
+                    items: [
+                      { key: "clearTab", label: `清空${t(KIND_META[activeTab].labelKey)}页列表` },
+                      { key: "removeChecked", label: `清除勾选的内容包（${queue.filter((it) => it.kind === activeTab && it.checked).length}）` },
+                    ],
+                    onClick: ({ key }) => {
+                      if (key === "clearTab") handleClearCurrentTab();
+                      else handleRemoveChecked();
+                    },
+                  }}
+                >
+                  <Button danger icon={<DeleteOutlined />}>
+                    清除 <DownOutlined />
+                  </Button>
+                </Dropdown>
                 <Button icon={<CloudUploadOutlined />} disabled={translating} onClick={() => void pickFiles()}>
                   {t("app.import")}
                 </Button>
@@ -2107,6 +2201,39 @@ function AppInner({
         onClose={() => setSettingsOpen(false)}
         onSaved={setSettings}
       />
+
+      {/* 自由导入：解析完成精简汇总（有失败/深度扫描信息时才弹） */}
+      <Modal
+        title="导入汇总"
+        open={importSummaryOpen}
+        footer={[<Button key="ok" type="primary" onClick={() => setImportSummaryOpen(false)}>知道了</Button>]}
+        onCancel={() => setImportSummaryOpen(false)}
+        width={480}
+      >
+        {importSummary && (
+          <>
+            <Typography.Paragraph>
+              已导入 <b>{importSummary.added}</b> 个内容包。
+              {importSummary.deepFound > 0 && (
+                <>深度扫描发现 {importSummary.deepFound} 条内嵌文本（默认未勾选）。</>
+              )}
+            </Typography.Paragraph>
+            {importSummary.failures.length > 0 && (
+              <>
+                <Typography.Text type="danger">解析失败 {importSummary.failures.length} 个：</Typography.Text>
+                <div style={{ maxHeight: 160, overflowY: "auto", marginTop: 6 }}>
+                  {importSummary.failures.map((f, i) => (
+                    <div key={i} style={{ fontSize: 12, marginBottom: 4 }}>
+                      <Typography.Text type="secondary">{f.name}：</Typography.Text>
+                      {f.reason}
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </Modal>
 
       {/* 清除译文：按备注标签勾选清除；全不勾选 = 清除全部 */}
       <Modal
