@@ -123,26 +123,28 @@ fn collect_groups(
                 continue;
             }
             let name = e.file_name().to_string_lossy().to_string();
-            if name.starts_with('.')
-                || matches!(
-                    name.as_str(),
-                    "mods"
-                        | "resourcepacks"
-                        | "shaderpacks"
-                        | "libraries"
-                        | "saves"
-                        | "assets"
-                        | "logs"
-                        | "crash-reports"
-                        | "cache"
-                        | "config"
-                        | "data"
-                        | "downloads"
-                        | "kubejs"
-                        | "patchouli_books"
-                        | "natives"
-                )
-                || name.ends_with("-natives")
+            // 精确跳过无关大目录（不再一刀切跳过隐藏目录——.minecraft 本身就是隐藏名）
+            if matches!(
+                name.as_str(),
+                "libraries"
+                    | "saves"
+                    | "assets"
+                    | "logs"
+                    | "crash-reports"
+                    | "cache"
+                    | "downloads"
+                    | "kubejs"
+                    | "patchouli_books"
+                    | "natives"
+                    | ".gradle"
+                    | ".cache"
+                    | "Cache"
+                    | "cococa"
+            ) || name.ends_with("-natives")
+                || name == ".voxy"
+                || name == ".physics_mod_cache"
+                || name == ".earlyloadingscreen-transformer-output"
+                || name == ".replay_cache"
             {
                 continue;
             }

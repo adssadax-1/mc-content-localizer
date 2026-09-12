@@ -508,6 +508,8 @@
     "addProgress": "解析中 {done}/{total}：{current}",
     "added": "已加入列表 {n} 个内容包",
     "addedSkipped": "已加入列表 {n} 个内容包（跳过已在列表 {m} 个）",
-    "pickVersion": "在左侧选择一个版本查看内容包"
+    "pickVersion": "在左侧选择一个版本查看内容包",
+    "selectAllVersionsTip": "选中所有版本下的全部内容包",
+    "scopeCurrentTip": "只选中当前版本的该类内容包"
   }
 }

@@ -6,8 +6,10 @@ import {
   Input,
   Modal,
   Progress,
+  Select,
   Space,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from "antd";
@@ -50,7 +52,7 @@ function packsOf(g: GameVersionGroup, kind: Kind): GamePackEntry[] {
 
 export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQueue, autoScanDir, onAutoScanConsumed }: Props) {
   const { t } = useTranslationContext();
-  const [, setRoot] = useState<string | null>(null);
+  const [root, setRoot] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number; current: string } | null>(null);
   const [scan, setScan] = useState<GameDirScan | null>(null);
@@ -123,7 +125,7 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
         setActiveGroup(first ? "g:" + first.relPath : null);
         setSummaryOpen(true);
       } catch (e) {
-        if (String(e).includes("已取消")) message.info("已取消扫描");
+        if (String(e).includes("已取消")) message.info(t("gamedir.cancel"));
         else message.error(String(e));
       } finally {
         setScanning(false);
@@ -179,9 +181,12 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
     setSelected(next);
   };
   const selectNone = () => setSelected({});
-  const selectKind = (kind: Kind) => {
+  const selectKind = (kind: Kind, currentOnly = false) => {
     const next: Record<string, boolean> = { ...selected };
-    for (const { pack } of filtered ?? allPacks) if (pack.kind === kind) next[pack.path] = true;
+    const scope = currentOnly && activeGroupRow ? activeGroupRow : null;
+    for (const { pack } of scope ? allPacks.filter(({ group }) => group.key === scope.key) : (filtered ?? allPacks)) {
+      if (pack.kind === kind) next[pack.path] = true;
+    }
     setSelected(next);
   };
 
@@ -260,6 +265,15 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
           <Button block icon={<FolderOpenOutlined />} loading={scanning} onClick={() => void pickRoot()}>
             {t("gamedir.open")}
           </Button>
+          {(settings.recentGameDirs ?? []).length > 0 && (
+            <Select
+              placeholder={t("gamedir.recent")}
+              style={{ width: "100%", marginTop: 8 }}
+              value={root ?? undefined}
+              options={(settings.recentGameDirs ?? []).map((d) => ({ label: d, value: d }))}
+              onChange={(v) => void startScan(v)}
+            />
+          )}
 
         </div>
         {scanning && progress && (
@@ -350,21 +364,29 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
               />
-              <Button size="small" onClick={selectAll}>
-                {t("gamedir.selectAllVersions")}
-              </Button>
+              <Tooltip title={t("gamedir.selectAllVersionsTip")}>
+                <Button size="small" onClick={selectAll}>
+                  {t("gamedir.selectAllVersions")}
+                </Button>
+              </Tooltip>
               <Button size="small" onClick={selectNone}>
                 {t("gamedir.selectNone")}
               </Button>
-              <Button size="small" onClick={() => selectKind("mod")}>
-                {t("gamedir.selAllMods")}
-              </Button>
-              <Button size="small" onClick={() => selectKind("resourcepack")}>
-                {t("gamedir.selAllRp")}
-              </Button>
-              <Button size="small" onClick={() => selectKind("shader")}>
-                {t("gamedir.selAllSp")}
-              </Button>
+              <Tooltip title={t("gamedir.scopeCurrentTip")}>
+                <Button size="small" onClick={() => selectKind("mod", true)}>
+                  {t("gamedir.selAllMods")}
+                </Button>
+              </Tooltip>
+              <Tooltip title={t("gamedir.scopeCurrentTip")}>
+                <Button size="small" onClick={() => selectKind("resourcepack", true)}>
+                  {t("gamedir.selAllRp")}
+                </Button>
+              </Tooltip>
+              <Tooltip title={t("gamedir.scopeCurrentTip")}>
+                <Button size="small" onClick={() => selectKind("shader", true)}>
+                  {t("gamedir.selAllSp")}
+                </Button>
+              </Tooltip>
             </Space>
 
             {/* 全局：加入列表 */}

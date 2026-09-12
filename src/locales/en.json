@@ -508,6 +508,8 @@
     "addProgress": "Parsing {done}/{total}: {current}",
     "added": "Added {n} packs to the list",
     "addedSkipped": "Added {n} packs ({m} already in list were skipped)",
-    "pickVersion": "Select a version on the left to view its packs"
+    "pickVersion": "Select a version on the left to view its packs",
+    "selectAllVersionsTip": "Select every pack across all versions",
+    "scopeCurrentTip": "Select this kind within the current version only"
   }
 }
