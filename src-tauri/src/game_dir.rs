@@ -165,9 +165,26 @@ fn collect_groups(
     if depth > 5 || GAME_SCAN_CANCEL.load(Ordering::Relaxed) {
         return false;
     }
-    let mods = scan_dir_packs(&dir.join("mods"), "mod");
-    let rps = scan_dir_packs(&dir.join("resourcepacks"), "resourcepack");
-    let sps = scan_dir_packs(&dir.join("shaderpacks"), "shader");
+    let mut mods = scan_dir_packs(&dir.join("mods"), "mod");
+    let mut rps = scan_dir_packs(&dir.join("resourcepacks"), "resourcepack");
+    let mut sps = scan_dir_packs(&dir.join("shaderpacks"), "shader");
+    // 仅扫描根目录：把根文件夹直接包含的 .jar/.zip 并入根分组
+    // （用户直接指向 mods 等内容包文件夹时也能识别；子层级不扫描，避免把
+    //   processedMods 等杂文件夹误判为版本分组）
+    if depth == 0 {
+        let (dm, dr, ds) = scan_dir_packs_direct(dir);
+        if !dm.is_empty() || !dr.is_empty() || !ds.is_empty() {
+            mods.extend(dm);
+            rps.extend(dr);
+            sps.extend(ds);
+            let cmp = |a: &GamePackEntry, b: &GamePackEntry| {
+                a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase())
+            };
+            mods.sort_by(cmp);
+            rps.sort_by(cmp);
+            sps.sort_by(cmp);
+        }
+    }
     let has = !mods.is_empty() || !rps.is_empty() || !sps.is_empty();
 
     if has {
@@ -187,33 +204,6 @@ fn collect_groups(
             "game-scan-progress",
             serde_json::json!({ "done": out.len(), "total": 0, "current": rel }),
         );
-    } else {
-        // 回退：目录本身不含 mods/resourcepacks/shaderpacks 子目录时，
-        // 直接扫描当前目录内的 .jar/.zip 文件（支持直接指向 mods 文件夹等场景）
-        let (dm, dr, ds) = scan_dir_packs_direct(dir);
-        if !dm.is_empty() || !dr.is_empty() || !ds.is_empty() {
-            let dir_name = if rel.is_empty() {
-                dir.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "root".to_string())
-            } else {
-                rel.split('/').next_back().unwrap_or(rel).to_string()
-            };
-            out.push(GameVersionGroup {
-                rel_path: rel.to_string(),
-                dir_name,
-                mc_version: None,
-                valid: false,
-                mods: dm,
-                resourcepacks: dr,
-                shaderpacks: ds,
-            });
-            let _ = app.emit(
-                "game-scan-progress",
-                serde_json::json!({ "done": out.len(), "total": 0, "current": rel }),
-            );
-        }
     }
 
     // 继续向下递归（跳过已识别的内容包目录与无关大目录）
