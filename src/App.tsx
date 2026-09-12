@@ -851,8 +851,7 @@ function AppInner({
   async function pickFiles() {
     const paths = await open({
       multiple: true,
-      title: "选择文件（模组 jar / 光影包 zip / 资源包 zip，可多选）",
-      filters: [{ name: "Minecraft 内容包", extensions: ["jar", "zip"] }],
+      title: "选择内容包文件（→ 自由导入）或游戏目录 / 版本文件夹（→ 自动扫描）",
     });
     if (paths && paths.length > 0) {
       await addFiles(paths);
