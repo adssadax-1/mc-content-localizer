@@ -540,6 +540,8 @@ function AppInner({
   if (workModeRef.current !== workMode) workModeRef.current = workMode;
   // 拖入/选择文件夹后自动进入游戏目录模式并扫描（GameDirView 消费后清空）
   const [gamedirAutoScan, setGamedirAutoScan] = useState<string | null>(null);
+  // 游戏目录「解析并加入列表」的解析进度（GameDirView 显示）
+  const [gdAddProgress, setGdAddProgress] = useState<{ done: number; total: number; current: string } | null>(null);
 
   // 启动恢复询问：有会话缓存（上次未清空就退出/崩溃）时询问是否恢复内容包列表
   useEffect(() => {
@@ -1810,17 +1812,21 @@ function AppInner({
         )}
 
         <Content style={{ padding: 12, overflow: "auto" }}>
-          {workMode === "gamedir" ? (
-            <GameDirView
+          <div style={{ display: workMode === "gamedir" ? "block" : "none" }}>
+          <GameDirView
               settings={settings!}
               onSettingsUpdate={setSettings}
               autoScanDir={gamedirAutoScan}
               onAutoScanConsumed={() => setGamedirAutoScan(null)}
+              addProgress={gdAddProgress}
               onAddToQueue={async (packs) => {
                 const added: PackItem[] = [];
                 let skipped = 0;
                 const existing = new Set(queue.map((x) => x.sourcePath));
-                for (const gp of packs) {
+                const emptyPacks: typeof packs = [];
+                for (let i = 0; i < packs.length; i++) {
+                  const gp = packs[i];
+                  setGdAddProgress({ done: i, total: packs.length, current: gp.fileName });
                   if (existing.has(gp.path)) {
                     skipped += 1;
                     continue;
@@ -1843,6 +1849,10 @@ function AppInner({
                       entries = rp.entries;
                       name = rp.name;
                     }
+                    if (entries.length === 0) {
+                      emptyPacks.push(gp);
+                      continue;
+                    }
                     added.push({
                       key: "gd-" + gp.path,
                       kind: gp.kind,
@@ -1861,12 +1871,59 @@ function AppInner({
                     skipped += 1;
                   }
                 }
+                // 条目为空的包 → 询问深度扫描；扫出文本的加入，仍无文本的不加入
+                if (emptyPacks.length > 0) {
+                  const useDeep = await new Promise<boolean>((resolve) => {
+                    Modal.confirm({
+                      title: `${emptyPacks.length} 个内容包没有扫描到文本`,
+                      content:
+                        "是否对它们启用深度扫描（配置 / 成就 / 内嵌文本等）？深度扫描后仍无文本的包不会加入列表。",
+                      okText: "深度扫描",
+                      cancelText: "跳过这些包",
+                      onOk: () => resolve(true),
+                      onCancel: () => resolve(false),
+                    });
+                  });
+                  if (useDeep) {
+                    for (const gp of emptyPacks) {
+                      try {
+                        const res = await api.deepScanJar(gp.path, gp.fileName.replace(/\.jar$/i, ""));
+                        if (res.entries.length === 0) {
+                          skipped += 1;
+                          continue;
+                        }
+                        added.push({
+                          key: "gd-" + gp.path,
+                          kind: gp.kind,
+                          name: gp.fileName.replace(/\.(jar|zip)$/i, ""),
+                          fileName: gp.fileName,
+                          sourcePath: gp.path,
+                          expanded: false,
+                          checked: true,
+                          height: 480,
+                          entries: res.entries.map((e) => ({
+                            ...e,
+                            selected: true,
+                            notes: [...(e.notes ?? []), "深度扫描"],
+                          })),
+                          langFormat: "json",
+                          gameVersion: gp.gameVersion,
+                        });
+                      } catch {
+                        skipped += 1;
+                      }
+                    }
+                  } else {
+                    skipped += emptyPacks.length;
+                  }
+                }
                 if (added.length > 0) setQueue((prev) => [...prev, ...added]);
                 setWorkMode("free");
                 return { added: added.length, skipped };
               }}
             />
-          ) : (
+          </div>
+          {workMode === "free" && (
           <>
           {visibleQueue.length === 0 ? (
             <div style={{ height: "100%" }}>
@@ -1914,14 +1971,6 @@ function AppInner({
                 >
                   {t("app.checkAll")}
                 </Checkbox>
-                <Segmented
-              value={workMode}
-              onChange={(v) => setWorkMode((v as string) === "gamedir" ? "gamedir" : "free")}
-              options={[
-                { label: "自由导入", value: "free" },
-                { label: "游戏目录", value: "gamedir" },
-              ]}
-            />
           </Space>
 
               {translating && progress && (

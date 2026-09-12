@@ -20,6 +20,8 @@ import type { GameDirScan, GamePackEntry, GameVersionGroup, Settings } from "../
 interface Props {
   settings: Settings;
   onSettingsUpdate: (s: Settings) => void;
+  /** 「解析并加入列表」的解析进度（App 注入循环回传） */
+  addProgress?: { done: number; total: number; current: string } | null;
   /** 将勾选的内容包解析并注入原有队列（App 实现：解析 + 去重 + 入队 + 跳转） */
   onAddToQueue: (
     packs: {
@@ -45,7 +47,7 @@ function packsOf(g: GameVersionGroup, kind: Kind): GamePackEntry[] {
   return g.shaderpacks;
 }
 
-export function GameDirView({ settings, onSettingsUpdate, onAddToQueue, autoScanDir, onAutoScanConsumed }: Props) {
+export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQueue, autoScanDir, onAutoScanConsumed }: Props) {
   const [root, setRoot] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number; current: string } | null>(null);
@@ -102,25 +104,21 @@ export function GameDirView({ settings, onSettingsUpdate, onAddToQueue, autoScan
           const fk = `${p.fileName}|${p.size}`;
           dupKeys.set(fk, (dupKeys.get(fk) ?? 0) + 1);
         };
-        for (const p of result.rootGroup.mods) reg(p);
-        for (const p of result.rootGroup.resourcepacks) reg(p);
-        for (const p of result.rootGroup.shaderpacks) reg(p);
-        for (const v of result.versions) {
-          for (const p of v.mods) reg(p);
-          for (const p of v.resourcepacks) reg(p);
-          for (const p of v.shaderpacks) reg(p);
+        let packTotal = 0;
+        for (const g of result.groups) {
+          for (const p of [...g.mods, ...g.resourcepacks, ...g.shaderpacks]) {
+            reg(p);
+            packTotal += 1;
+          }
         }
         let dup = 0;
         for (const n of dupKeys.values()) if (n > 1) dup += n - 1;
-        const packTotal =
-          result.rootGroup.mods.length +
-          result.rootGroup.resourcepacks.length +
-          result.rootGroup.shaderpacks.length +
-          result.versions.reduce(
-            (n, v) => n + v.mods.length + v.resourcepacks.length + v.shaderpacks.length,
-            0,
-          );
-        setScanSummary({ scan: result, packTotal, dup, versions: result.versions.length + 1 });
+        setScanSummary({ scan: result, packTotal, dup, versions: result.groups.length });
+        // 自动选中第一个有内容包的分组，主界面立即有内容
+        const first = result.groups.find(
+          (g) => g.mods.length > 0 || g.resourcepacks.length > 0 || g.shaderpacks.length > 0,
+        );
+        setActiveGroup(first ? "g:" + first.relPath : null);
         setSummaryOpen(true);
       } catch (e) {
         if (String(e).includes("已取消")) message.info("已取消扫描");
@@ -148,10 +146,14 @@ export function GameDirView({ settings, onSettingsUpdate, onAddToQueue, autoScan
   }
   const groups: GroupRow[] = useMemo(() => {
     if (!scan) return [];
-    return [
-      { key: "__root__", name: "公共目录", group: scan.rootGroup, isRoot: true },
-      ...scan.versions.map((v) => ({ key: "v:" + v.dirName, name: v.dirName, group: v, isRoot: false })),
-    ];
+    const seen = new Map<string, number>();
+    return scan.groups.map((g) => {
+      let name = g.dirName;
+      const c = seen.get(name) ?? 0;
+      seen.set(name, c + 1);
+      if (c > 0) name = `${name} (${c + 1})`;
+      return { key: "g:" + g.relPath, name, group: g, isRoot: g.relPath === "" };
+    });
   }, [scan]);
 
   const allPacks = useMemo(() => {
@@ -288,10 +290,11 @@ export function GameDirView({ settings, onSettingsUpdate, onAddToQueue, autoScan
         )}
         {scan && (
           <div style={{ marginTop: 10 }}>
-            {[
-              { key: "__root__", name: "公共目录", g: scan.rootGroup },
-              ...scan.versions.map((v) => ({ key: "v:" + v.dirName, name: v.dirName, g: v })),
-            ].map((row) => {
+            {scan.groups.map((g) => ({
+              key: "g:" + g.relPath,
+              name: g.dirName,
+              g,
+            })).map((row) => {
               return (
                 <div
                   key={row.key}
@@ -380,6 +383,11 @@ export function GameDirView({ settings, onSettingsUpdate, onAddToQueue, autoScan
               <Typography.Text type="secondary" style={{ fontSize: 12, marginLeft: 10 }}>
                 加入后切到「自由导入」页开始翻译；跨版本重复的包将自动复用译文
               </Typography.Text>
+              {addProgress && (
+                <Typography.Text style={{ fontSize: 12 }}>
+                  解析中 {addProgress.done}/{addProgress.total}：{addProgress.current}
+                </Typography.Text>
+              )}
             </div>
 
             {filtered ? (

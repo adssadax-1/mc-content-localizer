@@ -190,9 +190,12 @@ export interface GamePackEntry {
 }
 
 export interface GameVersionGroup {
+  /** 相对游戏目录的路径（"" = 公共目录），唯一标识 */
+  relPath: string;
+  /** 展示名（路径最后一段） */
   dirName: string;
   mcVersion: string | null;
-  /** 版本文件夹是否含版本 jar/json（否则无可翻译内容） */
+  /** 是否含版本 jar/json（仅供参考） */
   valid: boolean;
   mods: GamePackEntry[];
   resourcepacks: GamePackEntry[];
@@ -201,8 +204,8 @@ export interface GameVersionGroup {
 
 export interface GameDirScan {
   root: string;
-  rootGroup: GameVersionGroup;
-  versions: GameVersionGroup[];
+  /** 相对路径 "" = 公共目录（排最前） */
+  groups: GameVersionGroup[];
 }
 
 /** 多线程翻译配置（实验性） */

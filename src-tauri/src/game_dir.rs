@@ -1,6 +1,8 @@
-//! 游戏目录模式：扫描 .minecraft / versions / 单版本文件夹（只读，不写入游戏目录）。
+//! 游戏目录模式：扫描 .minecraft / versions / 任意文件夹（递归向下，只读）。
 //!
-//! 两段式设计：scan 只读文件清单（不解析内容包），解析由前端按需调用 parse_game_pack。
+//! 两段式设计：scan 只读文件清单（不解析内容包），解析由前端按需调用既有命令。
+//! 递归规则：从根目录向下查找包含 mods / resourcepacks / shaderpacks 子目录的文件夹，
+//! 每个这样的文件夹就是一个"版本分组"（相对路径作为分组名）；跳过库/存档/缓存等无关目录。
 
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,11 +24,13 @@ pub struct GamePackEntry {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GameVersionGroup {
-    /// 版本文件夹名（唯一展示名）
+    /// 相对根目录的路径（"" = 公共目录）
+    pub rel_path: String,
+    /// 展示名（最后一段；前端负责重名消歧）
     pub dir_name: String,
-    /// 从 json 读取的游戏版本（无则取文件夹名）
+    /// 从 json 读取的游戏版本（有才显示）
     pub mc_version: Option<String>,
-    /// 版本文件夹是否含版本 jar/json（否则标灰"无可翻译文本"）
+    /// 是否含版本 jar/json（老判定，仅供参考）
     pub valid: bool,
     pub mods: Vec<GamePackEntry>,
     pub resourcepacks: Vec<GamePackEntry>,
@@ -37,9 +41,8 @@ pub struct GameVersionGroup {
 #[serde(rename_all = "camelCase")]
 pub struct GameDirScan {
     pub root: String,
-    /// 根目录三文件夹（虚拟"公共目录"分组）
-    pub root_group: GameVersionGroup,
-    pub versions: Vec<GameVersionGroup>,
+    /// 相对路径 "" = 公共目录（排最前）
+    pub groups: Vec<GameVersionGroup>,
 }
 
 fn scan_dir_packs(dir: &std::path::Path, kind: &str) -> Vec<GamePackEntry> {
@@ -50,7 +53,10 @@ fn scan_dir_packs(dir: &std::path::Path, kind: &str) -> Vec<GamePackEntry> {
             if !p.is_file() {
                 continue;
             }
-            let ext = p.extension().and_then(|x| x.to_str()).map(|x| x.to_lowercase());
+            let ext = p
+                .extension()
+                .and_then(|x| x.to_str())
+                .map(|x| x.to_lowercase());
             let ok = match kind {
                 "mod" => ext.as_deref() == Some("jar"),
                 "shader" | "resourcepack" => ext.as_deref() == Some("zip"),
@@ -61,7 +67,10 @@ fn scan_dir_packs(dir: &std::path::Path, kind: &str) -> Vec<GamePackEntry> {
             }
             out.push(GamePackEntry {
                 path: p.to_string_lossy().to_string(),
-                file_name: p.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default(),
+                file_name: p
+                    .file_name()
+                    .map(|x| x.to_string_lossy().to_string())
+                    .unwrap_or_default(),
                 size: e.metadata().map(|m| m.len()).unwrap_or(0),
                 kind: kind.to_string(),
             });
@@ -71,8 +80,42 @@ fn scan_dir_packs(dir: &std::path::Path, kind: &str) -> Vec<GamePackEntry> {
     out
 }
 
-fn sub_dirs_with_version_marker(dir: &std::path::Path) -> Vec<String> {
-    let mut out = Vec::new();
+/// 递归向下扫描：找到所有含 mods / resourcepacks / shaderpacks 的文件夹作为版本分组
+fn collect_groups(
+    dir: &std::path::Path,
+    rel: &str,
+    depth: usize,
+    app: &AppHandle,
+    out: &mut Vec<GameVersionGroup>,
+) -> bool {
+    if depth > 5 || GAME_SCAN_CANCEL.load(Ordering::Relaxed) {
+        return false;
+    }
+    let mods = scan_dir_packs(&dir.join("mods"), "mod");
+    let rps = scan_dir_packs(&dir.join("resourcepacks"), "resourcepack");
+    let sps = scan_dir_packs(&dir.join("shaderpacks"), "shader");
+    let has = !mods.is_empty() || !rps.is_empty() || !sps.is_empty();
+
+    if has {
+        let dir_name = rel.split('/').next_back().unwrap_or(rel).to_string();
+        out.push(GameVersionGroup {
+            rel_path: rel.to_string(),
+            dir_name,
+            mc_version: None,
+            valid: dir
+                .join(format!("{}.json", rel.split('/').next_back().unwrap_or("")))
+                .is_file(),
+            mods,
+            resourcepacks: rps,
+            shaderpacks: sps,
+        });
+        let _ = app.emit(
+            "game-scan-progress",
+            serde_json::json!({ "done": out.len(), "total": 0, "current": rel }),
+        );
+    }
+
+    // 继续向下递归（跳过已识别的内容包目录与无关大目录）
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let p = e.path();
@@ -80,50 +123,43 @@ fn sub_dirs_with_version_marker(dir: &std::path::Path) -> Vec<String> {
                 continue;
             }
             let name = e.file_name().to_string_lossy().to_string();
-            // 判定规则：含 <文件夹名>.jar / <文件夹名>.json，或任意 <*.jar + *.json> 组合
-            let has_named = p.join(format!("{}.jar", name)).is_file() || p.join(format!("{}.json", name)).is_file();
-            let has_any = std::fs::read_dir(&p)
-                .map(|rd| {
-                    let mut jar = false;
-                    let mut json = false;
-                    for f in rd.flatten() {
-                        let n = f.file_name().to_string_lossy().to_lowercase();
-                        if n.ends_with(".jar") {
-                            jar = true;
-                        }
-                        if n.ends_with(".json") {
-                            json = true;
-                        }
-                    }
-                    jar && json
-                })
-                .unwrap_or(false);
-            if has_named || has_any {
-                out.push(name);
+            if name.starts_with('.')
+                || matches!(
+                    name.as_str(),
+                    "mods"
+                        | "resourcepacks"
+                        | "shaderpacks"
+                        | "libraries"
+                        | "saves"
+                        | "assets"
+                        | "logs"
+                        | "crash-reports"
+                        | "cache"
+                        | "config"
+                        | "data"
+                        | "downloads"
+                        | "kubejs"
+                        | "patchouli_books"
+                        | "natives"
+                )
+                || name.ends_with("-natives")
+            {
+                continue;
             }
+            let child_rel = if rel.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{}", rel, name)
+            };
+            collect_groups(&p, &child_rel, depth + 1, app, out);
         }
     }
-    out.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
-    out
+    GAME_SCAN_CANCEL.load(Ordering::Relaxed)
 }
 
-/// 从版本文件夹内的 <name>.json 读取游戏版本（id 字段）
-fn read_mc_version(vdir: &std::path::Path, dir_name: &str) -> Option<String> {
-    let candidates = [
-        vdir.join(format!("{}.json", dir_name)),
-        vdir.join(format!("{}.json", dir_name.replace(' ', "_"))),
-    ];
-    for c in candidates {
-        if let Ok(text) = std::fs::read_to_string(&c) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                if let Some(id) = v.get("id").and_then(|x| x.as_str()) {
-                    return Some(id.to_string());
-                }
-            }
-        }
-    }
-    // 兜底：任意 *.json 里带 "id" 字段的第一个
-    if let Ok(rd) = std::fs::read_dir(vdir) {
+/// 从分组文件夹内的 *.json 读取游戏版本（id 字段）
+fn read_mc_version(dir: &std::path::Path) -> Option<String> {
+    if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let n = e.file_name().to_string_lossy().to_string();
             if n.to_lowercase().ends_with(".json") {
@@ -140,18 +176,7 @@ fn read_mc_version(vdir: &std::path::Path, dir_name: &str) -> Option<String> {
     None
 }
 
-fn group_from(dir: &std::path::Path, dir_name: &str, valid: bool) -> GameVersionGroup {
-    GameVersionGroup {
-        dir_name: dir_name.to_string(),
-        mc_version: None,
-        valid,
-        mods: scan_dir_packs(&dir.join("mods"), "mod"),
-        resourcepacks: scan_dir_packs(&dir.join("resourcepacks"), "resourcepack"),
-        shaderpacks: scan_dir_packs(&dir.join("shaderpacks"), "shader"),
-    }
-}
-
-/// 扫描游戏目录：versions 下的各版本 + 根目录三文件夹（虚拟"公共目录"）
+/// 扫描游戏目录：递归向下找出所有内容包分组（只读清单，不解析内容包）
 #[tauri::command]
 pub async fn scan_game_dir(app: AppHandle, root: String) -> Result<GameDirScan, String> {
     let root_path = std::path::Path::new(&root);
@@ -160,38 +185,29 @@ pub async fn scan_game_dir(app: AppHandle, root: String) -> Result<GameDirScan, 
     }
     GAME_SCAN_CANCEL.store(false, Ordering::Relaxed);
 
-    let versions_dir = root_path.join("versions");
-    let version_names = if versions_dir.is_dir() {
-        sub_dirs_with_version_marker(&versions_dir)
-    } else {
-        Vec::new()
-    };
+    let mut groups: Vec<GameVersionGroup> = Vec::new();
+    collect_groups(root_path, "", 0, &app, &mut groups);
 
-    // 根目录公共分组
-    let mut root_group = group_from(root_path, "公共目录", true);
-    root_group.mc_version = None;
-
-    let total = version_names.len();
-    let mut versions: Vec<GameVersionGroup> = Vec::new();
-    for (i, name) in version_names.iter().enumerate() {
-        if GAME_SCAN_CANCEL.load(Ordering::Relaxed) {
-            return Err("已取消".to_string());
+    // 空分组（无内容包）不返回；公共目录（""）排最前；其余按路径排序
+    groups.retain(|g| {
+        !g.mods.is_empty() || !g.resourcepacks.is_empty() || !g.shaderpacks.is_empty()
+    });
+    for g in &mut groups {
+        if !g.rel_path.is_empty() {
+            g.mc_version = read_mc_version(root_path.join(&g.rel_path).as_path());
         }
-        let vdir = versions_dir.join(name);
-        let mut g = group_from(&vdir, name, true);
-        g.mc_version = read_mc_version(&vdir, name);
-        versions.push(g);
-        let _ = app.emit(
-            "game-scan-progress",
-            serde_json::json!({ "done": i + 1, "total": total, "current": name }),
-        );
     }
+    groups.sort_by(|a, b| {
+        if a.rel_path.is_empty() {
+            return std::cmp::Ordering::Less;
+        }
+        if b.rel_path.is_empty() {
+            return std::cmp::Ordering::Greater;
+        }
+        a.rel_path.to_lowercase().cmp(&b.rel_path.to_lowercase())
+    });
 
-    Ok(GameDirScan {
-        root: root.to_string(),
-        root_group,
-        versions,
-    })
+    Ok(GameDirScan { root, groups })
 }
 
 #[tauri::command]
@@ -204,9 +220,3 @@ pub fn cancel_game_scan() {
 pub fn path_is_dir(path: String) -> bool {
     std::path::Path::new(&path).is_dir()
 }
-
-/// 供前端检查应用配置目录（会话缓存等）
-pub fn app_config_dir_exists(app: &AppHandle) -> bool {
-    app.path().app_config_dir().is_ok()
-}
-
