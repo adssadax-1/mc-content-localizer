@@ -377,6 +377,9 @@ const PackCard = memo(function PackCard({
         {item.hasZh && (
           <Tag color="cyan">{t("app.hasZh")} {item.zhCount ?? 0} {t("app.hasZhCount")}</Tag>
         )}
+        {item.gameVersion && (
+          <Tag color="geekblue">§ {item.gameVersion}</Tag>
+        )}
         {thisTranslating && (
           <Tag color="processing" className="dev-pulse-tag">
             {t("components.translating")}
@@ -498,6 +501,10 @@ export interface PackItem {
   langFormat?: LangFormat;
   hasZh?: boolean;
   zhCount?: number;
+  /** 游戏目录模式：来源版本名（自由导入无此字段） */
+  gameVersion?: string;
+  /** 文件大小（跨包译文复用的指纹之一；自由导入已知路径时可填充） */
+  size?: number;
 }
 
 function AppInner({
@@ -518,6 +525,8 @@ function AppInner({
   const translateStartRef = useRef(0);
   // 每个内容包的实时计数（批次事件累加，完成后弹 per-pack 卡片用）；same = 译文与原文相同
   const packCountsRef = useRef<Map<string, { ok: number; empty: number; error: number; error429: number; warn: number; same: number }>>(new Map());
+  // 跨包译文复用表：fileKey（fileName|size）→ { entryKey: 译文 }
+  const reuseRef = useRef<Map<string, Record<string, string>>>(new Map());
   // 内容包并行：正在翻译的包（key → true）与各包实时进度
   const [translatingKeys, setTranslatingKeys] = useState<Record<string, boolean>>({});
   const [packProgress, setPackProgress] = useState<Record<string, { done: number; total: number }>>({});
@@ -700,6 +709,11 @@ function AppInner({
   }, []);
 
   /** 导出成功提示 + 「打开所在文件夹」按钮 */
+  /** 按内容包的来源版本返回导出子目录（游戏目录模式：导出/版本名/…；自由导入：原目录） */
+  function vdirFor(dir: string, it: PackItem): string {
+    return it.gameVersion ? `${dir}/${it.gameVersion}` : dir;
+  }
+
   function notifyExport(title: string, paths: string[]) {
     notification.success({
       message: title,
@@ -1236,6 +1250,28 @@ function AppInner({
       preSame: number,
     ): Promise<void> => {
       setTranslatingKeys((prev) => ({ ...prev, [item.key]: true }));
+      // 跨包译文复用：同名同大小的包已译过的条目直接预填（不再发请求）
+      const reuse = reuseRef.current.get(`${item.fileName}|${item.size ?? 0}`) ?? {};
+      const reusedKeys = untranslated.filter((e) => reuse[e.key]).map((e) => e.key);
+      if (reusedKeys.length > 0) {
+        const ks = new Set(reusedKeys);
+        patchPack(item.key, (it) => ({
+          ...it,
+          entries: it.entries.map((e) =>
+            ks.has(e.key) && reuse[e.key]
+              ? {
+                  ...e,
+                  translation: reuse[e.key],
+                  status: "aiTranslated" as const,
+                  notes: [...e.notes, "跨版本复用译文"],
+                  translating: false,
+                }
+              : e,
+          ),
+        }));
+        untranslated.splice(0, untranslated.length, ...untranslated.filter((e) => !ks.has(e.key)));
+        message.info(`「${item.name}」复用已翻译译文 ${reusedKeys.length} 条`);
+      }
       // 先行将待翻译条目标记为「翻译中」（淡蓝），逐批完成后由实时事件翻为最终态
       patchPack(item.key, (it) => ({
         ...it,
@@ -1264,6 +1300,9 @@ function AppInner({
           ? Math.max(1, Math.ceil(untranslated.length / threads))
           : settings.batchSize;
       try {
+        const packLabel = item.gameVersion
+          ? `${item.gameVersion}·${item.kind === "mod" ? "模组" : item.kind === "shader" ? "光影包" : "资源包"}·${item.fileName}`
+          : undefined;
         const results = await api.runTranslation(
           provider,
           ctx,
@@ -1272,8 +1311,16 @@ function AppInner({
           effectiveBatch,
           settings.extractGlossary,
           settings.threading,
+          packLabel,
         );
         const byKey = new Map(results.map((r) => [r.key, r]));
+        // 跨包复用表：同名同大小的包共享译文
+        if (item.size) {
+          const fk = `${item.fileName}|${item.size}`;
+          const store = reuseRef.current.get(fk) ?? {};
+          for (const r of results) if (r.translation) store[r.key] = r.translation;
+          reuseRef.current.set(fk, store);
+        }
         patchPack(item.key, (it) => ({
           ...it,
           entries: it.entries.map((e) => {
@@ -1506,7 +1553,7 @@ function AppInner({
         }
         try {
           const base = it.fileName.replace(/\.(zip|jar)$/i, "");
-          const dest = `${dir}/${sanitizeFileName(base)}_zh_CN.zip`;
+          const dest = `${vdirFor(dir, it)}/${sanitizeFileName(base)}_zh_CN.zip`;
           await api.exportShaderZh(it.sourcePath, dest, translated);
           generated.push(dest);
           ok += 1;
@@ -1539,7 +1586,7 @@ function AppInner({
         }
         try {
           const base = it.fileName.replace(/\.(zip|jar)$/i, "");
-          const dest = `${dir}/${sanitizeFileName(base)}_zh_CN.zip`;
+          const dest = `${vdirFor(dir, it)}/${sanitizeFileName(base)}_zh_CN.zip`;
           await api.exportResourcePackDesc(it.sourcePath, dest, translated);
           generated.push(dest);
           ok += 1;
@@ -1581,15 +1628,28 @@ function AppInner({
       title: "选择导出目录（生成 mods_zh_cn.zip 合并资源包）",
     }));
     if (!dir) return;
-    const bundles: ResourcePackBundle[] = checked.map((it) => ({
-      modid: it.modFile?.modid ?? "mod",
-      modName: it.name,
-      entries: it.entries.filter((e) => e.selected !== false),
-      langFormat: it.langFormat ?? "json",
-    }));
     try {
-      const path = await api.exportResourcePackMulti(dir, bundles, packFormat);
-      notifyExport(`已导出合并汉化资源包（${checked.length} 个模组）`, [path]);
+      // 按来源版本分组导出（游戏目录模式：每个版本一个合并包；自由导入：单组）
+      const groups = new Map<string, PackItem[]>();
+      for (const it of checked) {
+        const k = it.gameVersion ?? "__all__";
+        (groups.get(k) ?? groups.set(k, []).get(k)!).push(it);
+      }
+      const generated: string[] = [];
+      let totalMods = 0;
+      for (const [ver, items] of groups) {
+        const bundles: ResourcePackBundle[] = items.map((it) => ({
+          modid: it.modFile?.modid ?? "mod",
+          modName: it.name,
+          entries: it.entries.filter((e) => e.selected !== false),
+          langFormat: it.langFormat ?? "json",
+        }));
+        const outDir = ver === "__all__" ? dir : `${dir}/${ver}`;
+        const path = await api.exportResourcePackMulti(outDir, bundles, packFormat);
+        generated.push(path);
+        totalMods += items.length;
+      }
+      notifyExport(`已导出合并汉化资源包（${totalMods} 个模组）`, generated);
       setExportSettingsOpen(false);
       setExportOpen(false);
     } catch (e) {
@@ -1631,7 +1691,7 @@ function AppInner({
         continue;
       }
       try {
-        const dest = `${dir}/${sanitizeFileName(it.modFile?.modid ?? "mod")}_zh_cn.jar`;
+        const dest = `${vdirFor(dir, it)}/${sanitizeFileName(it.modFile?.modid ?? "mod")}_zh_cn.jar`;
         await api.exportModJar(
           it.sourcePath,
           dest,
@@ -1756,23 +1816,55 @@ function AppInner({
               onSettingsUpdate={setSettings}
               autoScanDir={gamedirAutoScan}
               onAutoScanConsumed={() => setGamedirAutoScan(null)}
-              renderPackCard={(item, handlers, opts) => (
-                <PackCard
-                  item={item}
-                  translating={translating}
-                  thisTranslating={opts.thisTranslating}
-                  packProgress={opts.packProgress}
-                  onToggleExpanded={handlers.onToggleExpanded}
-                  onToggleChecked={handlers.onToggleChecked}
-                  onEdit={handlers.onEdit}
-                  onSelect={handlers.onSelect}
-                  onClear={handlers.onClear}
-                  onToggleSelected={handlers.onToggleSelected}
-                  onToggleAllSelected={handlers.onToggleAllSelected}
-                  onToggleManySelected={handlers.onToggleManySelected}
-                  onResize={handlers.onResize}
-                />
-              )}
+              onAddToQueue={async (packs) => {
+                const added: PackItem[] = [];
+                let skipped = 0;
+                const existing = new Set(queue.map((x) => x.sourcePath));
+                for (const gp of packs) {
+                  if (existing.has(gp.path)) {
+                    skipped += 1;
+                    continue;
+                  }
+                  try {
+                    let entries: LangEntry[];
+                    let modFile: ModFile | undefined;
+                    let name: string;
+                    if (gp.kind === "mod") {
+                      const mf = await api.parseJar(gp.path);
+                      entries = mf.entries;
+                      modFile = mf;
+                      name = mf.modName;
+                    } else if (gp.kind === "shader") {
+                      const sp = await api.parseShaderPack(gp.path);
+                      entries = sp.entries;
+                      name = sp.name;
+                    } else {
+                      const rp = await api.parseResourcePack(gp.path);
+                      entries = rp.entries;
+                      name = rp.name;
+                    }
+                    added.push({
+                      key: "gd-" + gp.path,
+                      kind: gp.kind,
+                      name,
+                      fileName: gp.fileName,
+                      sourcePath: gp.path,
+                      expanded: false,
+                      checked: true,
+                      height: 480,
+                      entries: entries.map((e) => ({ ...e, selected: e.selected ?? true })),
+                      modFile,
+                      langFormat: "json",
+                      gameVersion: gp.gameVersion,
+                    });
+                  } catch {
+                    skipped += 1;
+                  }
+                }
+                if (added.length > 0) setQueue((prev) => [...prev, ...added]);
+                setWorkMode("free");
+                return { added: added.length, skipped };
+              }}
             />
           ) : (
           <>
