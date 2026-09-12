@@ -6,14 +6,12 @@ import {
   Input,
   Modal,
   Progress,
-  Select,
   Space,
   Tag,
-  Tooltip,
   Typography,
   message,
 } from "antd";
-import { FolderOpenOutlined, SearchOutlined } from "@ant-design/icons";
+import { FolderOpenOutlined, SearchOutlined, CloseOutlined } from "@ant-design/icons";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useTranslationContext } from "../i18n";
 // hook 在组件内使用
@@ -42,7 +40,7 @@ interface Props {
 
 type Kind = "mod" | "shader" | "resourcepack";
 
-const KIND_LABEL: Record<Kind, string> = { mod: "模组", shader: "光影包", resourcepack: "资源包" };
+const KIND_LABEL_KEY: Record<Kind, string> = { mod: "gamedir.kindMod", shader: "gamedir.kindShader", resourcepack: "gamedir.kindRp" };
 
 function packsOf(g: GameVersionGroup, kind: Kind): GamePackEntry[] {
   if (kind === "mod") return g.mods;
@@ -62,6 +60,8 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
   const [search, setSearch] = useState("");
   const [activeGroup, setActiveGroup] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  // 展开式选择面板：null 关闭 / "all" 全部版本 / 具体类别
+  const [selPanel, setSelPanel] = useState<null | "all" | Kind>(null);
 
   const startScanRef = useRef<(dir: string) => Promise<void>>(async () => {});
 
@@ -137,7 +137,7 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
   startScanRef.current = startScan;
 
   const pickRoot = useCallback(async () => {
-    const dir = await open({ directory: true, title: "选择 .minecraft 目录或任意游戏目录（会自动向下扫描）" });
+    const dir = await open({ directory: true, title: t("gamedir.pickTitle") });
     if (dir && typeof dir === "string") void startScan(dir);
   }, [startScan]);
 
@@ -181,15 +181,6 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
     setSelected(next);
   };
   const selectNone = () => setSelected({});
-  const selectKind = (kind: Kind, currentOnly = false) => {
-    const next: Record<string, boolean> = { ...selected };
-    const scope = currentOnly && activeGroupRow ? activeGroupRow : null;
-    for (const { pack } of scope ? allPacks.filter(({ group }) => group.key === scope.key) : (filtered ?? allPacks)) {
-      if (pack.kind === kind) next[pack.path] = true;
-    }
-    setSelected(next);
-  };
-
   // ── 加入队列：交给 App 解析注入（去重 + 带版本标记），完成后 App 跳转自由导入页 ──
   const addToQueue = useCallback(async () => {
     const ids = Object.keys(selected).filter((id) => selected[id]);
@@ -239,7 +230,7 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
         </Typography.Text>
         {showOrigin && (
           <Tag style={{ marginRight: 0 }}>
-            {group.name} · {KIND_LABEL[kind]}
+            {group.name} · {t(KIND_LABEL_KEY[kind])}
           </Tag>
         )}
         <Typography.Text type="secondary" style={{ fontSize: 11, flexShrink: 0 }}>
@@ -248,6 +239,27 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
       </div>
     );
   }
+
+  // 展开式选择面板：面板范围内的包（按版本分组）
+  const panelScope = useMemo(() => {
+    if (!selPanel) return [];
+    const out: { group: GroupRow; kind: Kind; pack: GamePackEntry }[] = [];
+    for (const g of groups) {
+      const kinds: Kind[] = selPanel === "all" ? ["mod", "resourcepack", "shader"] : [selPanel as Kind];
+      for (const kind of kinds) {
+        for (const pack of packsOf(g.group, kind)) out.push({ group: g, kind, pack });
+      }
+    }
+    return out;
+  }, [selPanel, groups]);
+  const panelGroups = useMemo(() => {
+    const m = new Map<string, { key: string; name: string; packs: GamePackEntry[] }>();
+    for (const row of panelScope) {
+      if (!m.has(row.group.key)) m.set(row.group.key, { key: row.group.key, name: row.group.name, packs: [] });
+      m.get(row.group.key)!.packs.push(row.pack);
+    }
+    return [...m.values()];
+  }, [panelScope]);
 
   return (
     <div style={{ display: "flex", minHeight: 0, flex: 1 }}>
@@ -266,13 +278,42 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
             {t("gamedir.open")}
           </Button>
           {(settings.recentGameDirs ?? []).length > 0 && (
-            <Select
-              placeholder={t("gamedir.recent")}
-              style={{ width: "100%", marginTop: 8 }}
-              value={root ?? undefined}
-              options={(settings.recentGameDirs ?? []).map((d) => ({ label: d, value: d }))}
-              onChange={(v) => void startScan(v)}
-            />
+            <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 2 }}>
+              {(settings.recentGameDirs ?? []).map((d) => (
+                <div
+                  key={d}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 4,
+                    padding: "2px 4px",
+                    borderRadius: 4,
+                    cursor: "pointer",
+                    background: root === d ? "var(--ant-color-fill-secondary)" : undefined,
+                  }}
+                  onClick={() => void startScan(d)}
+                >
+                  <Typography.Text
+                    ellipsis
+                    style={{ fontSize: 12, flex: 1, minWidth: 0 }}
+                    title={d}
+                  >
+                    {d.split(/[\\/]/).pop() ?? d}
+                  </Typography.Text>
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<CloseOutlined />}
+                    style={{ flexShrink: 0 }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const list = (settings.recentGameDirs ?? []).filter((x) => x !== d);
+                      onSettingsUpdate({ ...settings, recentGameDirs: list });
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
           )}
 
         </div>
@@ -339,7 +380,7 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
           <div style={{ marginBottom: 12 }}>
             <Progress
               percent={Math.round((progress.done / Math.max(1, progress.total)) * 100)}
-              format={() => `扫描版本 ${progress.done}/${progress.total}：${progress.current}`}
+              format={() => t("gamedir.scanVersionProgress", { done: progress.done, total: progress.total, current: progress.current })}
             />
           </div>
         )}
@@ -364,30 +405,73 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
               />
-              <Tooltip title={t("gamedir.selectAllVersionsTip")}>
-                <Button size="small" onClick={selectAll}>
-                  {t("gamedir.selectAllVersions")}
-                </Button>
-              </Tooltip>
-              <Button size="small" onClick={selectNone}>
-                {t("gamedir.selectNone")}
+              <Button size="small" onClick={selectAll}>
+                {t("gamedir.btnAll")}
               </Button>
-              <Tooltip title={t("gamedir.scopeCurrentTip")}>
-                <Button size="small" onClick={() => selectKind("mod", true)}>
-                  {t("gamedir.selAllMods")}
+              <Button size="small" onClick={selectNone}>
+                {t("gamedir.btnNone")}
+              </Button>
+              {(["mod", "resourcepack", "shader"] as Kind[]).map((k) => (
+                <Button
+                  key={k}
+                  size="small"
+                  type={selPanel === k ? "primary" : "default"}
+                  onClick={() => {
+                    setSelPanel((prev) => (prev === k ? null : k));
+                  }}
+                >
+                  {t(KIND_LABEL_KEY[k])}
                 </Button>
-              </Tooltip>
-              <Tooltip title={t("gamedir.scopeCurrentTip")}>
-                <Button size="small" onClick={() => selectKind("resourcepack", true)}>
-                  {t("gamedir.selAllRp")}
-                </Button>
-              </Tooltip>
-              <Tooltip title={t("gamedir.scopeCurrentTip")}>
-                <Button size="small" onClick={() => selectKind("shader", true)}>
-                  {t("gamedir.selAllSp")}
-                </Button>
-              </Tooltip>
+              ))}
             </Space>
+
+            {/* 展开式选择面板：按版本分组的勾选列表，勾选即时生效 */}
+            {selPanel && (
+              <div style={{ border: "1px solid var(--border-color)", borderRadius: 8, padding: "8px 12px", marginBottom: 12 }}>
+                <Space style={{ marginBottom: 6 }} wrap>
+                  <Typography.Text strong style={{ fontSize: 12 }}>
+                    {selPanel === "all" ? t("gamedir.panelAllTitle") : `${t(KIND_LABEL_KEY[selPanel as Kind])} · ${t("gamedir.panelByVersion")}`}
+                  </Typography.Text>
+                  <Button size="small" onClick={() => {
+                    const next = { ...selected };
+                    for (const row of panelGroups) for (const p of row.packs) next[p.path] = true;
+                    setSelected(next);
+                  }}>
+                    {t("gamedir.panelCheckAll")}
+                  </Button>
+                  <Button size="small" onClick={() => {
+                    const next = { ...selected };
+                    for (const row of panelGroups) for (const p of row.packs) delete next[p.path];
+                    setSelected(next);
+                  }}>
+                    {t("gamedir.panelUncheckAll")}
+                  </Button>
+                </Space>
+                {panelGroups.length === 0 && (
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    {t("gamedir.noPacks")}
+                  </Typography.Text>
+                )}
+                {panelGroups.map((g) => (
+                  <div key={g.key} style={{ marginBottom: 8 }}>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      {g.name}（{g.packs.length}）
+                    </Typography.Text>
+                    {g.packs.map((pack) => (
+                      <div key={pack.path} style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 8px" }}>
+                        <Checkbox checked={!!selected[pack.path]} onChange={(e) => setSelected((prev) => ({ ...prev, [pack.path]: e.target.checked }))} />
+                        <Typography.Text style={{ flex: 1, minWidth: 0, fontSize: 12 }} ellipsis={{ tooltip: pack.fileName }}>
+                          {pack.fileName}
+                        </Typography.Text>
+                        <Typography.Text type="secondary" style={{ fontSize: 11, flexShrink: 0 }}>
+                          {(pack.size / 1024 / 1024).toFixed(2)} MB
+                        </Typography.Text>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
 
             {/* 全局：加入列表 */}
             <div style={{ marginBottom: 12 }}>
@@ -413,17 +497,17 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
             {filtered ? (
               <>
                 <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 6 }}>
-                  搜索"{search}"：{filtered.length} 个结果
+                  {t("gamedir.searchResult", { q: search, n: filtered.length })}
                 </Typography.Text>
                 {filtered.length === 0 ? (
-                  <Empty description="没有匹配的内容包" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                  <Empty description={t("gamedir.noMatch")} image={Empty.PRESENTED_IMAGE_SIMPLE} />
                 ) : (
                   filtered.map(({ group, kind, pack }) => packRow(group, kind, pack, true))
                 )}
               </>
             ) : (
               activePacks.packs.length === 0 ? (
-                <Empty description="此版本没有内容包" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                <Empty description={t("gamedir.noPacks")} image={Empty.PRESENTED_IMAGE_SIMPLE} />
               ) : (
                 ["mod", "resourcepack", "shader"].map((kind) => {
                   const k = kind as Kind;
@@ -432,7 +516,7 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
                   return (
                     <div key={kind} style={{ marginBottom: 16 }}>
                       <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 4 }}>
-                        {KIND_LABEL[k]}（{list.length}）
+                        {t(KIND_LABEL_KEY[k])}（{list.length}）
                       </Typography.Text>
                       {list.map(({ pack }) => packRow(activeGroupRow, k, pack, false))}
                     </div>

@@ -510,6 +510,18 @@
     "addedSkipped": "已加入列表 {n} 个内容包（跳过已在列表 {m} 个）",
     "pickVersion": "在左侧选择一个版本查看内容包",
     "selectAllVersionsTip": "选中所有版本下的全部内容包",
-    "scopeCurrentTip": "只选中当前版本的该类内容包"
+    "scopeCurrentTip": "只选中当前版本的该类内容包",
+    "btnAll": "全选",
+    "btnNone": "全不选",
+    "panelAllTitle": "全部内容包（按版本分组）",
+    "panelByVersion": "按版本分组",
+    "panelCheckAll": "全选本面板",
+    "panelUncheckAll": "取消全选本面板",
+    "searchResult": "搜索 \"{q}\"：{n} 个结果",
+    "noMatch": "没有匹配的内容包",
+    "kindMod": "模组",
+    "kindShader": "光影包",
+    "kindRp": "资源包",
+    "scanVersionProgress": "扫描版本 {done}/{total}：{current}"
   }
 }

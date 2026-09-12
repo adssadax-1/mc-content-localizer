@@ -510,6 +510,18 @@
     "addedSkipped": "Added {n} packs ({m} already in list were skipped)",
     "pickVersion": "Select a version on the left to view its packs",
     "selectAllVersionsTip": "Select every pack across all versions",
-    "scopeCurrentTip": "Select this kind within the current version only"
+    "scopeCurrentTip": "Select this kind within the current version only",
+    "btnAll": "Select all",
+    "btnNone": "Deselect all",
+    "panelAllTitle": "All packs (grouped by version)",
+    "panelByVersion": "grouped by version",
+    "panelCheckAll": "Check all in panel",
+    "panelUncheckAll": "Uncheck all in panel",
+    "searchResult": "Search \"{q}\": {n} results",
+    "noMatch": "No matching packs",
+    "kindMod": "Mods",
+    "kindShader": "Shaders",
+    "kindRp": "Resource Packs",
+    "scanVersionProgress": "Scanning {done}/{total}: {current}"
   }
 }

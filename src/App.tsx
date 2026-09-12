@@ -626,14 +626,8 @@ function AppInner({
   const [paused, setPaused] = useState(false);
   // devtools：网络故障注入生效中（Header 常驻标签文案，null = 无故障）
   const [devFaultSummary, setDevFaultSummary] = useState<string | null>(null);
-  // 清除译文对话框：可见性 + 勾选的备注标签（空 = 清除全部）
+  // 清除译文对话框：可见性
   const [clearOpen, setClearOpen] = useState(false);
-  const [clearTags, setClearTags] = useState<string[]>([]);
-  const clearTagOptions = useMemo(() => {
-    const set = new Set<string>();
-    queue.forEach((it) => it.entries.forEach((e) => (e.notes ?? []).forEach((n) => set.add(n))));
-    return [...set];
-  }, [queue, clearOpen]);
 
   // devtools：监听开发者工具第二窗口广播的触发事件，在主窗口弹出真实提示
   useEffect(() => {
@@ -1462,25 +1456,31 @@ function AppInner({
     void api.resumeTranslation();
   }
 
-  /** 清除译文对话框：勾选备注标签时只清除带对应标签的条目；全不勾选 = 清除全部 */
+  /** 清除译文：只清除当前页勾选的内容包译文 */
   function handleClear() {
-    setClearTags([]);
     setClearOpen(true);
   }
 
   function doClear() {
-    const useTags = clearTags.length > 0;
+    const checkedKeys = new Set(
+      queue.filter((it) => it.kind === activeTab && it.checked).map((it) => it.key),
+    );
     setQueue((prev) =>
-      prev.map((it) => ({
-        ...it,
-        entries: it.entries.map((e) => {
-          if (useTags && !(e.notes ?? []).some((n) => clearTags.includes(n))) return e;
-          return { ...e, translation: null, status: "untranslated" as const, notes: [] };
-        }),
-      })),
+      prev.map((it) => {
+        if (!checkedKeys.has(it.key)) return it;
+        return {
+          ...it,
+          entries: it.entries.map((e) => ({
+            ...e,
+            translation: null,
+            status: "untranslated" as const,
+            notes: [],
+          })),
+        };
+      }),
     );
     setClearOpen(false);
-    message.success(useTags ? "已清除带所选标签的译文" : "已清除全部译文");
+    message.success(`已清除 ${checkedKeys.size} 个内容包的译文`);
   }
 
   /** 清空当前内容类型页的列表（只移除当前类型的包） */
@@ -2235,7 +2235,7 @@ function AppInner({
         )}
       </Modal>
 
-      {/* 清除译文：按备注标签勾选清除；全不勾选 = 清除全部 */}
+      {/* 清除译文：只清除当前页勾选的内容包 */}
       <Modal
         title="清除译文"
         open={clearOpen}
@@ -2244,21 +2244,11 @@ function AppInner({
         okText="清除"
         okButtonProps={{ danger: true }}
         cancelText="取消"
-        width={520}
+        width={420}
       >
-        <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
-          勾选标签：只清除带所选标签的条目；全部不勾选：清除全部译文（不可撤销）。
+        <Typography.Paragraph>
+          将清除当前{t(KIND_META[activeTab].labelKey)}页勾选的 {queue.filter((it) => it.kind === activeTab && it.checked).length} 个内容包的全部译文（不可撤销）。
         </Typography.Paragraph>
-        {clearTagOptions.length > 0 ? (
-          <Checkbox.Group
-            value={clearTags}
-            onChange={(v) => setClearTags(v as string[])}
-            options={clearTagOptions.map((tg) => ({ label: tg, value: tg }))}
-            style={{ display: "flex", flexDirection: "column", gap: 6 }}
-          />
-        ) : (
-          <Typography.Text type="secondary">当前没有带备注标签的条目，将清除全部译文。</Typography.Text>
-        )}
       </Modal>
 
       {/* 提取到的术语：弹窗勾选加入用户术语表（不阻塞翻译） */}
