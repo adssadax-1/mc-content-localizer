@@ -151,14 +151,17 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
   }, [open]);
   /** 当前展示的设置分组（默认页面设置；打开时按 initialSection 定位） */
   const [activeSection, setActiveSection] = useState<string>("appearance");
-  /** 面板错峰动画：渲染期同步派生（首次打开不播，切换分组的同一帧带类，消除闪烁） */
+  /** 面板错峰动画：渲染期同步带类（同帧提交不闪烁）；开关粘性，关闭弹窗时复位 */
   const [prevSection, setPrevSection] = useState<string | null>(null);
-  let panelAnim = false;
+  const [panelAnim, setPanelAnim] = useState(false);
   if (open) {
-    if (prevSection !== null && prevSection !== activeSection) panelAnim = true;
-    if (prevSection !== activeSection) setPrevSection(activeSection);
-  } else if (prevSection !== null) {
+    if (prevSection !== activeSection) {
+      if (prevSection !== null) setPanelAnim(true);
+      setPrevSection(activeSection);
+    }
+  } else if (prevSection !== null || panelAnim) {
     setPrevSection(null);
+    setPanelAnim(false);
   }
   const panelScrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {

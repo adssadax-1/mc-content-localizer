@@ -41,12 +41,13 @@ const KIND_TEXT: Record<
 export function DropZone({ dragOver, parsing, kind, onPick }: Props) {
   const { t } = useTranslationContext();
   const k = KIND_TEXT[kind];
-  // 错峰动画渲染期同步派生：切换类型的同一帧就带上动画类（避免先显示后重播的闪烁）
+  // 错峰动画：渲染期同步带类（同帧提交不闪烁）；开关粘性保持，重播靠 key 重挂载
   const [prevKind, setPrevKind] = useState(kind);
+  const [staggerOn, setStaggerOn] = useState(false);
   if (prevKind !== kind) {
     setPrevKind(kind);
+    setStaggerOn(true);
   }
-  const staggerOn = prevKind !== kind;
   return (
     <div
       onClick={onPick}
