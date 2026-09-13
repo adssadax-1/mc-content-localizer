@@ -7,35 +7,52 @@
 
 #![cfg(feature = "devtools")]
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter};
 
-static EMITTER: Mutex<Option<AppHandle>> = Mutex::new(None);
-/// 并行内容包时多个 run_translation 同时存活：引用计数归零才真正清除
-static EMITTER_REFCOUNT: AtomicUsize = AtomicUsize::new(0);
+/// emitter 句柄 + 存活计数放在同一把锁内。
+/// 此前计数用独立原子变量，与句柄写入/清除不在同一临界区：并行翻译时
+/// 「A 减计数」与「B 写句柄」交错会把 B 刚设置的句柄清掉，导致 B 这个
+/// 内容包整包 dev-* 事件全部丢失（表现为「翻译完了却没有计入」）。
+struct EmitterSlot {
+    handle: Option<AppHandle>,
+    refcount: usize,
+}
+
+static EMITTER: Mutex<EmitterSlot> = Mutex::new(EmitterSlot {
+    handle: None,
+    refcount: 0,
+});
 
 /// 在翻译开始时调用，设置全局 emitter（引用计数 +1）。
 pub fn set_emitter(handle: AppHandle) {
-    EMITTER_REFCOUNT.fetch_add(1, Ordering::Relaxed);
-    *EMITTER.lock().unwrap() = Some(handle);
+    if let Ok(mut slot) = EMITTER.lock() {
+        slot.handle = Some(handle);
+        slot.refcount += 1;
+    }
 }
 
 /// 在翻译结束时调用，引用计数 -1，归零才清除 emitter。
 pub fn clear_emitter() {
-    let prev = EMITTER_REFCOUNT.fetch_sub(1, Ordering::Relaxed);
-    if prev <= 1 {
-        EMITTER_REFCOUNT.store(0, Ordering::Relaxed);
-        *EMITTER.lock().unwrap() = None;
+    if let Ok(mut slot) = EMITTER.lock() {
+        if slot.refcount > 0 {
+            slot.refcount -= 1;
+        }
+        if slot.refcount == 0 {
+            slot.handle = None;
+        }
     }
 }
 
 /// 发送 dev-* 事件到前端。如果 emitter 未设置则静默跳过。
 pub fn dev_emit<S: serde::Serialize + Clone>(event: &str, payload: S) {
-    if let Ok(guard) = EMITTER.lock() {
-        if let Some(handle) = guard.as_ref() {
-            let _ = handle.emit(event, payload);
-        }
+    // 取出句柄副本后立即释放锁，避免 emit 期间持锁阻塞其它内容包的插桩
+    let handle = match EMITTER.lock() {
+        Ok(slot) => slot.handle.clone(),
+        Err(_) => None,
+    };
+    if let Some(handle) = handle {
+        let _ = handle.emit(event, payload);
     }
 }
 

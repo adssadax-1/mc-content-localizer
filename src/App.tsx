@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -15,6 +15,8 @@ import {
   Progress,
   Radio,
   Space,
+  Switch,
+  Tabs,
   Tag,
   Tooltip,
   Typography,
@@ -165,6 +167,13 @@ function sanitizeFileName(s: string): string {
 
 /** 内容包类型 */
 type PackKind = "mod" | "shader" | "resourcepack";
+
+/** 自由导入：单次导入超过该数量时，卡片默认收缩（展开会为每包挂载表格，数量大时卡顿） */
+const AUTO_EXPAND_MAX = 10;
+/** 自由导入：每解析这么多个包向队列批量提交一次（避免逐包 setQueue 造成 O(n²) 重渲染） */
+const IMPORT_FLUSH_CHUNK = 10;
+/** 内容包列表分页步长：上千个内容包时只挂载视口附近这些卡片，滚动到底自动续加载 */
+const PACK_RENDER_STEP = 50;
 
 /**
  * 术语表建议：收集出现 ≥3 次且已翻译的英文短语（未在现有术语表中）
@@ -340,11 +349,35 @@ const PackCard = memo(function PackCard({
 }: PackCardProps) {
   const { t } = useTranslationContext();
   const total = item.entries.length;
-  const translated = item.entries.filter((e) => e.translation).length;
+  // 卡内 O(M) 统计缓存：仅条目数组变化时重算（避免每次渲染都遍历）
+  const translated = useMemo(
+    () => item.entries.reduce((n, e) => n + (e.translation ? 1 : 0), 0),
+    [item.entries],
+  );
+  const deepCount = useMemo(
+    () => (item.deepScanGroups ?? []).reduce((a, g) => a + g.count, 0),
+    [item.deepScanGroups],
+  );
   const meta = KIND_META[item.kind];
+  // 绑定本包 key 的稳定回调：EntryTable 是 memo 组件，回调身份必须稳定
+  const packKey = item.key;
+  const hEdit = useCallback((k: string, v: string) => onEdit(packKey, k, v), [packKey, onEdit]);
+  const hClear = useCallback((k: string) => onClear(packKey, k), [packKey, onClear]);
+  const hSel = useCallback(
+    (k: string, s: boolean) => onToggleSelected(packKey, k, s),
+    [packKey, onToggleSelected],
+  );
+  const hSelAll = useCallback(
+    (s: boolean) => onToggleAllSelected(packKey, s),
+    [packKey, onToggleAllSelected],
+  );
+  const hSelMany = useCallback(
+    (keys: string[], s: boolean) => onToggleManySelected(packKey, keys, s),
+    [packKey, onToggleManySelected],
+  );
   return (
     <div
-      className="pack-card"
+      className={item.expanded ? "pack-card" : "pack-card pack-card-collapsed"}
       style={{
         border: "1px solid var(--border-color, #E6E8EB)",
         borderRadius: 12,
@@ -401,9 +434,7 @@ const PackCard = memo(function PackCard({
                 onDeepScan(item.key);
               }}
             >
-              {item.deepScanGroups
-                ? `${t("app.deepScan")} ${item.deepScanGroups.reduce((a, g) => a + g.count, 0)}`
-                : t("app.deepScan")}
+              {item.deepScanGroups ? `${t("app.deepScan")} ${deepCount}` : t("app.deepScan")}
             </Button>
           </Tooltip>
         )}
@@ -440,14 +471,12 @@ const PackCard = memo(function PackCard({
           >
             <EntryTable
               entries={item.entries}
-              onEdit={(k, v) => onEdit(item.key, k, v)}
+              onEdit={hEdit}
               onSelect={onSelect}
-              onClear={(k) => onClear(item.key, k)}
-              onToggleSelected={(k, s) => onToggleSelected(item.key, k, s)}
-              onToggleAllSelected={(s) => onToggleAllSelected(item.key, s)}
-              onToggleManySelected={(keys, s) =>
-                onToggleManySelected(item.key, keys, s)
-              }
+              onClear={hClear}
+              onToggleSelected={hSel}
+              onToggleAllSelected={hSelAll}
+              onToggleManySelected={hSelMany}
               scrollY={Math.max(item.height - 96, 120)}
             />
           </div>
@@ -524,6 +553,8 @@ function AppInner({
   const [progress, setProgress] = useState<ProgressPayload | null>(null);
   // 翻译开始时间（剩余时间估算用）
   const translateStartRef = useRef(0);
+  // 队列最新值引用：供身份需稳定的回调读取（避免把 queue 写进依赖导致 memo 失效）
+  const queueRef = useRef<PackItem[]>([]);
   // 每个内容包的实时计数（批次事件累加，完成后弹 per-pack 卡片用）；same = 译文与原文相同
   const packCountsRef = useRef<Map<string, { ok: number; empty: number; error: number; error429: number; warn: number; same: number }>>(new Map());
   // 跨包译文复用表：fileKey（fileName|size）→ { entryKey: 译文 }
@@ -542,75 +573,211 @@ function AppInner({
   // 拖入/选择文件夹后自动进入游戏目录模式并扫描（GameDirView 消费后清空）
   const [gamedirAutoScan, setGamedirAutoScan] = useState<string | null>(null);
   // 自由导入：解析完成精简汇总
-  const [importSummary, setImportSummary] = useState<{ added: number; failures: { name: string; reason: string }[]; deepFound: number } | null>(null);
-  const [importSummaryOpen, setImportSummaryOpen] = useState(false);
+  // 聚合导入检查弹窗：导入完成后一次弹出（自带中文 / 空文本深度扫描 / 批次提示 / 解析失败）
+  const [importReview, setImportReview] = useState<{
+    added: number;
+    deepFound: number;
+    failures: { name: string; reason: string }[];
+    zhPacks: { key: string; name: string; zhCount: number }[];
+    emptyMods: { key: string; name: string }[];
+    emptyInfo: string[];
+    gdEmptyMods: { path: string; fileName: string; kind: PackKind }[];
+    batchWarn: { names: string; threads: number; perBatch: number } | null;
+  } | null>(null);
+  const [importReviewOpen, setImportReviewOpen] = useState(false);
+  // 导入检查弹窗的勾选状态
+  const [reviewContinueZh, setReviewContinueZh] = useState<string[]>([]);
+  const [reviewDeepScan, setReviewDeepScan] = useState<string[]>([]);
+  const [reviewAutoDeep, setReviewAutoDeep] = useState(false);
+  const importReviewResolve = useRef<((v: { deepKeys: string[]; zhKeys: string[]; autoDeep: boolean }) => void) | null>(null);
   // 游戏目录「解析并加入列表」的解析进度（GameDirView 显示）
   const [gdAddProgress, setGdAddProgress] = useState<{ done: number; total: number; current: string } | null>(null);
 
   // 启动恢复询问：有会话缓存（上次未清空就退出/崩溃）时询问是否恢复内容包列表
+  // 优先读 v2 分片缓存；没有则回退旧的整份缓存（旧缓存会在下次落盘时迁移为分片）
   useEffect(() => {
     if (!settings || sessionRestoreTriedRef.current) return;
     sessionRestoreTriedRef.current = true;
-    api
-      .loadSessionCache("free")
-      .then((raw) => {
-        if (!raw) return;
-        try {
-          const data = JSON.parse(raw) as { packs?: PackItem[] };
-          const packs = (data.packs ?? []).filter(
-            (it) => it && typeof it.key === "string" && Array.isArray(it.entries),
-          );
-          if (packs.length === 0) return;
-          const totalEntries = packs.reduce((n, it) => n + it.entries.length, 0);
-          Modal.confirm({
-            title: "恢复上次的内容包列表？",
-            content: `检测到上次退出（或意外关闭）前有 ${packs.length} 个内容包、共 ${totalEntries} 条条目（含译文与进度）。是否恢复到列表？`,
-            okText: "恢复",
-            cancelText: "不恢复",
-            onOk: () => {
-              setQueue(
-                packs.map((it) => ({
-                  ...it,
-                  entries: (it.entries ?? []).map((e) => ({ ...e, translating: false })),
-                })),
-              );
-              message.success(`已恢复 ${packs.length} 个内容包`);
-            },
-            onCancel: () => {
-              void api.clearSessionCache("free");
-            },
-          });
-        } catch {
-          // 缓存损坏：静默清除
-          void api.clearSessionCache("free");
+    (async () => {
+      let raw: string | null = null;
+      let ids: string[] = [];
+      try {
+        raw = await api.sessionV2Load("free");
+        if (raw) {
+          const parsed = JSON.parse(raw) as { ids?: string[] };
+          ids = parsed.ids ?? [];
         }
-      })
-      .catch(() => {});
+      } catch {
+        raw = null;
+      }
+      if (!raw) {
+        try {
+          raw = await api.loadSessionCache("free");
+        } catch {
+          return;
+        }
+      }
+      if (!raw) return;
+      try {
+        const data = JSON.parse(raw) as { packs?: PackItem[] };
+        const packs = (data.packs ?? []).filter(
+          (it) => it && typeof it.key === "string" && Array.isArray(it.entries),
+        );
+        if (packs.length === 0) return;
+        const totalEntries = packs.reduce((n, it) => n + it.entries.length, 0);
+        Modal.confirm({
+          title: "恢复上次的内容包列表？",
+          content: `检测到上次退出（或意外关闭）前有 ${packs.length} 个内容包、共 ${totalEntries} 条条目（含译文与进度）。是否恢复到列表？`,
+          okText: "恢复",
+          cancelText: "不恢复",
+          onOk: () => {
+            const restored = packs.map((it) => ({
+              ...it,
+              entries: (it.entries ?? []).map((e) => ({ ...e, translating: false })),
+            }));
+            setQueue(restored);
+            // 索引与恢复出的包一一对应时才记住分片归属（避免错配后写乱分片）
+            if (ids.length === restored.length) {
+              restored.forEach((it, i) => shardIdsRef.current.set(it.key, ids[i]));
+            }
+            message.success(`已恢复 ${packs.length} 个内容包`);
+          },
+          onCancel: () => {
+            void api.clearSessionCache("free");
+            void api.sessionV2Clear("free");
+          },
+        });
+      } catch {
+        // 缓存损坏：静默清除
+        void api.clearSessionCache("free");
+        void api.sessionV2Clear("free");
+      }
+    })().catch(() => {});
   }, [settings]);
 
-  // 会话缓存：列表变化防抖 1.5s 自动保存（崩溃/意外关闭后可恢复）
+  // 队列最新值同步到 ref（身份稳定的回调通过它读取队列）
   useEffect(() => {
-    const timer = setTimeout(() => {
-      if (queue.length === 0) {
-        void api.clearSessionCache("free");
-        return;
-      }
-      const plain = queue.map((it) => ({
-        ...it,
-        entries: it.entries.map((e) => ({ ...e, translating: false })),
-      }));
-      void api
-        .saveSessionCache("free", JSON.stringify({ version: 1, savedAt: Date.now(), packs: plain }))
-        .catch(() => {});
-    }, 1500);
-    return () => clearTimeout(timer);
+    queueRef.current = queue;
   }, [queue]);
-  // 术语表建议候选（翻译完成后一次性弹出）
+
+  // ── 会话缓存 v2：按包分片，只重写「发生变化」的包分片 ──────────────────────
+  // 为什么：整份快照在上千包时会产生几十 MB 字符串 + IPC 拷贝，主线程被按死数秒、
+  // 进程瞬时内存暴涨（白屏根因）。分片后单次写入从秒级降到毫秒级。
+  // 分片仍是完整条目数据，因此恢复不依赖原包文件仍在。
+  const sessionDirtyRef = useRef(false);
+  const sessionSavingRef = useRef(false);
+  const sessionIdRef = useRef(`s${Date.now().toString(36)}`);
+  const shardSeqRef = useRef(0);
+  // packKey → 分片 id（同一会话内稳定）；packKey → 上次写入时的特征签名
+  const shardIdsRef = useRef<Map<string, string>>(new Map());
+  const writtenSigRef = useRef<Map<string, string>>(new Map());
+  const lastPruneRef = useRef(0);
+
+  /** 内容包特征签名：条目数/已译数/勾选数/备注数/包级开关等，用于判断是否需要重写分片。
+   *  比对象引用更可靠——深度扫描等操作是就地改 entries，对象身份不变。 */
+  const packSignature = useCallback((it: PackItem): string => {
+    let translated = 0;
+    let selected = 0;
+    let notes = 0;
+    for (const e of it.entries) {
+      if (e.translation) translated += 1;
+      if (e.selected ?? true) selected += 1;
+      notes += e.notes?.length ?? 0;
+    }
+    return [
+      it.checked ? 1 : 0,
+      it.expanded ? 1 : 0,
+      it.entries.length,
+      translated,
+      selected,
+      notes,
+      it.name,
+      it.gameVersion ?? "",
+    ].join("|");
+  }, []);
+
+  /** 分片落盘：只写签名变化的包；每轮最多 WRITE_BATCH 个，其余留到下一轮（避免长任务） */
+  const persistSession = useCallback(async () => {
+    if (sessionSavingRef.current) return;
+    const q = queueRef.current;
+    if (q.length === 0) {
+      void api.clearSessionCache("free");
+      void api.sessionV2Clear("free");
+      shardIdsRef.current.clear();
+      writtenSigRef.current.clear();
+      sessionDirtyRef.current = false;
+      return;
+    }
+    sessionSavingRef.current = true;
+    try {
+      const WRITE_BATCH = 20;
+      let written = 0;
+      for (const it of q) {
+        if (written >= WRITE_BATCH) break;
+        const sig = packSignature(it);
+        if (writtenSigRef.current.get(it.key) === sig) continue;
+        let id = shardIdsRef.current.get(it.key);
+        if (!id) {
+          id = `${sessionIdRef.current}-${shardSeqRef.current++}`;
+          shardIdsRef.current.set(it.key, id);
+        }
+        await api.sessionV2WriteShard("free", id, JSON.stringify(it));
+        writtenSigRef.current.set(it.key, sig);
+        written += 1;
+      }
+      // 索引很小（仅有顺序与分片 id），每次都写；只有还有脏包时才需要继续
+      const ids: string[] = [];
+      for (const it of q) {
+        const id = shardIdsRef.current.get(it.key);
+        if (id) ids.push(id);
+      }
+      await api.sessionV2WriteIndex("free", JSON.stringify({ version: 2, savedAt: Date.now(), ids }));
+      let remaining = 0;
+      for (const it of q) {
+        if (writtenSigRef.current.get(it.key) !== packSignature(it)) remaining += 1;
+      }
+      sessionDirtyRef.current = remaining > 0;
+      // 遗留分片清理（换会话或删包后产生），最多每分钟一次
+      if (Date.now() - lastPruneRef.current > 60000) {
+        lastPruneRef.current = Date.now();
+        void api.sessionV2Prune("free", ids).catch(() => {});
+      }
+    } catch {
+      /* 缓存写入失败不阻断 */
+    } finally {
+      sessionSavingRef.current = false;
+    }
+  }, [packSignature]);
+
+  useEffect(() => {
+    if (parsing) return;
+    sessionDirtyRef.current = true;
+    // 空闲 800ms 后落盘；持续变化时由下面的定时器兜底（与防抖不同，不会饿死）
+    const timer = setTimeout(() => {
+      if (sessionDirtyRef.current) void persistSession();
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [queue, parsing, persistSession]);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (sessionDirtyRef.current && !parsing) void persistSession();
+    }, 5000);
+    return () => clearInterval(id);
+  }, [parsing, persistSession]);
+  // 术语表建议候选（翻译完成后并入汇总弹窗）
   const [glossarySuggest, setGlossarySuggest] = useState<[string, string][] | null>(null);
   const [suggestChecked, setSuggestChecked] = useState<string[]>([]);
-  // 本次提取的术语（en→zh），弹窗可勾选加入用户术语表
+  // 本次提取的术语（en→zh），汇总弹窗可勾选加入用户术语表
   const [extractedGlossary, setExtractedGlossary] = useState<[string, string][] | null>(null);
   const [extractedChecked, setExtractedChecked] = useState<string[]>([]);
+  // 原文一致过多（本次运行累积，不逐包弹窗；翻译完成后在汇总弹窗统一处理）
+  const [sameWarnPacks, setSameWarnPacks] = useState<{ packKey: string; name: string; count: number }[]>([]);
+  const [sameWarnChecked, setSameWarnChecked] = useState<string[]>([]);
+  // 翻译完成汇总弹窗（原文一致 / 术语表提取 / 术语建议 合并）
+  const [transSummaryOpen, setTransSummaryOpen] = useState(false);
+  // 术语提取结果贯穿运行期的引用（glossary-done 事件异步到达，闭包内 state 会过期）
+  const extractedGlossaryRef = useRef<[string, string][]>([]);
   const [currentPackName, setCurrentPackName] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   // 打开设置时要定位到的分组（如翻译参数 params）；undefined = 默认页
@@ -766,23 +933,49 @@ function AppInner({
   }, []);
 
   // 监听翻译进度：全局一条 + 按包细分（并行翻译时各包独立显示）
+  // 上千内容包时进度事件可达上万条，逐条 setState 会造成上万次整树渲染 → 合并提交（~200ms）
   useEffect(() => {
-    const unlisten = onTranslateProgress((p) => {
-      setProgress(p);
-      if (p.packKey) {
-        setPackProgress((prev) => ({
-          ...prev,
-          [p.packKey as string]: { done: p.doneCount, total: p.totalCount },
-        }));
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let latestGlobal: ProgressPayload | null = null;
+    const pendingPacks = new Map<string, { done: number; total: number }>();
+    const flush = () => {
+      timer = null;
+      if (latestGlobal) setProgress(latestGlobal);
+      if (pendingPacks.size > 0) {
+        const snap = new Map(pendingPacks);
+        pendingPacks.clear();
+        setPackProgress((prev) => {
+          let changed = false;
+          const next = { ...prev };
+          for (const [k, v] of snap) {
+            const cur = next[k];
+            if (!cur || cur.done !== v.done || cur.total !== v.total) {
+              next[k] = v;
+              changed = true;
+            }
+          }
+          return changed ? next : prev;
+        });
       }
+    };
+    const unlisten = onTranslateProgress((p) => {
+      latestGlobal = p;
+      if (p.packKey) {
+        pendingPacks.set(p.packKey as string, { done: p.doneCount, total: p.totalCount });
+      }
+      if (timer === null) timer = setTimeout(flush, 200);
     });
     return () => {
+      if (timer !== null) clearTimeout(timer);
       unlisten.then((f) => f());
     };
   }, []);
   useEffect(() => {
     const unlisten = onGlossaryDone(({ count, glossary }) => {
-      if (count > 0) message.info(`已提取 ${count} 条术语，用于统一译名`);
+      // 仅首次提取提示一次（术语详情统一在翻译完成汇总里查看）
+      if (count > 0 && extractedGlossaryRef.current.length === 0) {
+        message.info(`已提取 ${count} 条术语，用于统一译名（完成后可在汇总中勾选加入术语表）`);
+      }
       if (glossary && glossary.length > 0) {
         setExtractedGlossary((prev) => {
           const map = new Map<string, string>();
@@ -790,7 +983,9 @@ function AppInner({
           glossary.forEach(([en, zh]) => {
             if (!map.has(en)) map.set(en, zh);
           });
-          return [...map.entries()];
+          const merged = [...map.entries()];
+          extractedGlossaryRef.current = merged;
+          return merged;
         });
         setExtractedChecked((prev) => {
           const set = new Set(prev);
@@ -805,12 +1000,23 @@ function AppInner({
   }, []);
 
   // 监听逐批实时翻译结果：实时写入存储（entries 状态）并显示，不等待全部完成
+  // 上千个内容包时批次事件可达上万次，若每次都 setQueue 会全量重渲染 → 先累积、每 ~150ms 合并提交一次
   useEffect(() => {
-    const unlisten = onTranslationBatch(({ packKey, items }) => {
+    type BatchItem = { key: string; translation: string; notes: string[]; kind: "ok" | "empty" | "error" };
+    const pending = new Map<string, Map<string, BatchItem>>();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const flush = () => {
+      timer = null;
+      if (pending.size === 0) return;
+      const snapMap = new Map<string, BatchItem[]>();
+      for (const [pk, m] of pending) snapMap.set(pk, [...m.values()]);
+      pending.clear();
       setQueue((prev) =>
         prev.map((pack) => {
-          if (pack.key !== packKey) return pack;
-          const byKey = new Map(items.map((i) => [i.key, i]));
+          const hit = snapMap.get(pack.key);
+          if (!hit) return pack;
+          const byKey = new Map(hit.map((i) => [i.key, i]));
           let okN = 0,
             emptyN = 0,
             errN = 0,
@@ -844,19 +1050,30 @@ function AppInner({
               translating: false,
             };
           });
-          const pc = packCountsRef.current.get(packKey) ?? { ok: 0, empty: 0, error: 0, error429: 0, warn: 0, same: 0 };
+          const pc = packCountsRef.current.get(pack.key) ?? { ok: 0, empty: 0, error: 0, error429: 0, warn: 0, same: 0 };
           pc.ok += okN;
           pc.empty += emptyN;
           pc.error += errN;
           pc.error429 += err429N;
           pc.warn += warnN;
           pc.same += sameN;
-          packCountsRef.current.set(packKey, pc);
+          packCountsRef.current.set(pack.key, pc);
           return { ...pack, entries };
         }),
       );
+    };
+
+    const unlisten = onTranslationBatch(({ packKey, items }) => {
+      let m = pending.get(packKey);
+      if (!m) {
+        m = new Map();
+        pending.set(packKey, m);
+      }
+      for (const it of items) m.set(it.key, it);
+      if (timer === null) timer = setTimeout(flush, 150);
     });
     return () => {
+      if (timer !== null) clearTimeout(timer);
       unlisten.then((f) => f());
     };
   }, []);
@@ -965,19 +1182,28 @@ function AppInner({
     setParsing(true);
     const added: PackItem[] = [];
     const importFailures: { name: string; reason: string }[] = [];
-    let zhHits = 0;
-    let zhTotal = 0;
+    // 大批量导入时默认收缩卡片：展开会为每个包挂载表格，几百个包时严重卡顿甚至崩溃
+    const autoExpand = files.length <= AUTO_EXPAND_MAX;
+    let pending: PackItem[] = [];
+    const flush = () => {
+      if (pending.length === 0) return;
+      const batch = pending;
+      pending = [];
+      setQueue((prev) => [...prev, ...batch]);
+    };
     for (const p of files) {
       try {
         const item = await parseFile(p);
+        item.expanded = autoExpand;
         // 条目默认参与汉化
         item.entries = item.entries.map((e) => ({ ...e, selected: e.selected ?? true }));
         added.push(item);
-        // 增量入队：每解析完一个包立即加入列表，避免几百个包时内存峰值翻倍
-        setQueue((prev) => [...prev, item]);
-        if (item.hasZh) {
-          zhHits += 1;
-          zhTotal += item.zhCount ?? 0;
+        pending.push(item);
+        // 分批入队：每 IMPORT_FLUSH_CHUNK 个刷一次，避免逐包 setQueue 造成 O(n²) 重渲染
+        if (pending.length >= IMPORT_FLUSH_CHUNK) {
+          flush();
+          // 让出主线程，使界面有机会绘制解析进度（否则连续解析会假死）
+          await new Promise((r) => setTimeout(r, 0));
         }
       } catch (e) {
         const fileName = p.split(/[\\/]/).pop() ?? p;
@@ -993,6 +1219,7 @@ function AppInner({
         importFailures.push({ name: fileName, reason });
       }
     }
+    flush();
     // 自动深度扫描（设置开关开启时）：普通解析为空的模组
     let deepFound = 0;
     if (settings?.deepScan) {
@@ -1007,89 +1234,98 @@ function AppInner({
       }
     }
     setParsing(false);
-    // 自动批次 + 多线程时，条目过少的内容包会切出很小的批次（可能影响翻译质量），主动询问
+    // ── 聚合导入检查：所有提示合并为单个弹窗，勾选后统一执行（去重精简）──
+    const emptyPacks = added.filter((it) => it.entries.length === 0);
+    // 深度扫描已开启时，空模组刚才已自动扫过，不再提供重复扫描（归入纯提示）
+    const modsEmpty = emptyPacks.filter((it) => it.kind === "mod" && !settings?.deepScan);
+    const scannedEmpty = emptyPacks.filter((it) => it.kind === "mod" && settings?.deepScan);
+    const otherEmpty = emptyPacks.filter((it) => it.kind !== "mod");
+    const zhPacks = added.filter((it) => it.hasZh && (it.zhCount ?? 0) > 0);
+    const small = added.filter((it) => it.entries.length > 0 && it.entries.length < 50);
+    let batchWarn: { names: string; threads: number; perBatch: number } | null = null;
     if (settings?.threading?.enabled && (settings.batchSizeAuto ?? true)) {
       const threads = settings.threading.threadCount;
-      const small = added.filter((it) => it.entries.length > 0 && it.entries.length < 50);
       if (threads >= 4 && small.length > 0) {
-        const minLen = Math.min(...small.map((it) => it.entries.length));
-        const names = small.map((it) => `「${it.name}」${it.entries.length} 条`).join("、");
-        Modal.confirm({
-          title: "内容包条目较少，建议检查批次设置",
-          content: `${names}。当前 ${threads} 线程 + 跟随线程数最优条数，实际每批仅约 ${Math.max(1, Math.ceil(minLen / threads))} 条——小批次可能影响翻译上下文与准确性。是否前往设置调整？`,
-          okText: "去设置",
-          cancelText: "保持现状",
-          onOk: () => {
-            setSettingsSection("params");
-            setSettingsOpen(true);
-          },
-        });
+        // 用循环取最小值：数组展开给 Math.min 传参在包数极多时会触发 RangeError
+        let minLen = Number.MAX_SAFE_INTEGER;
+        for (const it of small) if (it.entries.length < minLen) minLen = it.entries.length;
+        batchWarn = {
+          names: small.map((it) => `「${it.name}」${it.entries.length} 条`).join("、"),
+          threads,
+          perBatch: Math.max(1, Math.ceil(minLen / threads)),
+        };
       }
     }
-    if (added.length > 0) {
-      if (importFailures.length > 0 || deepFound > 0) {
-        // 有失败或深度扫描信息 → 精简汇总弹窗（避免逐包刷屏）
-        setImportSummary({ added: added.length, failures: importFailures, deepFound });
-        setImportSummaryOpen(true);
-      } else {
-        message.success(`已导入 ${added.length} 个内容包`);
+    const needReview =
+      importFailures.length > 0 ||
+      zhPacks.length > 0 ||
+      modsEmpty.length > 0 ||
+      otherEmpty.length > 0 ||
+      batchWarn !== null;
+    if (needReview) {
+      const decided = await new Promise<{ deepKeys: string[]; zhKeys: string[]; autoDeep: boolean }>(
+        (resolve) => {
+          importReviewResolve.current = resolve;
+          setImportReview({
+            added: added.length,
+            deepFound,
+            failures: importFailures,
+            zhPacks: zhPacks.map((it) => ({ key: it.key, name: it.name, zhCount: it.zhCount ?? 0 })),
+            emptyMods: modsEmpty.map((it) => ({ key: it.key, name: it.name })),
+            emptyInfo: [
+              ...otherEmpty.map((it) => it.name),
+              ...scannedEmpty.map((it) => it.name),
+            ],
+            gdEmptyMods: [],
+            batchWarn,
+          });
+          setReviewContinueZh(zhPacks.map((it) => it.key));
+          setReviewDeepScan(modsEmpty.map((it) => it.key));
+          setReviewAutoDeep(false);
+          setImportReviewOpen(true);
+        },
+      );
+      importReviewResolve.current = null;
+      // 执行勾选：对空模组深度扫描
+      const deepSet = new Set(decided.deepKeys);
+      let found = 0;
+      for (const it of modsEmpty) {
+        if (!deepSet.has(it.key)) continue;
+        try {
+          found += await applyDeepScan(it);
+        } catch {
+          /* 强扫失败不阻断 */
+        }
       }
-    }
-    // 导入后校验：解析为空的内容包，给出明确、可操作的提示
-    const emptyPacks = added.filter((it) => it.entries.length === 0);
-    if (emptyPacks.length > 0) {
-      const modsEmpty = emptyPacks.filter((it) => it.kind === "mod");
-      const otherEmpty = emptyPacks.filter((it) => it.kind !== "mod");
-      if (modsEmpty.length > 0 && !settings?.deepScan && settings) {
-        Modal.confirm({
-          title: "未发现常规可翻译文本",
-          content: `${modsEmpty.length} 个模组在常规位置（语言文件）未找到文本，可能将文本写在内嵌文件（成就/配置/嵌套 jar）中。是否启用模组深度扫描重试？也可在模组卡片上手动点击「模组深度扫描」。\n\n若仍为空，请确认：① 该文件确实包含可汉化文本；② 文本格式当前版本是否支持；③ 文本是否硬编码在 .class 代码（无法自动提取，需手动处理）。`,
-          okText: "启用并重新扫描",
-          cancelText: "暂不",
-          onOk: async () => {
-            const next = { ...settings, deepScan: true };
-            try {
-              await api.saveSettings(next);
-              setSettings(next);
-            } catch {
-              /* 忽略 */
-            }
-            let found = 0;
-            for (const it of modsEmpty) {
-              try {
-                found += await applyDeepScan(it);
-              } catch {
-                /* 忽略 */
-              }
-            }
-            setQueue((prev) => [...prev]);
-            if (found > 0) {
-              message.success(`模组深度扫描发现 ${found} 条内嵌文本（默认未勾选，可在卡片上勾选组）`);
-            } else {
-              message.info("仍未发现可翻译文本：请确认文件含文本、文本类型受支持，或文本是否硬编码在 .class 代码中");
-            }
-          },
-        });
-      } else if (otherEmpty.length > 0) {
-        Modal.info({
-          title: "未发现可翻译文本",
-          content: `「${otherEmpty.map((it) => it.name).join("、")}」未提取到任何语言/文本。请确认：① 导入的文件确实包含可汉化的内容；② 该文本类型（如光影/资源包的 .json/.mcmeta/.txt）当前版本是否支持；③ 文本是否硬编码在代码中无法自动提取。`,
-        });
-      } else if (modsEmpty.length > 0 && settings?.deepScan) {
-        Modal.info({
-          title: "未发现可翻译文本",
-          content: `${modsEmpty.length} 个模组普通解析与深度扫描均未找到文本。请确认：① 文件确实包含可提取文本；② 文本类型受支持；③ 文本是否硬编码在 .class 代码（无法自动提取，需手动处理）。`,
-        });
+      setQueue((prev) => [...prev]);
+      if (found > 0) {
+        message.success(`深度扫描发现 ${found} 条内嵌文本（默认未勾选，可在卡片上勾选组）`);
+      } else if (deepSet.size > 0) {
+        message.info("深度扫描未发现更多可翻译文本，请在卡片上确认文本格式或类型是否受支持");
       }
-    }
-    if (zhHits > 0) {
-      Modal.confirm({
-        title: "检测到自带中文",
-        content: `${zhHits} 个内容包自带中文（共 ${zhTotal} 条），已自动填入对应译文。是否继续汉化未翻译的部分？`,
-        okText: "继续汉化",
-        cancelText: "暂不",
-        onOk: () => void runTranslation(),
-      });
+      // “以后自动深度扫描”写回全局设置
+      if (decided.autoDeep && settings && !settings.deepScan) {
+        const next = { ...settings, deepScan: true };
+        try {
+          await api.saveSettings(next);
+          setSettings(next);
+        } catch {
+          /* 忽略 */
+        }
+      }
+      // 自带中文：取消勾选的包标记为不参与后续 AI 汉化（保留自带中文）
+      if (decided.zhKeys.length < zhPacks.length) {
+        const zhSet = new Set(decided.zhKeys);
+        setQueue((prev) =>
+          prev.map((it) =>
+            zhPacks.some((z) => z.key === it.key) && !zhSet.has(it.key)
+              ? { ...it, checked: false }
+              : it,
+          ),
+        );
+      }
+    } else if (added.length > 0) {
+      message.success(`已导入 ${added.length} 个内容包`);
     }
   }
 
@@ -1241,6 +1477,23 @@ function AppInner({
     packCountsRef.current.clear();
     setPackProgress({});
     translateStartRef.current = Date.now();
+    // 本次运行累积的「原文一致」告警（不逐包弹窗，结束后汇总）
+    const localSameWarn: { packKey: string; name: string; count: number }[] = [];
+    // 包数很多时抑制逐包完成通知，改为结束时一条汇总（避免上千条通知堆积）
+    let suppressPackCards = false;
+    let totalOk = 0,
+      totalErr = 0,
+      totalEmpty = 0,
+      cardsCounted = 0;
+    extractedGlossaryRef.current = [];
+    // 清空上一轮汇总残留，避免旧数据混入本轮汇总弹窗
+    setTransSummaryOpen(false);
+    setSameWarnPacks([]);
+    setSameWarnChecked([]);
+    setExtractedGlossary(null);
+    setExtractedChecked([]);
+    setGlossarySuggest(null);
+    setSuggestChecked([]);
     let doneAny = false;
 
     // 待翻译任务（无待翻译条目的包直接跳过；preSame = 历史遗留的同原文条数）
@@ -1253,6 +1506,8 @@ function AppInner({
         ).length,
       }))
       .filter((tk) => tk.untranslated.length > 0);
+
+    suppressPackCards = tasks.length > 20;
 
     const translateOnePack = async (
       item: PackItem,
@@ -1279,7 +1534,10 @@ function AppInner({
               : e,
           ),
         }));
-        untranslated.splice(0, untranslated.length, ...untranslated.filter((e) => !ks.has(e.key)));
+        // 就地过滤：不用展开语法（超大条目数组展开会触发 RangeError）
+        for (let i = untranslated.length - 1; i >= 0; i--) {
+          if (ks.has(untranslated[i].key)) untranslated.splice(i, 1);
+        }
         message.info(`「${item.name}」复用已翻译译文 ${reusedKeys.length} 条`);
       }
       // 先行将待翻译条目标记为「翻译中」（淡蓝），逐批完成后由实时事件翻为最终态
@@ -1340,47 +1598,37 @@ function AppInner({
           }),
         }));
         doneAny = true;
-        // 每个内容包单独弹出完成卡片（真实数据）
-        const c = packCountsRef.current.get(item.key) ?? {
+        const c0 = packCountsRef.current.get(item.key) ?? {
           ok: 0, empty: 0, error: 0, error429: 0, warn: 0, same: 0,
         };
-        const a = buildResultAlert(c, t);
-        showResultCard(
-          a.type,
-          `翻译 ${item.name} ${t(KIND_META[item.kind].labelKey)}完成`,
-          a.desc,
-        );
-        // 检测：某包大量译文与原文相同（批次内内容相似时模型易原样返回）→ 询问清除重译
-        const sameN = preSame + c.same;
+        // 每个内容包单独弹出完成卡片；包数很多时改为静默累计，避免上千条通知拖垮界面
+        if (suppressPackCards) {
+          totalOk += c0.ok;
+          totalErr += c0.error;
+          totalEmpty += c0.empty;
+          cardsCounted += 1;
+        } else {
+          const a = buildResultAlert(c0, t);
+          showResultCard(
+            a.type,
+            `翻译 ${item.name} ${t(KIND_META[item.kind].labelKey)}完成`,
+            a.desc,
+          );
+        }
+        // 汇总「译文与原文相同」：不逐包弹窗，翻译完成后在汇总标签页统一清除
+        const sameN = preSame + c0.same;
         if (sameN >= 5) {
-          const pk = item.key;
-          Modal.confirm({
-            title: "检测到大量译文与原文相同",
-            content: `「${item.name}」有 ${sameN} 条译文与原文相同（可能未翻译，常见于批次内内容高度相似）。是否清除这些译文以便重新汉化？其他条目不受影响。`,
-            okText: "清除这些译文",
-            okButtonProps: { danger: true },
-            cancelText: "保留",
-            onOk: () => {
-              setQueue((prev) =>
-                prev.map((it) =>
-                  it.key !== pk
-                    ? it
-                    : {
-                        ...it,
-                        entries: it.entries.map((e) =>
-                          e.status === "aiTranslated" && e.translation != null && e.translation === e.source
-                            ? { ...e, translation: null, status: "untranslated" as const, notes: [] }
-                            : e,
-                        ),
-                      },
-                ),
-              );
-              message.success(`已清除 ${sameN} 条与原文相同的译文，重新点击翻译即可重试`);
-            },
-          });
+          localSameWarn.push({ packKey: item.key, name: item.name, count: sameN });
         }
       } finally {
         setTranslatingKeys((prev) => {
+          const next = { ...prev };
+          delete next[item.key];
+          return next;
+        });
+        // 同步清理该包进度：否则进度表会累积到上千个键，每次进度更新都要复制整表
+        setPackProgress((prev) => {
+          if (!prev[item.key]) return prev;
           const next = { ...prev };
           delete next[item.key];
           return next;
@@ -1409,14 +1657,27 @@ function AppInner({
       if (cancelRequestedRef.current) {
         message.info("已取消，已翻译部分已保留");
       } else if (doneAny) {
-        // 术语表建议：高频已翻译短语一次性提示（不打断）
+        // 大批量运行：结束时给一条汇总（替代逐包通知）
+        if (suppressPackCards && cardsCounted > 0) {
+          const parts = [`已完成 ${cardsCounted} 个内容包：成功 ${totalOk} 条`];
+          if (totalEmpty > 0) parts.push(`AI 未返回 ${totalEmpty} 条`);
+          if (totalErr > 0) parts.push(`失败 ${totalErr} 条`);
+          message.success(parts.join("，"));
+        }
+        // 术语表建议：高频已翻译短语（并入汇总弹窗，不单独弹）
         const sugg = collectSuggestions(
           queue.flatMap((q) => q.entries),
           settings.userGlossary ?? [],
         );
+        setSameWarnPacks(localSameWarn);
+        setSameWarnChecked(localSameWarn.map((w) => w.packKey));
         if (sugg.length > 0) {
           setGlossarySuggest(sugg);
           setSuggestChecked(sugg.map(([en]) => en));
+        }
+        // 原文一致 / 术语提取 / 术语建议 → 合并为单个汇总弹窗
+        if (localSameWarn.length > 0 || extractedGlossaryRef.current.length > 0 || sugg.length > 0) {
+          setTransSummaryOpen(true);
         }
       } else {
         message.info("勾选的内容包没有需要翻译的条目（可能已全部翻译）");
@@ -1461,6 +1722,60 @@ function AppInner({
     setClearOpen(true);
   }
 
+  /** 翻译完成汇总：统一执行勾选动作（清除一致译文 + 加入选中术语） */
+  async function execTransSummary() {
+    if (!settings) return;
+    // 1. 清除勾选包的「译文与原文相同」
+    const checkedSet = new Set(sameWarnChecked);
+    let cleared = 0;
+    if (checkedSet.size > 0) {
+      for (const it of queue) {
+        if (!checkedSet.has(it.key)) continue;
+        cleared += it.entries.filter(
+          (e) => e.status === "aiTranslated" && e.translation != null && e.translation === e.source,
+        ).length;
+      }
+      setQueue((prev) =>
+        prev.map((it) => {
+          if (!checkedSet.has(it.key)) return it;
+          return {
+            ...it,
+            entries: it.entries.map((e) =>
+              e.status === "aiTranslated" && e.translation != null && e.translation === e.source
+                ? { ...e, translation: null, status: "untranslated" as const, notes: [] }
+                : e,
+            ),
+          };
+        }),
+      );
+    }
+    // 2. 加入勾选的术语（提取的 + 建议的合并去重，已在术语表中的跳过）
+    const picked = new Set([...extractedChecked, ...suggestChecked]);
+    const already = new Set((settings.userGlossary ?? []).map(([en]) => en.toLowerCase()));
+    const seen = new Map<string, string>();
+    for (const [en, zh] of [...(extractedGlossary ?? []), ...(glossarySuggest ?? [])]) {
+      if (!picked.has(en) || already.has(en.toLowerCase()) || seen.has(en)) continue;
+      seen.set(en, zh);
+    }
+    if (seen.size > 0) {
+      const next = {
+        ...settings,
+        userGlossary: [...(settings.userGlossary ?? []), ...seen.entries()],
+      };
+      try {
+        await api.saveSettings(next);
+        setSettings(next);
+      } catch (e) {
+        message.error(String(e));
+      }
+    }
+    setTransSummaryOpen(false);
+    const parts: string[] = [];
+    if (cleared > 0) parts.push(`已清除 ${cleared} 条与原文相同的译文（重新点击翻译可重试）`);
+    if (seen.size > 0) parts.push(`已加入 ${seen.size} 条术语到用户术语表`);
+    message.success(parts.length > 0 ? parts.join("，") : "未选择任何待处理项");
+  }
+
   function doClear() {
     const checkedKeys = new Set(
       queue.filter((it) => it.kind === activeTab && it.checked).map((it) => it.key),
@@ -1500,6 +1815,7 @@ function AppInner({
         setProgress(null);
         setTranslating(false);
         void api.clearSessionCache("free");
+        void api.sessionV2Clear("free");
         message.success(`已清空${kindLabel}页的列表`);
       },
     });
@@ -1530,7 +1846,8 @@ function AppInner({
   /** 卡片「深度扫描」按钮：手动触发 */
   const runDeepScanFromCard = useCallback(
     async (key: string) => {
-      const item = queue.find((it) => it.key === key);
+      // 通过 ref 取最新队列，避免依赖 queue 导致回调身份变化（否则 PackCard 的 memo 全部失效）
+      const item = queueRef.current.find((it) => it.key === key);
       if (!item || item.kind !== "mod") return;
       setDeepScanningKey(key);
       try {
@@ -1546,9 +1863,11 @@ function AppInner({
       }
       setDeepScanningKey(null);
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [queue],
+    [],
   );
+
+  /** 卡片深度扫描入口：稳定身份传给 memo 化的 PackCard */
+  const handleCardDeepScan = useCallback((k: string) => void runDeepScanFromCard(k), [runDeepScanFromCard]);
 
   /** 切换深度扫描分组勾选（勾选组 → 组内条目参与翻译/导出） */
   const toggleDeepGroup = useCallback(
@@ -1797,17 +2116,59 @@ function AppInner({
     }
   }
 
+  // 以下统计都基于队列全量遍历，memo 化避免每次渲染（进度事件、输入框敲键等）重复计算
+  const visibleQueue = useMemo(() => queue.filter((it) => it.kind === activeTab), [queue, activeTab]);
+  const allChecked = useMemo(
+    () => visibleQueue.length > 0 && visibleQueue.every((it) => it.checked),
+    [visibleQueue],
+  );
+  const checkedInTab = useMemo(
+    () => visibleQueue.reduce((n, it) => n + (it.checked ? 1 : 0), 0),
+    [visibleQueue],
+  );
+  const checkedMods = useMemo(
+    () => queue.reduce((n, it) => n + (it.checked && it.kind === "mod" ? 1 : 0), 0),
+    [queue],
+  );
+  // 上下文面板的全局条目视图：仅在选中条目（抽屉打开）时才计算，避免每次渲染做 O(N·M) 展开
+  const deferredQueue = useDeferredValue(queue);
+  const allEntries = useMemo(
+    () => (selectedKey ? deferredQueue.flatMap((q) => q.entries) : []),
+    [deferredQueue, selectedKey],
+  );
+  // 分页渲染：只挂载前 packRenderLimit 个卡片，滚动到底/点按钮续加载。
+  // 按类型页分别记忆：切回来时保留此前已加载到的数量，不会「重新从 50 个开始」
+  const [packRenderLimits, setPackRenderLimits] = useState<Record<string, number>>({});
+  const packRenderLimit = packRenderLimits[activeTab] ?? PACK_RENDER_STEP;
+  const bumpRenderLimit = useCallback(() => {
+    // 挂载新卡片是非紧急更新，放进 transition 让滚动/点击保持跟手
+    startTransition(() => {
+      setPackRenderLimits((prev) => ({
+        ...prev,
+        [activeTab]: (prev[activeTab] ?? PACK_RENDER_STEP) + PACK_RENDER_STEP,
+      }));
+    });
+  }, [activeTab]);
+  const shownQueue = useMemo(
+    () => (visibleQueue.length > packRenderLimit ? visibleQueue.slice(0, packRenderLimit) : visibleQueue),
+    [visibleQueue, packRenderLimit],
+  );
+
   const selectedEntry = useMemo(() => {
+    if (!selectedKey) return null;
+    // 先查当前类型页（命中率最高），再兜底全队列
+    for (const it of visibleQueue) {
+      const e = it.entries.find((x) => x.key === selectedKey);
+      if (e) return e;
+    }
     for (const it of queue) {
+      if (it.kind === activeTab) continue;
       const e = it.entries.find((x) => x.key === selectedKey);
       if (e) return e;
     }
     return null;
-  }, [queue, selectedKey]);
+  }, [queue, visibleQueue, activeTab, selectedKey]);
 
-
-  const visibleQueue = queue.filter((it) => it.kind === activeTab);
-  const allChecked = visibleQueue.length > 0 && visibleQueue.every((it) => it.checked);
   const progressPercent = progress
     ? Math.round((progress.doneCount / Math.max(1, progress.totalCount)) * 100)
     : 0;
@@ -1878,7 +2239,10 @@ function AppInner({
                 icon: KIND_META[k].icon,
               }))}
               activeKey={activeTab}
-              onSelect={(k) => setActiveTab(k as PackKind)}
+              onSelect={(k) => {
+                // 切换类型页会挂载/卸载整页卡片，放进 transition 让点击反馈保持跟手
+                startTransition(() => setActiveTab(k as PackKind));
+              }}
             />
             <Typography.Text
               type="secondary"
@@ -1952,50 +2316,72 @@ function AppInner({
                     skipped += 1;
                   }
                 }
-                // 条目为空的包 → 询问深度扫描；扫出文本的加入，仍无文本的不加入
+                // 条目为空的包 → 聚合到导入检查弹窗，勾选后统一深度扫描（不再阻塞逐包询问）
                 if (emptyPacks.length > 0) {
-                  const useDeep = await new Promise<boolean>((resolve) => {
-                    Modal.confirm({
-                      title: `${emptyPacks.length} 个内容包没有扫描到文本`,
-                      content:
-                        "是否对它们启用深度扫描（配置 / 成就 / 内嵌文本等）？深度扫描后仍无文本的包不会加入列表。",
-                      okText: "深度扫描",
-                      cancelText: "跳过这些包",
-                      onOk: () => resolve(true),
-                      onCancel: () => resolve(false),
-                    });
-                  });
-                  if (useDeep) {
-                    for (const gp of emptyPacks) {
-                      try {
-                        const res = await api.deepScanJar(gp.path, gp.fileName.replace(/\.jar$/i, ""));
-                        if (res.entries.length === 0) {
-                          skipped += 1;
-                          continue;
-                        }
-                        added.push({
-                          key: "gd-" + gp.path,
-                          kind: gp.kind,
-                          name: gp.fileName.replace(/\.(jar|zip)$/i, ""),
-                          fileName: gp.fileName,
-                          sourcePath: gp.path,
-                          expanded: false,
-                          checked: true,
-                          height: 480,
-                          entries: res.entries.map((e) => ({
-                            ...e,
-                            selected: true,
-                            notes: [...(e.notes ?? []), "深度扫描"],
-                          })),
-                          langFormat: "json",
-                          gameVersion: gp.gameVersion,
-                        });
-                      } catch {
-                        skipped += 1;
-                      }
+                  const gdMods = emptyPacks.filter((gp) => gp.kind === "mod");
+                  const gdOthers = emptyPacks.filter((gp) => gp.kind !== "mod");
+                  const decided = await new Promise<{ deepKeys: string[]; zhKeys: string[]; autoDeep: boolean }>(
+                    (resolve) => {
+                      importReviewResolve.current = resolve;
+                      setImportReview({
+                        added: added.length,
+                        deepFound: 0,
+                        failures: [],
+                        zhPacks: [],
+                        emptyMods: [],
+                        emptyInfo: gdOthers.map((gp) => gp.fileName),
+                        gdEmptyMods: gdMods.map((gp) => ({ path: gp.path, fileName: gp.fileName, kind: gp.kind })),
+                        batchWarn: null,
+                      });
+                      setReviewContinueZh([]);
+                      setReviewDeepScan(gdMods.map((gp) => gp.path));
+                      setReviewAutoDeep(false);
+                      setImportReviewOpen(true);
+                    },
+                  );
+                  importReviewResolve.current = null;
+                  const deepSet = new Set(decided.deepKeys);
+                  for (const gp of gdMods) {
+                    if (!deepSet.has(gp.path)) {
+                      skipped += 1;
+                      continue;
                     }
-                  } else {
-                    skipped += emptyPacks.length;
+                    try {
+                      const res = await api.deepScanJar(gp.path, gp.fileName.replace(/\.jar$/i, ""));
+                      if (res.entries.length === 0) {
+                        skipped += 1;
+                        continue;
+                      }
+                      added.push({
+                        key: "gd-" + gp.path,
+                        kind: gp.kind,
+                        name: gp.fileName.replace(/\.(jar|zip)$/i, ""),
+                        fileName: gp.fileName,
+                        sourcePath: gp.path,
+                        expanded: false,
+                        checked: true,
+                        height: 480,
+                        entries: res.entries.map((e) => ({
+                          ...e,
+                          selected: true,
+                          notes: [...(e.notes ?? []), "深度扫描"],
+                        })),
+                        langFormat: "json",
+                        gameVersion: gp.gameVersion,
+                      });
+                    } catch {
+                      skipped += 1;
+                    }
+                  }
+                  skipped += gdOthers.length;
+                  if (decided.autoDeep && settings && !settings.deepScan) {
+                    const next = { ...settings, deepScan: true };
+                    try {
+                      await api.saveSettings(next);
+                      setSettings(next);
+                    } catch {
+                      /* 忽略 */
+                    }
                   }
                 }
                 if (added.length > 0) setQueue((prev) => [...prev, ...added]);
@@ -2044,7 +2430,7 @@ function AppInner({
                   menu={{
                     items: [
                       { key: "clearTab", label: `清空${t(KIND_META[activeTab].labelKey)}页列表` },
-                      { key: "removeChecked", label: `清除勾选的内容包（${queue.filter((it) => it.kind === activeTab && it.checked).length}）` },
+                      { key: "removeChecked", label: `清除勾选的内容包（${checkedInTab}）` },
                     ],
                     onClick: ({ key }) => {
                       if (key === "clearTab") handleClearCurrentTab();
@@ -2097,9 +2483,20 @@ function AppInner({
                 </Space>
               )}
 
-              {/* 内容包队列卡片（memo 化：勾选只重渲染对应卡片） */}
-              <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
-                {visibleQueue.map((it) => (
+              {/* 内容包队列卡片（memo 化：勾选/展开只重渲染对应卡片；分页挂载避免上千卡片卡顿） */}
+              <div
+                style={{ flex: 1, minHeight: 0, overflow: "auto" }}
+                onScroll={(e) => {
+                  const el = e.currentTarget;
+                  if (
+                    packRenderLimit < visibleQueue.length &&
+                    el.scrollTop + el.clientHeight >= el.scrollHeight - 400
+                  ) {
+                    bumpRenderLimit();
+                  }
+                }}
+              >
+                {shownQueue.map((it) => (
                   <PackCard
                     key={it.key}
                     item={it}
@@ -2115,11 +2512,18 @@ function AppInner({
                     onToggleAllSelected={toggleAllSelected}
                     onToggleManySelected={toggleManySelected}
                     onResize={startResize}
-                    onDeepScan={(k) => void runDeepScanFromCard(k)}
+                    onDeepScan={handleCardDeepScan}
                     onToggleDeepGroup={toggleDeepGroup}
                     deepScanningKey={deepScanningKey}
                   />
                 ))}
+                {visibleQueue.length > shownQueue.length && (
+                  <div style={{ textAlign: "center", padding: "10px 0 16px" }}>
+                    <Button size="small" onClick={bumpRenderLimit}>
+                      显示更多（已显示 {shownQueue.length} / {visibleQueue.length}）
+                    </Button>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -2146,14 +2550,14 @@ function AppInner({
         width={420}
       >
         {selectedEntry && (
-          <ContextPanel entry={selectedEntry} allEntries={queue.flatMap((q) => q.entries)} />
+          <ContextPanel entry={selectedEntry} allEntries={allEntries} />
         )}
       </Drawer>
 
       <Modal title="导出模组" open={exportOpen} onCancel={() => setExportOpen(false)} footer={null} width={480}>
         <Space direction="vertical" style={{ width: "100%" }} size="middle">
           <Typography.Text type="secondary">
-            将导出全部勾选的 {queue.filter((it) => it.checked && it.kind === "mod").length} 个模组
+            将导出全部勾选的 {checkedMods} 个模组
           </Typography.Text>
           <Button block size="large" icon={<ExportOutlined />} onClick={() => void handleExportPack()}>
             导出合并汉化资源包（一个 .zip 管所有勾选模组）
@@ -2202,36 +2606,175 @@ function AppInner({
         onSaved={setSettings}
       />
 
-      {/* 自由导入：解析完成精简汇总（有失败/深度扫描信息时才弹） */}
+      {/* 聚合导入检查弹窗：导入完成后一次呈现（自带中文 / 空文本深度扫描 / 批次提示 / 解析失败） */}
       <Modal
-        title="导入汇总"
-        open={importSummaryOpen}
-        footer={[<Button key="ok" type="primary" onClick={() => setImportSummaryOpen(false)}>知道了</Button>]}
-        onCancel={() => setImportSummaryOpen(false)}
-        width={480}
+        title="导入检查"
+        open={importReviewOpen}
+        onCancel={() => {
+          importReviewResolve.current?.({ deepKeys: [], zhKeys: [], autoDeep: false });
+          importReviewResolve.current = null;
+          setImportReviewOpen(false);
+        }}
+        footer={[
+          <Button
+            key="cancel"
+            onClick={() => {
+              importReviewResolve.current?.({ deepKeys: [], zhKeys: [], autoDeep: false });
+              importReviewResolve.current = null;
+              setImportReviewOpen(false);
+            }}
+          >
+            暂不处理
+          </Button>,
+          <Button
+            key="ok"
+            type="primary"
+            onClick={() => {
+              importReviewResolve.current?.({ deepKeys: reviewDeepScan, zhKeys: reviewContinueZh, autoDeep: reviewAutoDeep });
+              importReviewResolve.current = null;
+              setImportReviewOpen(false);
+            }}
+          >
+            执行勾选
+          </Button>,
+        ]}
+        width={560}
       >
-        {importSummary && (
-          <>
-            <Typography.Paragraph>
-              已导入 <b>{importSummary.added}</b> 个内容包。
-              {importSummary.deepFound > 0 && (
-                <>深度扫描发现 {importSummary.deepFound} 条内嵌文本（默认未勾选）。</>
-              )}
+        {importReview && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <Typography.Paragraph style={{ marginBottom: 0 }}>
+              已导入 <b>{importReview.added}</b> 个内容包。
+              {importReview.deepFound > 0 && `深度扫描发现 ${importReview.deepFound} 条内嵌文本（默认未勾选）。`}
             </Typography.Paragraph>
-            {importSummary.failures.length > 0 && (
-              <>
-                <Typography.Text type="danger">解析失败 {importSummary.failures.length} 个：</Typography.Text>
-                <div style={{ maxHeight: 160, overflowY: "auto", marginTop: 6 }}>
-                  {importSummary.failures.map((f, i) => (
+            {/* 自带中文 */}
+            {importReview.zhPacks.length > 0 && (
+              <div>
+                <Typography.Text strong style={{ fontSize: 13 }}>
+                  {importReview.zhPacks.length} 个内容包自带中文（已预填译文）
+                </Typography.Text>
+                <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", margin: "2px 0 4px" }}>
+                  勾选 = 继续 AI 汉化剩余部分；取消勾选 = 保留自带中文、不参与后续翻译。
+                </Typography.Text>
+                <div style={{ maxHeight: 150, overflowY: "auto", border: "1px solid #F0F2F5", borderRadius: 8, padding: 8 }}>
+                  {importReview.zhPacks.map((p) => (
+                    <div key={p.key} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}>
+                      <Checkbox
+                        checked={reviewContinueZh.includes(p.key)}
+                        onChange={(e) =>
+                          setReviewContinueZh((prev) =>
+                            e.target.checked ? [...prev, p.key] : prev.filter((k) => k !== p.key),
+                          )
+                        }
+                      />
+                      <Typography.Text style={{ flex: 1, fontSize: 13 }} ellipsis={{ tooltip: p.name }}>
+                        {p.name}
+                      </Typography.Text>
+                      <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                        {p.zhCount} 条
+                      </Typography.Text>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {/* 空文本 + 深度扫描 */}
+            {(importReview.emptyMods.length > 0 || importReview.gdEmptyMods.length > 0) && (
+              <div>
+                <Typography.Text strong style={{ fontSize: 13 }}>
+                  以下内容包未发现常规可翻译文本
+                </Typography.Text>
+                <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", margin: "2px 0 4px" }}>
+                  勾选将对其启用深度扫描（成就/配置/内嵌文本等）；深度扫描后仍无文本的包不会加入列表。
+                </Typography.Text>
+                <div style={{ maxHeight: 150, overflowY: "auto", border: "1px solid #F0F2F5", borderRadius: 8, padding: 8 }}>
+                  {importReview.emptyMods.map((p) => (
+                    <div key={p.key} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}>
+                      <Checkbox
+                        checked={reviewDeepScan.includes(p.key)}
+                        onChange={(e) =>
+                          setReviewDeepScan((prev) =>
+                            e.target.checked ? [...prev, p.key] : prev.filter((k) => k !== p.key),
+                          )
+                        }
+                      />
+                      <Typography.Text style={{ flex: 1, fontSize: 13 }} ellipsis={{ tooltip: p.name }}>
+                        {p.name}
+                      </Typography.Text>
+                    </div>
+                  ))}
+                  {importReview.gdEmptyMods.map((p) => (
+                    <div key={p.path} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}>
+                      <Checkbox
+                        checked={reviewDeepScan.includes(p.path)}
+                        onChange={(e) =>
+                          setReviewDeepScan((prev) =>
+                            e.target.checked ? [...prev, p.path] : prev.filter((k) => k !== p.path),
+                          )
+                        }
+                      />
+                      <Typography.Text style={{ flex: 1, fontSize: 13 }} ellipsis={{ tooltip: p.fileName }}>
+                        {p.fileName}
+                      </Typography.Text>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8 }}>
+                  <Switch
+                    size="small"
+                    checked={reviewAutoDeep}
+                    onChange={(v) => setReviewAutoDeep(v)}
+                  />
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    以后自动深度扫描空文本模组（不再次询问）
+                  </Typography.Text>
+                </div>
+              </div>
+            )}
+            {/* 未提取到任何文本（不支持深度扫描的类型） */}
+            {importReview.emptyInfo.length > 0 && (
+              <div>
+                <Typography.Text strong style={{ fontSize: 13 }}>
+                  以下内容包未提取到任何文本
+                </Typography.Text>
+                <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 2 }}>
+                  「{importReview.emptyInfo.join("、")}」请确认文件含可汉化内容、文本类型受支持，或文本是否硬编码在代码中无法自动提取。
+                </Typography.Text>
+              </div>
+            )}
+            {/* 批次提示 */}
+            {importReview.batchWarn && (
+              <div style={{ background: "var(--ant-color-warning-bg, #FFFBE6)", borderRadius: 8, padding: "8px 12px" }}>
+                <Typography.Text strong style={{ fontSize: 13 }}>内容包条目较少，建议检查批次设置</Typography.Text>
+                <Typography.Paragraph type="secondary" style={{ fontSize: 12, margin: "4px 0" }}>
+                  {importReview.batchWarn.names}。当前 {importReview.batchWarn.threads} 线程 + 跟随线程数最优条数，
+                  实际每批仅约 {importReview.batchWarn.perBatch} 条——小批次可能影响翻译上下文与准确性。
+                </Typography.Paragraph>
+                <Button
+                  size="small"
+                  onClick={() => {
+                    setSettingsSection("params");
+                    setSettingsOpen(true);
+                  }}
+                >
+                  去设置
+                </Button>
+              </div>
+            )}
+            {/* 解析失败 */}
+            {importReview.failures.length > 0 && (
+              <div>
+                <Typography.Text type="danger">解析失败 {importReview.failures.length} 个：</Typography.Text>
+                <div style={{ maxHeight: 150, overflowY: "auto", marginTop: 6 }}>
+                  {importReview.failures.map((f, i) => (
                     <div key={i} style={{ fontSize: 12, marginBottom: 4 }}>
                       <Typography.Text type="secondary">{f.name}：</Typography.Text>
                       {f.reason}
                     </div>
                   ))}
                 </div>
-              </>
+              </div>
             )}
-          </>
+          </div>
         )}
       </Modal>
 
@@ -2247,70 +2790,8 @@ function AppInner({
         width={420}
       >
         <Typography.Paragraph>
-          将清除当前{t(KIND_META[activeTab].labelKey)}页勾选的 {queue.filter((it) => it.kind === activeTab && it.checked).length} 个内容包的全部译文（不可撤销）。
+          将清除当前{t(KIND_META[activeTab].labelKey)}页勾选的 {checkedInTab} 个内容包的全部译文（不可撤销）。
         </Typography.Paragraph>
-      </Modal>
-
-      {/* 提取到的术语：弹窗勾选加入用户术语表（不阻塞翻译） */}
-      <Modal
-        title="提取到的术语"
-        open={!!extractedGlossary}
-        onCancel={() => setExtractedGlossary(null)}
-        onOk={async () => {
-          if (!extractedGlossary || !settings) return;
-          const checkedSet = new Set(extractedChecked);
-          const selected = extractedGlossary.filter(([en]) => checkedSet.has(en));
-          if (selected.length === 0) {
-            message.info("未选择任何术语");
-            return;
-          }
-          const next = {
-            ...settings,
-            userGlossary: [...(settings.userGlossary ?? []), ...selected],
-          };
-          try {
-            await api.saveSettings(next);
-            setSettings(next);
-            message.success(`已加入 ${selected.length} 条术语到用户术语表`);
-          } catch (e) {
-            message.error(String(e));
-          }
-          setExtractedGlossary(null);
-        }}
-        okText="加入用户术语表"
-        cancelText="仅本次使用"
-        width={520}
-      >
-        <Typography.Paragraph type="secondary">
-          以下术语已自动提取并用于本次翻译。勾选可**加入用户术语表**（全局生效，后续翻译统一译名）；不勾选的仅本次使用：
-        </Typography.Paragraph>
-        <div style={{ maxHeight: 300, overflow: "auto", border: "1px solid #F0F2F5", borderRadius: 8, padding: 8 }}>
-          {extractedGlossary?.map(([en, zh]) => (
-            <div
-              key={en}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                padding: "4px 0",
-                borderBottom: "1px solid #F5F6F8",
-              }}
-            >
-              <Checkbox
-                checked={extractedChecked.includes(en)}
-                onChange={(e) =>
-                  setExtractedChecked((prev) =>
-                    e.target.checked
-                      ? [...prev, en]
-                      : prev.filter((x) => x !== en),
-                  )
-                }
-              />
-              <Typography.Text code style={{ flex: 1 }}>{en}</Typography.Text>
-              <Typography.Text>→ {zh}</Typography.Text>
-            </div>
-          ))}
-        </div>
       </Modal>
 
       {/* 导出 jar 风险提示：含深度扫描内嵌文本 */}
@@ -2357,66 +2838,177 @@ function AppInner({
         </Space>
       </Modal>
 
-      {/* 术语表建议：翻译完成后一次性弹出，勾选加入术语表 */}
+      {/* 翻译完成汇总：原文一致 / 提取术语 / 术语建议 三合一，勾选后统一执行 */}
       <Modal
-        title="术语表建议"
-        open={!!glossarySuggest}
-        onCancel={() => setGlossarySuggest(null)}
-        onOk={async () => {
-          if (!glossarySuggest || !settings) return;
-          const checkedSet = new Set(suggestChecked);
-          const selected = glossarySuggest.filter(([en]) => checkedSet.has(en));
-          if (selected.length === 0) {
-            message.info("未选择任何术语");
-            return;
-          }
-          const next = {
-            ...settings,
-            userGlossary: [...(settings.userGlossary ?? []), ...selected],
-          };
-          try {
-            await api.saveSettings(next);
-            setSettings(next);
-            message.success(`已加入 ${selected.length} 条术语`);
-          } catch (e) {
-            message.error(String(e));
-          }
+        title="翻译完成汇总"
+        open={transSummaryOpen}
+        onCancel={() => {
+          setTransSummaryOpen(false);
+          setExtractedGlossary(null);
+          setExtractedChecked([]);
           setGlossarySuggest(null);
+          setSuggestChecked([]);
+          setSameWarnPacks([]);
+          setSameWarnChecked([]);
         }}
-        okText="加入术语表"
-        cancelText="暂不"
-        width={520}
+        onOk={() => void execTransSummary()}
+        okText="统一执行"
+        cancelText="关闭"
+        width={640}
+        okButtonProps={{ danger: sameWarnChecked.length > 0 }}
       >
-        <Typography.Paragraph type="secondary">
-          以下高频词汇在本次翻译中出现多次，加入术语表可让后续翻译译名更统一（可取消不需要的）：
-        </Typography.Paragraph>
-        <div style={{ maxHeight: 320, overflow: "auto", border: "1px solid #F0F2F5", borderRadius: 8, padding: 8 }}>
-          {glossarySuggest?.map(([en, zh]) => (
-            <div
-              key={en}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                padding: "4px 0",
-                borderBottom: "1px solid #F5F6F8",
-              }}
-            >
-              <Checkbox
-                checked={suggestChecked.includes(en)}
-                onChange={(e) =>
-                  setSuggestChecked((prev) =>
-                    e.target.checked
-                      ? [...prev, en]
-                      : prev.filter((x) => x !== en),
-                  )
-                }
-              />
-              <Typography.Text code style={{ flex: 1 }}>{en}</Typography.Text>
-              <Typography.Text>→ {zh}</Typography.Text>
-            </div>
-          ))}
-        </div>
+        <Tabs
+          items={[
+            ...(sameWarnPacks.length > 0
+              ? [
+                  {
+                    key: "same",
+                    label: `原文一致（${sameWarnPacks.length}）`,
+                    children: (
+                      <div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                          <Typography.Text type="secondary" style={{ fontSize: 12, flex: 1 }}>
+                            勾选的内容包将清除「译文与原文相同」的条目，便于重新汉化；其他条目不受影响。
+                          </Typography.Text>
+                          <Button
+                            size="small"
+                            onClick={() =>
+                              setSameWarnChecked((prev) =>
+                                prev.length === sameWarnPacks.length
+                                  ? []
+                                  : sameWarnPacks.map((w) => w.packKey),
+                              )
+                            }
+                          >
+                            {sameWarnChecked.length === sameWarnPacks.length ? "全不选" : "全选"}
+                          </Button>
+                        </div>
+                        <div style={{ maxHeight: 260, overflowY: "auto", border: "1px solid #F0F2F5", borderRadius: 8, padding: 8 }}>
+                          {sameWarnPacks.map((w) => (
+                            <div
+                              key={w.packKey}
+                              style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0", borderBottom: "1px solid #F5F6F8" }}
+                            >
+                              <Checkbox
+                                checked={sameWarnChecked.includes(w.packKey)}
+                                onChange={(e) =>
+                                  setSameWarnChecked((prev) =>
+                                    e.target.checked ? [...prev, w.packKey] : prev.filter((k) => k !== w.packKey),
+                                  )
+                                }
+                              />
+                              <Typography.Text style={{ flex: 1, fontSize: 13 }} ellipsis={{ tooltip: w.name }}>
+                                {w.name}
+                              </Typography.Text>
+                              <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                                {w.count} 条
+                              </Typography.Text>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ),
+                  },
+                ]
+              : []),
+            ...(extractedGlossary && extractedGlossary.length > 0
+              ? [
+                  {
+                    key: "extracted",
+                    label: `提取术语（${extractedGlossary.length}）`,
+                    children: (
+                      <div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                          <Typography.Text type="secondary" style={{ fontSize: 12, flex: 1 }}>
+                            本次翻译已自动提取并用于统一译名。勾选可加入用户术语表（全局生效）；不勾选的仅本次使用。
+                          </Typography.Text>
+                          <Button
+                            size="small"
+                            onClick={() =>
+                              setExtractedChecked((prev) =>
+                                prev.length === (extractedGlossary?.length ?? 0)
+                                  ? []
+                                  : (extractedGlossary ?? []).map(([en]) => en),
+                              )
+                            }
+                          >
+                            {extractedChecked.length === (extractedGlossary?.length ?? 0) ? "全不选" : "全选"}
+                          </Button>
+                        </div>
+                        <div style={{ maxHeight: 260, overflowY: "auto", border: "1px solid #F0F2F5", borderRadius: 8, padding: 8 }}>
+                          {extractedGlossary.map(([en, zh]) => (
+                            <div
+                              key={en}
+                              style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0", borderBottom: "1px solid #F5F6F8" }}
+                            >
+                              <Checkbox
+                                checked={extractedChecked.includes(en)}
+                                onChange={(e) =>
+                                  setExtractedChecked((prev) =>
+                                    e.target.checked ? [...prev, en] : prev.filter((x) => x !== en),
+                                  )
+                                }
+                              />
+                              <Typography.Text code style={{ flex: 1 }}>{en}</Typography.Text>
+                              <Typography.Text>→ {zh}</Typography.Text>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ),
+                  },
+                ]
+              : []),
+            ...(glossarySuggest && glossarySuggest.length > 0
+              ? [
+                  {
+                    key: "suggest",
+                    label: `术语建议（${glossarySuggest.length}）`,
+                    children: (
+                      <div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                          <Typography.Text type="secondary" style={{ fontSize: 12, flex: 1 }}>
+                            以下高频词汇本次出现多次，加入术语表可让后续翻译译名更统一（可取消不需要的）。
+                          </Typography.Text>
+                          <Button
+                            size="small"
+                            onClick={() =>
+                              setSuggestChecked((prev) =>
+                                prev.length === (glossarySuggest?.length ?? 0)
+                                  ? []
+                                  : (glossarySuggest ?? []).map(([en]) => en),
+                              )
+                            }
+                          >
+                            {suggestChecked.length === (glossarySuggest?.length ?? 0) ? "全不选" : "全选"}
+                          </Button>
+                        </div>
+                        <div style={{ maxHeight: 260, overflowY: "auto", border: "1px solid #F0F2F5", borderRadius: 8, padding: 8 }}>
+                          {glossarySuggest.map(([en, zh]) => (
+                            <div
+                              key={en}
+                              style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0", borderBottom: "1px solid #F5F6F8" }}
+                            >
+                              <Checkbox
+                                checked={suggestChecked.includes(en)}
+                                onChange={(e) =>
+                                  setSuggestChecked((prev) =>
+                                    e.target.checked ? [...prev, en] : prev.filter((x) => x !== en),
+                                  )
+                                }
+                              />
+                              <Typography.Text code style={{ flex: 1 }}>{en}</Typography.Text>
+                              <Typography.Text>→ {zh}</Typography.Text>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ),
+                  },
+                ]
+              : []),
+          ]}
+        />
       </Modal>
     </Layout>
   );

@@ -176,6 +176,15 @@ export const api = {
     invoke<void>("save_session_cache", { name, content }),
   loadSessionCache: (name: string) => invoke<string | null>("load_session_cache", { name }),
   clearSessionCache: (name: string) => invoke<void>("clear_session_cache", { name }),
+  /** 会话缓存 v2（按包分片）：只写变化的分片，单次写入很小 */
+  sessionV2WriteShard: (name: string, id: string, content: string) =>
+    invoke<void>("session_v2_write_shard", { name, id, content }),
+  sessionV2WriteIndex: (name: string, content: string) =>
+    invoke<void>("session_v2_write_index", { name, content }),
+  sessionV2Load: (name: string) => invoke<string | null>("session_v2_load", { name }),
+  sessionV2Prune: (name: string, keep: string[]) =>
+    invoke<void>("session_v2_prune", { name, keep }),
+  sessionV2Clear: (name: string) => invoke<void>("session_v2_clear", { name }),
   /** 游戏目录模式：扫描 .minecraft / versions（后台 + 进度事件，可取消） */
   scanGameDir: (root: string) => invoke<GameDirScan>("scan_game_dir", { root }),
   cancelGameScan: () => invoke<void>("cancel_game_scan"),

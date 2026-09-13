@@ -24,6 +24,9 @@ interface Props {
   scrollY?: number;
 }
 
+/** 超过该条目数启用 antd 虚拟滚动（只渲染可视行） */
+const VIRTUAL_ROW_THRESHOLD = 100;
+
 /** § 格式码配色表（Minecraft 颜色码） */
 const MC_COLORS: Record<string, string> = {
   "0": "#000000", "1": "#0000AA", "2": "#00AA00", "3": "#00AAAA",
@@ -208,8 +211,9 @@ export const EntryTable = memo(function EntryTable({
 }: Props) {
   const { t: tr } = useTranslationContext();
   const [filter, setFilter] = useState("");
-  // 条目多时启用虚拟滚动（只渲染可视行，大幅降低渲染成本）
-  const useVirtual = entries.length > 200 && (scrollY ?? 0) > 100;
+  // 条目多时启用虚拟滚动（只渲染可视行，大幅降低渲染成本）；
+  // 阈值取 100：展开中等规模内容包时也走虚拟渲染，避免一次挂载上百行造成展开延迟
+  const useVirtual = entries.length > VIRTUAL_ROW_THRESHOLD && (scrollY ?? 0) > 100;
 
   // 行级 memo：record 引用不变的行不重渲染（勾选/编辑只重渲染目标行）
   // record 通过 onRow 传入（antd 默认不传给行组件）

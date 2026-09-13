@@ -66,6 +66,20 @@ body {
   box-shadow: 0 2px 10px var(--hover-shadow);
 }
 
+/* 折叠的内容包卡片：视口外的卡片跳过渲染（Chromium/WebView2 支持 content-visibility），
+   上千个内容包时显著降低首次布局与滚动开销；contain-intrinsic-size 提供高度占位，
+   用 auto 关键字让浏览器记住上次实测高度，避免滚动条跳动 */
+/* 开发者工具：线程调度行视口外跳过渲染（上千内容包时滚动才不卡） */
+.dev-sched-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 40px;
+}
+
+.pack-card-collapsed {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 56px;
+}
+
 /* 拖动批量勾选时经过行的临时高亮 */
 .drag-highlight {
   background: var(--drag-highlight) !important;

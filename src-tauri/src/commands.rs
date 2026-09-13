@@ -52,6 +52,120 @@ pub fn clear_session_cache(app: AppHandle, name: String) {
     let _ = std::fs::remove_file(session_cache_path(&app, &name));
 }
 
+// ── 会话缓存 v2：按包分片 ────────────────────────────────────────────────────
+// 目的：整份快照会在上千个内容包时产生几十 MB 的字符串与 IPC 拷贝（主线程被按死、
+// 进程瞬时内存暴涨导致白屏）。改为「一个包一个分片」，只需重写发生变化的分片，
+// 单次写入从秒级降到毫秒级；同时完整保留了条目数据，恢复不依赖原包文件仍在。
+
+fn session_shard_dir(app: &AppHandle, name: &str) -> PathBuf {
+    let safe = if name.chars().all(|c| c.is_ascii_alphanumeric()) && !name.is_empty() {
+        name
+    } else {
+        "free"
+    };
+    app.path()
+        .app_config_dir()
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join(format!("session-{}-shards", safe))
+}
+
+/// 分片 id 白名单校验：仅允许字母数字与 - _，杜绝路径穿越
+fn safe_shard_id(id: &str) -> Option<&str> {
+    if !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        Some(id)
+    } else {
+        None
+    }
+}
+
+/// 写单个分片
+#[tauri::command]
+pub fn session_v2_write_shard(
+    app: AppHandle,
+    name: String,
+    id: String,
+    content: String,
+) -> Result<(), String> {
+    let id = safe_shard_id(&id).ok_or_else(|| "非法的分片 id".to_string())?;
+    let dir = session_shard_dir(&app, &name);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(format!("{}.json", id)), content).map_err(|e| e.to_string())
+}
+
+/// 写索引（内容包顺序 + 分片 id 列表，体积很小）
+#[tauri::command]
+pub fn session_v2_write_index(app: AppHandle, name: String, content: String) -> Result<(), String> {
+    let dir = session_shard_dir(&app, &name);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("index.json"), content).map_err(|e| e.to_string())
+}
+
+/// 一次性读取整个会话：按索引顺序拼出 packs（避免上千次 IPC 往返）
+/// 返回 {"version":2,"ids":[...],"packs":[...]}；无缓存返回 None
+#[tauri::command]
+pub fn session_v2_load(app: AppHandle, name: String) -> Option<String> {
+    let dir = session_shard_dir(&app, &name);
+    let idx_text = std::fs::read_to_string(dir.join("index.json")).ok()?;
+    let idx: serde_json::Value = serde_json::from_str(&idx_text).ok()?;
+    let ids = idx.get("ids")?.as_array()?;
+    let mut out_ids: Vec<String> = Vec::new();
+    let mut packs: Vec<serde_json::Value> = Vec::new();
+    for id in ids {
+        let Some(id) = id.as_str() else { continue };
+        let Some(id) = safe_shard_id(id) else { continue };
+        // 单个分片损坏只跳过该包，不影响其余
+        let Ok(raw) = std::fs::read_to_string(dir.join(format!("{}.json", id))) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        out_ids.push(id.to_string());
+        packs.push(v);
+    }
+    if packs.is_empty() {
+        return None;
+    }
+    Some(
+        serde_json::json!({ "version": 2, "ids": out_ids, "packs": packs })
+            .to_string(),
+    )
+}
+
+/// 清理不再引用的分片（换会话/删包后遗留）
+#[tauri::command]
+pub fn session_v2_prune(app: AppHandle, name: String, keep: Vec<String>) -> Result<(), String> {
+    let dir = session_shard_dir(&app, &name);
+    let keep_set: std::collections::HashSet<String> = keep
+        .iter()
+        .filter_map(|i| safe_shard_id(i).map(|s| s.to_string()))
+        .collect();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let fname = e.file_name().to_string_lossy().to_string();
+            if fname == "index.json" || !fname.ends_with(".json") {
+                continue;
+            }
+            let stem = fname.trim_end_matches(".json").to_string();
+            if !keep_set.contains(&stem) {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 清除整个 v2 会话缓存（含所有分片）
+#[tauri::command]
+pub fn session_v2_clear(app: AppHandle, name: String) {
+    let _ = std::fs::remove_dir_all(session_shard_dir(&app, &name));
+}
+
 /// 翻译取消标志：前端调用 cancel_translation 置位，翻译循环每批检查
 static CANCEL_TRANSLATION: AtomicBool = AtomicBool::new(false);
 /// 翻译暂停标志：置位后翻译循环在批次间等待，直到恢复或取消
@@ -215,8 +329,18 @@ pub async fn run_translation(
             );
         }
         // 结束（完成/取消/暂停遗留）后复位标志
+        let cancelled = CANCEL_TRANSLATION.load(Ordering::Relaxed);
         CANCEL_TRANSLATION.store(false, Ordering::Relaxed);
         PAUSE_TRANSLATION.store(false, Ordering::Relaxed);
+        // devtools：包级完成事件（调度视图据此确定性标记完成，不再仅靠批次计数推断）
+        #[cfg(feature = "devtools")]
+        crate::dev::dev_emit("dev-pack-done", serde_json::json!({
+            "packKey": pack_key,
+            "packName": pack_label,
+            "batchCount": batch_count,
+            "threads": threads,
+            "cancelled": cancelled,
+        }));
         #[cfg(feature = "devtools")]
         crate::dev::clear_emitter();
         return Ok(results);
@@ -297,8 +421,18 @@ pub async fn run_translation(
     for h in handles {
         let _ = h.await;
     }
+    let cancelled = CANCEL_TRANSLATION.load(Ordering::Relaxed);
     CANCEL_TRANSLATION.store(false, Ordering::Relaxed);
     PAUSE_TRANSLATION.store(false, Ordering::Relaxed);
+    // devtools：包级完成事件（调度视图据此确定性标记完成，不再仅靠批次计数推断）
+    #[cfg(feature = "devtools")]
+    crate::dev::dev_emit("dev-pack-done", serde_json::json!({
+        "packKey": pack_key,
+        "packName": pack_label,
+        "batchCount": batch_count,
+        "threads": threads,
+        "cancelled": cancelled,
+    }));
     #[cfg(feature = "devtools")]
     crate::dev::clear_emitter();
     let final_results = Arc::try_unwrap(results)

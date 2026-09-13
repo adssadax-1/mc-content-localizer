@@ -19,7 +19,7 @@ import {
   Typography,
   message,
 } from "antd";
-import { ClearOutlined } from "@ant-design/icons";
+import { ClearOutlined, DownOutlined, RightOutlined, SearchOutlined } from "@ant-design/icons";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { listen, emit, type UnlistenFn } from "@tauri-apps/api/event";
@@ -127,7 +127,59 @@ export interface ThrottleEntry {
 }
 
 // ── 环形缓冲 store（简化版，面板内自洽） ──────────────────────────────────────
+/** 明细缓冲上限（载荷大的条目：原始事件、HTTP 响应全文） */
 const MAX_LOGS = 1000;
+/** 调度类明细上限：这些载荷很小（键/线程号/耗时），上千内容包也需完整保留 */
+const MAX_SCHEDULE = 30000;
+/** HTTP 请求记录上限（仅头部摘要，体积小） */
+const MAX_HTTP_REQ = 20000;
+/** HTTP 响应明细上限（正文已截断，保证与请求的配对尽量完整） */
+const MAX_HTTP_RES = 4000;
+/** 单条响应正文保留字符数：完整响应可达数十 KB，全量留存会在上千包时吃爆内存 */
+const HTTP_BODY_KEEP = 1200;
+/** 每个线程保留的批次色块上限（更早的批次只计入总数，不再建 DOM） */
+const SCHEDULE_RECENT_MAX = 20;
+/** 事件流一次最多渲染的条数（更早的仍计数，只是不建 DOM） */
+const EVENTS_RENDER_MAX = 300;
+
+/** 线程调度聚合：随事件增量更新，永不淘汰，也不需要在渲染时扫描事件数组 */
+interface ScheduleWorkerAgg {
+  chunkCount: number;
+  starts: number;
+  doneCount: number;
+  errorCount: number;
+  throttleCount: number;
+  /** 最近的批次（色块展示用，数量有上限） */
+  recent: { durationMs: number; ok: number; error: string; throttleSec: number }[];
+}
+interface SchedulePackAgg {
+  packName: string;
+  workers: Map<number, ScheduleWorkerAgg>;
+  done: boolean;
+  cancelled: boolean;
+  batchTotal: number;
+  lastSeen: number;
+}
+
+function ensurePackAgg(key: string, name?: string): SchedulePackAgg {
+  let p = store.schedule.get(key);
+  if (!p) {
+    p = { packName: name && name !== key ? name : key, workers: new Map(), done: false, cancelled: false, batchTotal: 0, lastSeen: 0 };
+    store.schedule.set(key, p);
+  } else if (name && name !== key && p.packName === key) {
+    p.packName = name;
+  }
+  return p;
+}
+
+function ensureWorkerAgg(p: SchedulePackAgg, wid: number): ScheduleWorkerAgg {
+  let w = p.workers.get(wid);
+  if (!w) {
+    w = { chunkCount: 0, starts: 0, doneCount: 0, errorCount: 0, throttleCount: 0, recent: [] };
+    p.workers.set(wid, w);
+  }
+  return w;
+}
 
 interface DevStore {
   /** 每次变更自增（useMemo 依赖它重算：数组都是原地 push，引用不变） */
@@ -143,6 +195,21 @@ interface DevStore {
   batchStarts: BatchStartEntry[];
   batchDones: BatchDoneEntry[];
   throttles: ThrottleEntry[];
+  /** 包级完成事件（聚合，永不淘汰）：调度视图据此确定性标记完成 */
+  packDones: Map<string, { packName: string; batchCount: number; threads: number; cancelled: boolean; timestamp: number }>;
+  /** 线程调度聚合（按包/线程增量维护，永不淘汰） */
+  schedule: Map<string, SchedulePackAgg>;
+  /** 累计计数（永不淘汰）：明细被环形缓冲淘汰后，总量仍然准确 */
+  counters: {
+    events: number;
+    httpReq: number;
+    httpRes: number;
+    threadAssign: number;
+    batchStart: number;
+    batchDone: number;
+    throttle: number;
+    packDone: number;
+  };
   nextId: number;
 }
 
@@ -158,15 +225,35 @@ const store: DevStore = {
   batchStarts: [],
   batchDones: [],
   throttles: [],
+  packDones: new Map(),
+  schedule: new Map(),
+  counters: {
+    events: 0,
+    httpReq: 0,
+    httpRes: 0,
+    threadAssign: 0,
+    batchStart: 0,
+    batchDone: 0,
+    throttle: 0,
+    packDone: 0,
+  },
   nextId: 0,
 };
 
-// 简单的发布订阅，让组件能感知 store 变化
+// 简单的发布订阅，让组件能感知 store 变化。
+// 上千内容包时事件可达数万条，若每条都通知会触发数万次整窗重渲染（列表随之重建，
+// 直接把开发者工具窗口拖到崩溃），因此合并为最多每 200ms 通知一次。
 type Listener = () => void;
 const listeners = new Set<Listener>();
+let notifyScheduled = false;
 function notify() {
-  store.version += 1;
-  listeners.forEach((l) => l());
+  if (notifyScheduled) return;
+  notifyScheduled = true;
+  setTimeout(() => {
+    notifyScheduled = false;
+    store.version += 1;
+    listeners.forEach((l) => l());
+  }, 200);
 }
 function subscribe(l: Listener): () => void {
   listeners.add(l);
@@ -176,8 +263,15 @@ function subscribe(l: Listener): () => void {
 function pushEvent(event: string, payload: unknown) {
   const id = store.nextId++;
   const timestamp = Date.now();
-  store.events.push({ id, timestamp, event, payload });
+  // 事件流只保留摘要：translation-batch 每次可含上百条条目，原样留存会在上千包时常驻巨量对象
+  let logged: unknown = payload;
+  if (event === "translation-batch") {
+    const bp = payload as { packKey?: string; items?: unknown[] };
+    logged = { packKey: bp.packKey, count: bp.items?.length ?? 0 };
+  }
+  store.events.push({ id, timestamp, event, payload: logged });
   if (store.events.length > MAX_LOGS) store.events.shift();
+  store.counters.events += 1;
 
   // 路由 dev-* 事件到专用集合
   const p = payload as Record<string, unknown>;
@@ -193,16 +287,23 @@ function pushEvent(event: string, payload: unknown) {
         systemHead: String(p.systemHead ?? ""),
         userHead: String(p.userHead ?? ""),
       });
-      if (store.httpRequests.length > MAX_LOGS) store.httpRequests.shift();
+      if (store.httpRequests.length > MAX_HTTP_REQ) store.httpRequests.shift();
+      store.counters.httpReq += 1;
       break;
     case "dev-http-response": {
+      const rawBody = String(p.bodyHead ?? "");
       const resp: HttpResponseEntry = {
         id, timestamp,
         status: Number(p.status ?? 0),
-        bodyHead: String(p.bodyHead ?? ""),
+        bodyHead:
+          rawBody.length > HTTP_BODY_KEEP
+            ? `${rawBody.slice(0, HTTP_BODY_KEEP)}
+…（正文已截断，共 ${rawBody.length} 字符）`
+            : rawBody,
       };
       store.httpResponses.push(resp);
-      if (store.httpResponses.length > MAX_LOGS) store.httpResponses.shift();
+      if (store.httpResponses.length > MAX_HTTP_RES) store.httpResponses.shift();
+      store.counters.httpRes += 1;
       // 尝试配对到最近的未配对 request
       for (let i = store.httpRequests.length - 1; i >= 0; i--) {
         if (!store.httpRequests[i].response) {
@@ -239,7 +340,13 @@ function pushEvent(event: string, payload: unknown) {
         packKey: p.packKey ? String(p.packKey) : undefined,
         packName: p.packName ? String(p.packName) : undefined,
       });
-      if (store.threadAssigns.length > MAX_LOGS) store.threadAssigns.shift();
+      if (store.threadAssigns.length > MAX_SCHEDULE) store.threadAssigns.shift();
+      store.counters.threadAssign += 1;
+      {
+        const agg = ensurePackAgg(String(p.packKey ?? "__default__"), p.packName ? String(p.packName) : undefined);
+        agg.lastSeen = timestamp;
+        ensureWorkerAgg(agg, Number(p.workerId ?? 0)).chunkCount += Number(p.chunkCount ?? 0);
+      }
       break;
     case "dev-batch-start":
       store.batchStarts.push({
@@ -247,7 +354,13 @@ function pushEvent(event: string, payload: unknown) {
         packKey: p.packKey ? String(p.packKey) : undefined,
         workerId: Number(p.workerId ?? 0),
       });
-      if (store.batchStarts.length > MAX_LOGS) store.batchStarts.shift();
+      if (store.batchStarts.length > MAX_SCHEDULE) store.batchStarts.shift();
+      store.counters.batchStart += 1;
+      {
+        const agg = ensurePackAgg(String(p.packKey ?? "__default__"));
+        agg.lastSeen = timestamp;
+        ensureWorkerAgg(agg, Number(p.workerId ?? 0)).starts += 1;
+      }
       break;
     case "dev-batch-done":
       store.batchDones.push({
@@ -258,7 +371,22 @@ function pushEvent(event: string, payload: unknown) {
         packKey: p.packKey ? String(p.packKey) : undefined,
         workerId: Number(p.workerId ?? 0),
       });
-      if (store.batchDones.length > MAX_LOGS) store.batchDones.shift();
+      if (store.batchDones.length > MAX_SCHEDULE) store.batchDones.shift();
+      store.counters.batchDone += 1;
+      {
+        const agg = ensurePackAgg(String(p.packKey ?? "__default__"));
+        agg.lastSeen = timestamp;
+        const w = ensureWorkerAgg(agg, Number(p.workerId ?? 0));
+        w.doneCount += 1;
+        if (String(p.error ?? "")) w.errorCount += 1;
+        w.recent.push({
+          durationMs: Number(p.durationMs ?? 0),
+          ok: Number(p.ok ?? 0),
+          error: String(p.error ?? ""),
+          throttleSec: 0,
+        });
+        if (w.recent.length > SCHEDULE_RECENT_MAX) w.recent.shift();
+      }
       break;
     case "dev-thread-throttle":
       store.throttles.push({
@@ -267,8 +395,37 @@ function pushEvent(event: string, payload: unknown) {
         intervalSec: Number(p.intervalSec ?? 0),
         packKey: p.packKey ? String(p.packKey) : undefined,
       });
-      if (store.throttles.length > MAX_LOGS) store.throttles.shift();
+      if (store.throttles.length > MAX_SCHEDULE) store.throttles.shift();
+      store.counters.throttle += 1;
+      {
+        const agg = ensurePackAgg(String(p.packKey ?? "__default__"));
+        agg.lastSeen = timestamp;
+        const w = ensureWorkerAgg(agg, Number(p.workerId ?? 0));
+        w.throttleCount += 1;
+        // 间隔事件紧随该线程刚完成的批次，挂到最后一个色块上
+        const last = w.recent[w.recent.length - 1];
+        if (last) last.throttleSec = Number(p.intervalSec ?? 0);
+      }
       break;
+    case "dev-pack-done": {
+      const key = p.packKey ? String(p.packKey) : "__default__";
+      store.packDones.set(key, {
+        packName: p.packName ? String(p.packName) : "",
+        batchCount: Number(p.batchCount ?? 0),
+        threads: Number(p.threads ?? 1),
+        cancelled: Boolean(p.cancelled),
+        timestamp,
+      });
+      store.counters.packDone += 1;
+      {
+        const agg = ensurePackAgg(key, p.packName ? String(p.packName) : undefined);
+        agg.done = true;
+        agg.cancelled = Boolean(p.cancelled);
+        agg.batchTotal = Number(p.batchCount ?? 0);
+        agg.lastSeen = timestamp;
+      }
+      break;
+    }
   }
   notify();
 }
@@ -299,6 +456,18 @@ export function clearEvents() {
   store.batchStarts = [];
   store.batchDones = [];
   store.throttles = [];
+  store.packDones.clear();
+  store.schedule.clear();
+  store.counters = {
+    events: 0,
+    httpReq: 0,
+    httpRes: 0,
+    threadAssign: 0,
+    batchStart: 0,
+    batchDone: 0,
+    throttle: 0,
+    packDone: 0,
+  };
   notify();
 }
 
@@ -360,10 +529,12 @@ function EventStreamTab() {
     () => [...new Set(store.events.map((e) => e.event))].sort(),
     [store.version]
   );
-  const filtered = useMemo(
+  const matched = useMemo(
     () => (filter ? store.events.filter((e) => e.event === filter) : store.events),
     [store.version, filter]
   );
+  // 只渲染最近 EVENTS_RENDER_MAX 条：Timeline + Collapse + JSON 预览的构造成本不低
+  const filtered = matched.length > EVENTS_RENDER_MAX ? matched.slice(-EVENTS_RENDER_MAX) : matched;
 
   const containerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -402,7 +573,8 @@ function EventStreamTab() {
           {t("devtools.common.clear")}
         </Button>
         <Typography.Text type="secondary">
-          {filtered.length} {t("devtools.common.count")}
+          {matched.length} {t("devtools.common.count")}
+          {matched.length > filtered.length ? `（仅渲染最近 ${filtered.length} 条）` : ""}
         </Typography.Text>
       </Space>
       <div ref={containerRef} style={{ flex: 1, overflowY: "auto" }}>
@@ -551,6 +723,9 @@ function RequestResponseTab() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
 
   const pairs = store.httpRequests;
+  // 下拉只列最近 200 次请求：上千内容包时 pairs 可达上万条，全量建 option 会拖垮窗口
+  const OPTION_MAX = 200;
+  const optionPairs = pairs.length > OPTION_MAX ? pairs.slice(-OPTION_MAX) : pairs;
   const selected = selectedId ? pairs.find((p) => p.id === selectedId) : pairs[pairs.length - 1];
 
   return (
@@ -561,15 +736,19 @@ function RequestResponseTab() {
           placeholder={t("devtools.requestResponse.selectBatch")}
           value={selected?.id}
           onChange={(v) => setSelectedId(v)}
-          options={pairs.map((p, i) => ({
-            label: `#${i + 1} ${new Date(p.timestamp).toLocaleTimeString()} ${
+          options={optionPairs.map((p) => ({
+            label: `#${p.id + 1} ${new Date(p.timestamp).toLocaleTimeString()} ${
               p.purpose === "glossary" ? `[${t("devtools.requestResponse.glossary")}]` : ""
             } ${p.response ? `(${p.response.status})` : "..."}`,
             value: p.id,
           }))}
         />
         <Typography.Text type="secondary">
-          {pairs.length} {t("devtools.common.count")}
+          {t("devtools.common.count")} {pairs.length}
+          {store.counters.httpReq > pairs.length ? ` / 累计 ${store.counters.httpReq}` : ""}
+          {pairs.length > optionPairs.length ? `（下拉列最近 ${optionPairs.length}）` : ""}
+          {" · "}
+          {t("devtools.requestResponse.response")} {store.counters.httpRes}
         </Typography.Text>
       </Space>
       {selected ? (
@@ -711,42 +890,31 @@ function RetryChainTab() {
 }
 
 // ── 多线程调度 tab（Phase 3） ────────────────────────────────────────────────
+/** 单页最多渲染多少个内容包（其余靠搜索/显示更多查看，避免上千行 DOM） */
+const SCHEDULE_PACK_PAGE = 40;
+
 function ThreadScheduleTab() {
   const { t } = useTranslationContext();
   const store = useDevStore();
+  const [search, setSearch] = useState("");
+  const [limit, setLimit] = useState(SCHEDULE_PACK_PAGE);
+  // 同一时刻只展开一个内容包；默认全部收起（展开会挂载该包全部线程的批次色块）
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
 
-  // 两级分组：内容包（packKey）→ 线程（workerId）
-  const packs = useMemo(() => {
-    type W = { chunkCount: number; dones: BatchDoneEntry[]; starts: number; throttles: number[] };
-    const map = new Map<string, { packName: string; workers: Map<number, W> }>();
-    const ensure = (key: string, name?: string) => {
-      if (!map.has(key)) map.set(key, { packName: name && name !== key ? name : key, workers: new Map() });
-      return map.get(key)!;
-    };
-    const workerOf = (g: { workers: Map<number, W> }, wid: number): W => {
-      if (!g.workers.has(wid)) g.workers.set(wid, { chunkCount: 0, dones: [], starts: 0, throttles: [] });
-      return g.workers.get(wid)!;
-    };
-    for (const a of store.threadAssigns) {
-      const g = ensure(a.packKey ?? "__default__", a.packName);
-      workerOf(g, a.workerId).chunkCount += a.chunkCount;
-    }
-    for (const st of store.batchStarts) {
-      const g = map.get(st.packKey ?? "__default__");
-      if (g) workerOf(g, st.workerId).starts += 1;
-    }
-    for (const d of store.batchDones) {
-      const g = map.get(d.packKey ?? "__default__");
-      if (g) workerOf(g, d.workerId).dones.push(d);
-    }
-    for (const th of store.throttles) {
-      const g = map.get(th.packKey ?? "__default__");
-      if (g) workerOf(g, th.workerId).throttles.push(th.intervalSec);
-    }
-    return [...map.entries()];
+  // 直接读增量聚合（随事件维护，永不淘汰）：渲染时不再扫描事件数组
+  const allPacks = useMemo(() => {
+    void store.version;
+    return [...store.schedule.entries()].sort((a, b) => b[1].lastSeen - a[1].lastSeen);
   }, [store.version]);
 
-  if (packs.length === 0) {
+  const q = search.trim().toLowerCase();
+  const packs = useMemo(
+    () => (q ? allPacks.filter(([, g]) => g.packName.toLowerCase().includes(q)) : allPacks),
+    [allPacks, q],
+  );
+  const shown = packs.slice(0, limit);
+
+  if (allPacks.length === 0) {
     return (
       <div style={{ height: "calc(100vh - 280px)" }}>
         <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 8 }}>
@@ -768,7 +936,7 @@ function ThreadScheduleTab() {
       <Typography.Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 4 }}>
         {t("devtools.threadSchedule.desc")}
       </Typography.Text>
-      <Space style={{ marginBottom: 12 }} wrap>
+      <Space style={{ marginBottom: 8 }} wrap>
         <Typography.Text strong>{t("devtools.threadSchedule.legend")}:</Typography.Text>
         <Tag color="#1677ff" className="dev-pulse-tag">{t("devtools.threadSchedule.active")}</Tag>
         <Tag color="#52c41a">OK</Tag>
@@ -777,113 +945,160 @@ function ThreadScheduleTab() {
         <Tag color="#8c8c8c">{t("devtools.threadSchedule.throttleTag")}</Tag>
       </Space>
 
-      {packs.map(([pk, g]) => {
+      <Space style={{ marginBottom: 8 }} wrap>
+        <Input
+          size="small"
+          allowClear
+          style={{ width: 220 }}
+          prefix={<SearchOutlined />}
+          placeholder="按内容包名筛选"
+          value={search}
+          onChange={(e) => {
+            setSearch(e.target.value);
+            setLimit(SCHEDULE_PACK_PAGE);
+          }}
+        />
+        <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+          内容包 {allPacks.length} · 显示 {shown.length} · 线程分配 {store.counters.threadAssign} ·
+          批次开始 {store.counters.batchStart} · 批次完成 {store.counters.batchDone} · 包完成{" "}
+          {store.counters.packDone}
+        </Typography.Text>
+      </Space>
+
+      {shown.map(([pk, g]) => {
         const workers = [...g.workers.entries()].sort((a, b) => a[0] - b[0]);
-        const allDone = workers.every(([, w]) => w.starts > 0 && w.dones.length >= w.starts);
+        const doneBatches = workers.reduce((n, [, w]) => n + w.doneCount, 0);
+        const totalBatches = workers.reduce((n, [, w]) => n + Math.max(w.chunkCount, w.starts), 0);
+        const errBatches = workers.reduce((n, [, w]) => n + w.errorCount, 0);
+        const isExpanded = expandedKey === pk;
         return (
           <div
             key={pk}
+            className="dev-sched-row"
             style={{
-              marginBottom: 14,
+              marginBottom: 8,
               border: "1px solid var(--border-color, #303030)",
               borderRadius: 8,
-              padding: "8px 12px",
+              padding: "6px 12px",
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-              <Typography.Text strong style={{ fontSize: 13 }}>{g.packName}</Typography.Text>
-              {allDone ? (
-                <Tag color="green">{t("devtools.threadSchedule.done")}</Tag>
+            <div
+              style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}
+              onClick={() => setExpandedKey((prev) => (prev === pk ? null : pk))}
+            >
+              {isExpanded ? <DownOutlined /> : <RightOutlined />}
+              <Typography.Text strong style={{ fontSize: 13 }} ellipsis={{ tooltip: g.packName }}>
+                {g.packName}
+              </Typography.Text>
+              {g.done ? (
+                <Tag color={g.cancelled ? "orange" : "green"}>
+                  {g.cancelled ? "已取消" : t("devtools.threadSchedule.done")}
+                </Tag>
               ) : (
                 <Tag color="processing" className="dev-pulse-tag">
                   {t("devtools.threadSchedule.active")}
                 </Tag>
               )}
+              {errBatches > 0 && <Tag color="red">错误 {errBatches}</Tag>}
+              <Typography.Text type="secondary" style={{ fontSize: 11, marginLeft: "auto" }}>
+                {doneBatches}/{totalBatches || g.batchTotal} 批 · {workers.length} 线程
+              </Typography.Text>
             </div>
-            {workers.map(([wid, w]) => {
-              const inProg = Math.max(0, w.starts - w.dones.length);
-              return (
-                <div key={wid} style={{ display: "flex", alignItems: "center", marginBottom: 6, gap: 8 }}>
-                  <Typography.Text style={{ width: 84, fontSize: 12, flexShrink: 0 }}>
-                    {t("devtools.threadSchedule.worker", { n: wid })}
-                  </Typography.Text>
-                  <div style={{ flex: 1, display: "flex", gap: 2, alignItems: "center", minHeight: 22, flexWrap: "wrap" }}>
-                    {w.dones.map((d, i) => (
-                      <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
-                        <Tooltip
-                          title={
-                            <div>
-                              <div>{t("devtools.threadSchedule.duration", { n: d.durationMs })}</div>
-                              <div>ok: {d.ok}</div>
-                              {d.error && <div style={{ color: "#ffccc7" }}>{d.error}</div>}
+
+            {isExpanded && (
+              <div style={{ marginTop: 6 }}>
+                {workers.map(([wid, w]) => {
+                  const inProg = Math.max(0, w.starts - w.doneCount);
+                  const omitted = Math.max(0, w.doneCount - w.recent.length);
+                  return (
+                    <div key={wid} style={{ display: "flex", alignItems: "center", marginBottom: 6, gap: 8 }}>
+                      <Typography.Text style={{ width: 84, fontSize: 12, flexShrink: 0 }}>
+                        {t("devtools.threadSchedule.worker", { n: wid })}
+                      </Typography.Text>
+                      <div style={{ flex: 1, display: "flex", gap: 2, alignItems: "center", minHeight: 22, flexWrap: "wrap" }}>
+                        {omitted > 0 && (
+                          <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                            +{omitted} 早期批次
+                          </Typography.Text>
+                        )}
+                        {w.recent.map((d, i) => (
+                          <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
+                            {/* 用原生 title 代替 antd Tooltip：每块一个 Tooltip 在展开时会挂载成百上千个组件 */}
+                            <div
+                              title={`${t("devtools.threadSchedule.duration", { n: d.durationMs })} · ok: ${d.ok}${
+                                d.error ? ` · ${d.error}` : ""
+                              }`}
+                              style={{
+                                width: Math.max(34, Math.min(110, d.durationMs / 50 + 20)),
+                                height: 18,
+                                background: blockColor(d),
+                                borderRadius: 3,
+                                fontSize: 10,
+                                color: "#fff",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                padding: "0 4px",
+                              }}
+                            >
+                              {d.durationMs}ms
                             </div>
-                          }
-                        >
+                            {d.throttleSec > 0 && (
+                              <div
+                                title={t("devtools.threadSchedule.throttle", { n: d.throttleSec })}
+                                style={{
+                                  width: Math.max(8, d.throttleSec * 3),
+                                  height: 6,
+                                  background: "#8c8c8c",
+                                  borderRadius: 2,
+                                }}
+                              />
+                            )}
+                          </span>
+                        ))}
+                        {inProg > 0 && (
                           <div
+                            className="dev-block-active"
+                            title={t("devtools.threadSchedule.activeTip", { n: inProg })}
                             style={{
-                              width: Math.max(34, Math.min(110, d.durationMs / 50 + 20)),
+                              width: 48,
                               height: 18,
-                              background: blockColor(d),
                               borderRadius: 3,
                               fontSize: 10,
                               color: "#fff",
                               display: "flex",
                               alignItems: "center",
                               justifyContent: "center",
-                              padding: "0 4px",
                             }}
                           >
-                            {d.durationMs}ms
+                            ×{inProg}
                           </div>
-                        </Tooltip>
-                        {(w.throttles[i] ?? 0) > 0 && i < w.dones.length && (
-                          <Tooltip title={t("devtools.threadSchedule.throttle", { n: w.throttles[i] })}>
-                            <div
-                              style={{
-                                width: Math.max(8, w.throttles[i] * 3),
-                                height: 6,
-                                background: "#8c8c8c",
-                                borderRadius: 2,
-                              }}
-                            />
-                          </Tooltip>
                         )}
-                      </span>
-                    ))}
-                    {inProg > 0 && (
-                      <Tooltip title={t("devtools.threadSchedule.activeTip", { n: inProg })}>
-                        <div
-                          className="dev-block-active"
-                          style={{
-                            width: 48,
-                            height: 18,
-                            borderRadius: 3,
-                            fontSize: 10,
-                            color: "#fff",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                          }}
-                        >
-                          ×{inProg}
-                        </div>
-                      </Tooltip>
-                    )}
-                    {w.dones.length === 0 && inProg === 0 && (
-                      <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                        {t("devtools.threadSchedule.waiting")}
+                        {w.recent.length === 0 && inProg === 0 && (
+                          <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                            {t("devtools.threadSchedule.waiting")}
+                          </Typography.Text>
+                        )}
+                      </div>
+                      <Typography.Text type="secondary" style={{ fontSize: 11, flexShrink: 0 }}>
+                        {w.doneCount}/{w.chunkCount}
                       </Typography.Text>
-                    )}
-                  </div>
-                  <Typography.Text type="secondary" style={{ fontSize: 11, flexShrink: 0 }}>
-                    {w.dones.length}/{w.chunkCount}
-                  </Typography.Text>
-                </div>
-              );
-            })}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         );
       })}
+
+      {packs.length > shown.length && (
+        <div style={{ textAlign: "center", padding: "8px 0 16px" }}>
+          <Button size="small" onClick={() => setLimit((n) => n + SCHEDULE_PACK_PAGE)}>
+            显示更多（已显示 {shown.length} / {packs.length}）
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1593,6 +1808,7 @@ export function DevToolsWindow() {
       "dev-batch-done",
       "dev-thread-assign",
       "dev-thread-throttle",
+      "dev-pack-done",
     ];
     eventNames.forEach((name) => {
       listen(name, (event) => {
