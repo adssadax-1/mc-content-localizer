@@ -87,8 +87,15 @@ export function DeepScanRulesModal({
   const isPlugin = kind === "plugin";
   // 三套模板（打开时预取，用于高亮「当前生效模板」与判断是否已自定义）
   const [templates, setTemplates] = useState<Record<string, DeepScanRules>>({});
-  // 自定义规则的启用状态（单包场景只允许改这里，不落全局设置）
-  const [customEnabled, setCustomEnabled] = useState<Record<string, boolean>>(customEnabledProp ?? {});
+  // 自定义规则的启用状态**不再单独存一份**，直接写在 rules.custom[].enabled：
+  // 与内置规则的开关同源，规则测试台、外部统计、保存三者读的都是同一个对象，
+  // 否则「勾选改了但测试台要保存重开才生效」。
+  const setCustomEnabled = useCallback((id: string, enabled: boolean) => {
+    setRules((prev) => ({
+      ...prev,
+      custom: prev.custom.map((r) => (r.id === id ? { ...r, enabled } : r)),
+    }));
+  }, []);
   // 已加载的「作用域」（全局 mod/plugin，或单包的 pack.key）。
   // 用「渲染期按作用域对齐状态」而不是入参快照 ref：
   // 这个弹窗在设置页里是**常挂载**的（关闭时父组件传的是默认的模组规则），
@@ -101,8 +108,18 @@ export function DeepScanRulesModal({
   const scope = scopeKey ?? kind;
   if (isOpen && loadedScope !== scope) {
     setLoadedScope(scope);
-    setRules(initialRules);
-    setCustomEnabled(customEnabledProp ?? {});
+    // 单包场景：调用方把「该包相对全局的启用差异」放在 customEnabled，落进规则本体
+    setRules(
+      customEnabledProp
+        ? {
+            ...initialRules,
+            custom: initialRules.custom.map((r) => ({
+              ...r,
+              enabled: customEnabledProp[r.id] ?? r.enabled,
+            })),
+          }
+        : initialRules,
+    );
   } else if (!isOpen && loadedScope !== null) {
     setLoadedScope(null);
   }
@@ -247,8 +264,8 @@ export function DeepScanRulesModal({
           icon={<ReloadOutlined />}
           onClick={() => {
             if (customReadOnly && globalRules) {
+              // 跟随全局：整体换成全局规则（自定义规则的启用状态也随之回到全局值）
               setRules({ ...globalRules });
-              setCustomEnabled({});
             } else {
               void applyTemplate("recommended");
             }
@@ -270,11 +287,9 @@ export function DeepScanRulesModal({
             // 关键：单包场景也必须回传 rules，否则用户改的规则会被丢掉
             // （调用方决定持久化位置：全局写设置文件，单包只写内存里的包覆盖）
             onSave({
-              rules: {
-                ...rules,
-                custom: rules.custom.map((r) => ({ ...r, enabled: customEnabled[r.id] ?? r.enabled })),
-              },
-              customEnabled,
+              rules,
+              // 由规则本体导出「id → 启用」，调用方据此算与全局的差异
+              customEnabled: Object.fromEntries(rules.custom.map((r) => [r.id, r.enabled])),
             })
           }
         >
@@ -444,10 +459,8 @@ export function DeepScanRulesModal({
                     style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0" }}
                   >
                     <Checkbox
-                      checked={customEnabled[r.id] ?? r.enabled}
-                      onChange={(e) =>
-                        setCustomEnabled((prev) => ({ ...prev, [r.id]: e.target.checked }))
-                      }
+                      checked={r.enabled}
+                      onChange={(e) => setCustomEnabled(r.id, e.target.checked)}
                     />
                     <Tag color={r.source === "imported" ? "geekblue" : "green"}>
                       {t(`settings.deepScan.kind.${r.kind}`)}
@@ -483,6 +496,8 @@ export function DeepScanRulesModal({
           {
             key: "testbed",
             label: t("settings.deepScan.tabTest"),
+            // 传入的就是当前编辑中的规则对象：改开关/勾选后测试台 400ms 内自动重跑，
+            // 不需要先保存再重开弹窗
             children: <RuleTestbed kind={kind} rules={rules} target={previewTarget ?? null} />,
           },
         ]}
