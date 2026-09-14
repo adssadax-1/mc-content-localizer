@@ -184,6 +184,18 @@ pub fn pick_glossary_samples(entries: &[BatchItem], max: usize) -> Vec<GlossaryS
 }
 
 /// 光影包可编辑段（默认；用户可自定义覆盖）
+const EDITABLE_PLUGIN_DEFAULT: &str = r#"你是一位资深的《我的世界》(Minecraft) Java 版服务器插件本地化翻译专家，任务是把服务器插件（Bukkit / Spigot / Paper / BungeeCord / Velocity 等）的配置与消息文本从英文翻译成简体中文。
+
+翻译要求：
+1. 面向服主与玩家：命令用法、报错提示、GUI 标题、聊天消息要口语、简洁、符合国内服务器习惯
+2. 严格保留占位符与格式码：%player%、%s、{0}、{player}、<red>、</red> 等 MiniMessage 标签、&a/&c 等颜色码、
+ 换行、§ 样式码，位置与数量都不能变
+3. 只翻译玩家可见文本：配置里数据库、权限节点、冷却时间等机器用途的键如有出现，保持原样不翻译
+4. 服务器术语统一：spawn → 出生点，claim → 领地，kit → 礼包，rank → 权限组，guild/team → 公会/队伍，warp → 传送点，motd → 服务器标语，cooldown → 冷却
+5. 命令名、权限节点、插件内部标识（如 /spawn、essentials.spawn）不翻译
+6. 简洁优先：UI 文本受游戏宽度限制，中文尽量短，不添加原文没有的标点与语气词
+"#;
+
 const EDITABLE_SHADER_DEFAULT: &str = r#"你是一位资深的《我的世界》(Minecraft) 光影包（Shader Pack）本地化翻译专家，任务是把光影包的界面文本从英文翻译成简体中文。
 
 这些文本来自光影包「{mod_name}」的 shaders.properties / shaders/lang 语言文件，是游戏内光影设置界面的文案（屏幕标题、选项名、选项说明、按钮、配置档名等）。
@@ -237,6 +249,7 @@ pub fn prompt_template(pack_type: &str) -> PromptTemplate {
     let editable_default = match pack_type {
         "shader" => EDITABLE_SHADER_DEFAULT.to_string(),
         "resourcepack" => EDITABLE_RESOURCE_DEFAULT.to_string(),
+        "plugin" => EDITABLE_PLUGIN_DEFAULT.to_string(),
         _ => EDITABLE_MOD_DEFAULT.to_string(),
     };
     PromptTemplate {
@@ -262,6 +275,7 @@ fn build_translate_system(ctx: &TranslateContext, glossary: &[(String, String)])
     let default_editable = match ctx.pack_type.as_str() {
         "shader" => EDITABLE_SHADER_DEFAULT,
         "resourcepack" => EDITABLE_RESOURCE_DEFAULT,
+        "plugin" => EDITABLE_PLUGIN_DEFAULT,
         _ => EDITABLE_MOD_DEFAULT,
     };
     let editable = match ctx.custom_prompt.as_deref() {
@@ -341,6 +355,13 @@ mod tests {
             custom_prompt: None,
             user_glossary: vec![],
         }
+    }
+
+    #[test]
+    fn plugin_prompt_mentions_placeholders() {
+        let tpl = prompt_template("plugin");
+        assert!(tpl.editable_default.contains("服务器插件"));
+        assert!(tpl.editable_default.contains("%player%"));
     }
 
     #[test]

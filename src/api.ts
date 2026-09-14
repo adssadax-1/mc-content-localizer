@@ -5,7 +5,11 @@ import type {
   LangEntry,
   LangFormat,
   ModelInfo,
+  DeepScanRules,
+  DeepScanPreview,
+  RuleMeta,
   ModFile,
+  PluginFile,
   ProgressPayload,
   ProviderConfig,
   PackType,
@@ -20,11 +24,14 @@ import type {
   TranslateContext,
   TranslatedItem,
   UpdateInfo,
+  StorageUsage,
+  ClearResult,
   GameDirScan,
 } from "./types";
 
 export const api = {
   parseJar: (path: string) => invoke<ModFile>("parse_jar", { path }),
+  parsePluginJar: (path: string) => invoke<PluginFile>("parse_plugin_jar", { path }),
 
   runTranslation: (
     config: ProviderConfig,
@@ -81,12 +88,44 @@ export const api = {
 
   /** 判定内容包类型（mod/shader/resourcepack） */
   detectPackType: (path: string) => invoke<PackType>("detect_pack_type", { path }),
+  /** 路径是否已存在（导出命名冲突时自动加序号用） */
+  pathExists: (path: string) => invoke<boolean>("path_exists", { path }),
+  /** 批量让模型给内容包起中文名（一次请求多个；返回 缓存键 → 中文名） */
+  generateAiNames: (
+    provider: ProviderConfig,
+    items: { id: string; displayName: string; kind: string; gameVersion: string | null }[],
+  ) => invoke<Record<string, string>>("generate_ai_names_batch", { provider, items }),
+
   /** 静默检查 GitHub 最新版本（网络失败返回 null，不打扰） */
   checkUpdate: () => invoke<UpdateInfo | null>("check_update"),
 
   /** 深度扫描 jar 内所有可能文本（含嵌套 jar 递归） */
-  deepScanJar: (path: string, modid: string) =>
-    invoke<DeepScanResult>("deep_scan_jar", { path, modid }),
+  /** 按规则集深度扫描（rules 省略时用推荐模板） */
+  deepScanJar: (path: string, modid: string, rules?: DeepScanRules) =>
+    invoke<DeepScanResult>("deep_scan_jar", { path, modid, rules }),
+  /** 取模板完整规则（推荐 / 精简 / 全量） */
+  deepScanTemplate: (name: string, isPlugin: boolean) =>
+    invoke<DeepScanRules>("deep_scan_template", { name, isPlugin }),
+  /** 读取文本文件（规则档案导入，2MB 上限） */
+  readTextFileLimited: (path: string) =>
+    invoke<string>("read_text_file_limited", { path, maxBytes: null }),
+  /** 写入文本文件（规则档案导出） */
+  writeTextFile: (path: string, content: string) =>
+    invoke<void>("write_text_file", { path, content }),
+  /** 内置规则元数据 */
+  deepScanRuleMeta: () => invoke<RuleMeta>("deep_scan_rule_meta"),
+  /** 规则测试台：按给定规则预览扫描结果 */
+  deepScanPreview: (path: string, rules: DeepScanRules) =>
+    invoke<DeepScanPreview>("deep_scan_preview", { path, rules }),
+  /** 校验导入的规则档案 */
+  deepScanProfileValidate: (content: string, kind: string) =>
+    invoke<{ profile: { name: string; note?: string | null; rules: DeepScanRules }; warnings: string[] }>(
+      "deep_scan_profile_validate",
+      { content, kind },
+    ),
+  /** 导出规则档案为 JSON 文本 */
+  deepScanProfileExport: (kind: string, name: string, note: string | null, rules: DeepScanRules) =>
+    invoke<string>("deep_scan_profile_export", { kind, name, note, rules }),
 
   /** 获取某类型提示词模板（默认可编辑段 + 核心段） */
   getPromptTemplate: (packType: string) =>
@@ -112,6 +151,13 @@ export const api = {
   cancelTranslation: () => invoke<void>("cancel_translation"),
   pauseTranslation: () => invoke<void>("pause_translation"),
   resumeTranslation: () => invoke<void>("resume_translation"),
+
+  /** 导出汉化插件 jar（复制原 jar，仅替换被翻译的成员） */
+  exportPluginJar: (
+    source: string,
+    dest: string,
+    items: { filePath: string; keyPath: string; translation: string }[],
+  ) => invoke<string>("export_plugin_jar", { source, dest, items }),
 
   exportModJar: (
     source: string,
@@ -185,6 +231,15 @@ export const api = {
   sessionV2Prune: (name: string, keep: string[]) =>
     invoke<void>("session_v2_prune", { name, keep }),
   sessionV2Clear: (name: string) => invoke<void>("session_v2_clear", { name }),
+
+  /** 软件自身数据占用（缓存 / 用户数据） */
+  storageUsage: () => invoke<StorageUsage>("storage_usage"),
+  /** 清除缓存：会话快照 + 浏览器缓存（不动设置与 API Key） */
+  clearAppCache: () => invoke<ClearResult>("clear_app_cache"),
+  /** 清除用户数据：设置（含 API Key）、会话缓存与浏览器配置 */
+  clearAppData: () => invoke<ClearResult>("clear_app_data"),
+  /** 重启软件（清除用户数据后让配置回到全新状态） */
+  restartApp: () => invoke<void>("restart_app"),
   /** 游戏目录模式：扫描 .minecraft / versions（后台 + 进度事件，可取消） */
   scanGameDir: (root: string) => invoke<GameDirScan>("scan_game_dir", { root }),
   cancelGameScan: () => invoke<void>("cancel_game_scan"),

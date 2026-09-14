@@ -5,9 +5,15 @@ use std::sync::LazyLock;
 /// - %s / %d / %f / %% （无索引）
 /// - %1$s / %2$d （显式索引，顺序不能变）
 /// - \n / \t （转义换行、制表）
-/// - § 后跟颜色/格式码（Minecraft 样式码）
+/// - § / & 后跟颜色/格式码（Minecraft 样式码，& 为插件配置存储态）
+/// - %player% / %essentials_msg% （插件整词变量，PlaceholderAPI 风格）
+/// - {player} / {0} （KubeJS / MessageFormat 花括号占位）
+/// - <red> / </red> （MiniMessage 标签）
 static PLACEHOLDER_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"%\d*\$?[a-zA-Z%]|\\[nt]|§[0-9a-fk-or]").unwrap()
+    Regex::new(
+        r"%\{[^}]{1,60}\}|\{[^}]{1,60}\}|<[a-zA-Z/][^<>]{0,40}>|%[a-zA-Z_][\w.\-]{0,30}%|%(\d*\$)?[a-zA-Z%]|&[0-9a-fk-orA-FK-OR]|§[0-9a-fk-or]|\\[nt]",
+    )
+    .unwrap()
 });
 
 /// 从文本中提取占位符 token（保持出现顺序）
@@ -120,6 +126,22 @@ mod tests {
         let tr = "B %2$s 和 A %1$s"; // 顺序调换 -> 显式索引不应换序
         let warnings = validate_placeholders(src, tr);
         assert!(!warnings.is_empty());
+    }
+
+    #[test]
+    fn plugin_style_placeholders() {
+        // 插件语境：%整词变量 / 花括号 / MiniMessage / & 颜色码
+        let src = "&6Welcome %player%\\n<gradient:blue:red>{0}";
+        let tokens = extract_placeholders(src);
+        assert!(tokens.contains(&"%player%".to_string()));
+        assert!(tokens.contains(&"{0}".to_string()));
+        assert!(tokens.contains(&"<gradient:blue:red>".to_string()));
+        assert!(tokens.iter().any(|t| t.starts_with('&')));
+        // 译文完整保留 → 无警告
+        let tr = "&6欢迎 %player%\\n<gradient:blue:red>{0}";
+        assert!(validate_placeholders(src, tr).is_empty());
+        // 丢失变量 → 警告
+        assert!(!validate_placeholders(src, "&6欢迎").is_empty());
     }
 
     #[test]

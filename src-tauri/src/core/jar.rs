@@ -188,6 +188,7 @@ pub fn parse_jar(path: &Path) -> Result<ModFile, JarError> {
             } else {
                 Vec::new()
             },
+            deep_group: None,
         });
     }
 
@@ -388,6 +389,7 @@ fn scan_hardcoded(
                 translating: false,
                 placeholders,
                 notes: vec!["硬编码文本（非 lang 文件）".to_string()],
+                deep_group: None,
             });
         }
     }

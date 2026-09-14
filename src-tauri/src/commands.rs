@@ -249,6 +249,9 @@ pub async fn run_translation(
     pack_label: Option<String>,
 ) -> Result<Vec<TranslatedItem>, String> {
     let pack_label = pack_label.unwrap_or_else(|| ctx.mod_name.clone());
+    // 非 devtools 构建不使用该标签（仅插桩事件用）
+    #[cfg(not(feature = "devtools"))]
+    let _ = &pack_label;
     let provider = OpenAiProvider::new(config);
     // devtools：设置全局 emitter，供 provider/pipeline 插桩 emit
     #[cfg(feature = "devtools")]
@@ -329,7 +332,7 @@ pub async fn run_translation(
             );
         }
         // 结束（完成/取消/暂停遗留）后复位标志
-        let cancelled = CANCEL_TRANSLATION.load(Ordering::Relaxed);
+        let _cancelled = CANCEL_TRANSLATION.load(Ordering::Relaxed);
         CANCEL_TRANSLATION.store(false, Ordering::Relaxed);
         PAUSE_TRANSLATION.store(false, Ordering::Relaxed);
         // devtools：包级完成事件（调度视图据此确定性标记完成，不再仅靠批次计数推断）
@@ -339,7 +342,7 @@ pub async fn run_translation(
             "packName": pack_label,
             "batchCount": batch_count,
             "threads": threads,
-            "cancelled": cancelled,
+            "cancelled": _cancelled,
         }));
         #[cfg(feature = "devtools")]
         crate::dev::clear_emitter();
@@ -421,7 +424,7 @@ pub async fn run_translation(
     for h in handles {
         let _ = h.await;
     }
-    let cancelled = CANCEL_TRANSLATION.load(Ordering::Relaxed);
+    let _cancelled = CANCEL_TRANSLATION.load(Ordering::Relaxed);
     CANCEL_TRANSLATION.store(false, Ordering::Relaxed);
     PAUSE_TRANSLATION.store(false, Ordering::Relaxed);
     // devtools：包级完成事件（调度视图据此确定性标记完成，不再仅靠批次计数推断）
@@ -431,7 +434,7 @@ pub async fn run_translation(
         "packName": pack_label,
         "batchCount": batch_count,
         "threads": threads,
-        "cancelled": cancelled,
+        "cancelled": _cancelled,
     }));
     #[cfg(feature = "devtools")]
     crate::dev::clear_emitter();
@@ -665,9 +668,95 @@ pub fn get_prompt_template(
 pub fn deep_scan_jar(
     path: String,
     modid: String,
+    rules: Option<crate::core::scan_rules::DeepScanRules>,
 ) -> Result<crate::core::deep_scan::DeepScanResult, String> {
-    crate::core::deep_scan::deep_scan_jar(std::path::Path::new(&path), &modid)
+    // 未指定规则时按「推荐模板」执行（前端总是会传入当前生效的规则集）。
+    // 兜底路径也不能一律按模组规则：先识别包类型，插件取插件默认，避免插件被套上模组规则。
+    let rules = rules.unwrap_or_else(|| {
+        let is_plugin = matches!(
+            crate::core::pack::detect_pack_type(std::path::Path::new(&path)),
+            Ok(crate::core::pack::PackType::Plugin)
+        );
+        crate::core::scan_rules::DeepScanRules::recommended(is_plugin)
+    });
+    crate::core::deep_scan::deep_scan_jar(std::path::Path::new(&path), &modid, &rules)
         .map_err(|e| e.to_string())
+}
+
+/// 下发内置规则元数据（规则清单 / 模板 / 上限），前端据此渲染，避免规则名前后端漂移
+#[tauri::command]
+pub fn deep_scan_rule_meta() -> crate::core::scan_rules::RuleMeta {
+    crate::core::scan_rules::rule_meta()
+}
+
+/// 取某个模板的完整规则（前端不写死模板内容，避免与后端漂移）
+#[tauri::command]
+pub fn deep_scan_template(
+    name: String,
+    is_plugin: bool,
+) -> crate::core::scan_rules::DeepScanRules {
+    use crate::core::scan_rules::{DeepScanRules, TEMPLATE_FULL, TEMPLATE_LITE};
+    match name.as_str() {
+        TEMPLATE_LITE => DeepScanRules::lite(is_plugin),
+        TEMPLATE_FULL => DeepScanRules::full(is_plugin),
+        _ => DeepScanRules::recommended(is_plugin),
+    }
+}
+
+/// 规则测试台：按给定规则扫一个 jar，返回分组统计与少量样条（供用户判断规则效果）
+#[tauri::command]
+pub fn deep_scan_preview(
+    path: String,
+    rules: crate::core::scan_rules::DeepScanRules,
+) -> Result<serde_json::Value, String> {
+    let res = crate::core::deep_scan::deep_scan_jar(std::path::Path::new(&path), "preview", &rules)
+        .map_err(|e| e.to_string())?;
+    let samples: Vec<serde_json::Value> = res
+        .entries
+        .iter()
+        .take(30)
+        .map(|e| {
+            serde_json::json!({
+                "source": e.source,
+                "filePath": e.file_path,
+                "group": e.notes.first().cloned().unwrap_or_default(),
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "total": res.entries.len(),
+        "groups": res.groups,
+        "samples": samples,
+    }))
+}
+
+/// 校验并归一化导入的规则档案（社区分享用）
+#[tauri::command]
+pub fn deep_scan_profile_validate(
+    content: String,
+    kind: String,
+) -> Result<serde_json::Value, String> {
+    let (profile, warnings) =
+        crate::core::scan_rules::validate_profile(&content, &kind).map_err(|e| e)?;
+    Ok(serde_json::json!({ "profile": profile, "warnings": warnings }))
+}
+
+/// 导出规则档案为 JSON 文本
+#[tauri::command]
+pub fn deep_scan_profile_export(
+    kind: String,
+    name: String,
+    note: Option<String>,
+    rules: crate::core::scan_rules::DeepScanRules,
+) -> Result<String, String> {
+    let profile = crate::core::scan_rules::ScanProfile {
+        version: crate::core::scan_rules::PROFILE_VERSION,
+        kind,
+        name,
+        note,
+        rules,
+    };
+    serde_json::to_string_pretty(&profile).map_err(|e| e.to_string())
 }
 
 /// 扫描 zip 判定内容包类型（mod/shader/resourcepack）
@@ -925,5 +1014,180 @@ pub mod devtools {
             let _ = std::fs::create_dir_all(parent);
         }
         std::fs::write(&path, content).map_err(|e| e.to_string())
+    }
+}
+
+
+// ── 服务器插件支持 ────────────────────────────────────────────────────────────
+
+/// 解析服务器插件 jar（plugin.yml 清单白名单 + 消息配置三层过滤 + 自带中文回填）
+#[tauri::command]
+pub fn parse_plugin_jar(path: String) -> Result<crate::core::model::PluginFile, String> {
+    let info = crate::core::plugin::parse_plugin_jar(std::path::Path::new(&path))
+        .map_err(|e| e.to_string())?;
+    Ok(crate::core::model::PluginFile {
+        file_name: info.file_name,
+        plugin_name: info.plugin_name,
+        version: info.version,
+        has_zh: info.has_zh,
+        zh_count: info.zh_count,
+        entries: info.entries,
+    })
+}
+
+/// 导出汉化插件 jar：复制原 jar，仅替换被翻译的成员，其余成员原字节保留
+#[tauri::command]
+pub fn export_plugin_jar(
+    source: String,
+    dest: String,
+    items: Vec<crate::export::PluginExportItem>,
+) -> Result<String, String> {
+    crate::export::export_plugin_jar(
+        std::path::Path::new(&source),
+        std::path::Path::new(&dest),
+        &items,
+    )
+}
+
+
+// ── 导出命名偏好辅助 ──────────────────────────────────────────────────────────
+
+/// 判断路径是否已存在（导出命名冲突时前端据此自动加序号）
+#[tauri::command]
+pub fn path_exists(path: String) -> bool {
+    std::path::Path::new(&path).exists()
+}
+
+/// 批量命名条目：id 由前端提供（缓存键），回填时按 id 对应，避免错位
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiNameItem {
+    pub id: String,
+    pub display_name: String,
+    pub kind: String,
+    pub game_version: Option<String>,
+}
+
+/// 批量生成内容包的 AI 中文名（一次请求多个包，仅「AI 汉化名称」偏好下调用）。
+/// 返回 id → 中文名（未取到名的包不会出现在结果里，由前端回退为原名_zh_cn）。
+#[tauri::command]
+pub async fn generate_ai_names_batch(
+    app: tauri::AppHandle,
+    provider: crate::translate::provider::ProviderConfig,
+    items: Vec<AiNameItem>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    // 该命令在 run_translation 之外调用，此处自行持有 emitter，devtools 才能看到请求/响应
+    #[cfg(feature = "devtools")]
+    crate::dev::set_emitter(app.clone());
+
+    let input: Vec<(String, String, Option<String>)> = items
+        .iter()
+        .map(|it| (it.display_name.clone(), it.kind.clone(), it.game_version.clone()))
+        .collect();
+    let p = crate::translate::provider::OpenAiProvider::new(provider);
+    let result = p.generate_pack_names_batch(&input).await;
+
+    #[cfg(feature = "devtools")]
+    crate::dev::clear_emitter();
+
+    let (parsed, raw) = result.map_err(|e| e.to_string())?;
+    let mut out = std::collections::HashMap::new();
+    for (it, name) in items.iter().zip(parsed.into_iter()) {
+        if let Some(n) = name {
+            if !n.trim().is_empty() {
+                out.insert(it.id.clone(), n);
+            }
+        }
+    }
+    // 一个都没解析出来：把模型原始输出回一句，前端能提示具体原因（而不是静默回退）
+    if out.is_empty() {
+        return Err(format!(
+            "模型未按编号返回名称；响应开头：{}",
+            raw.chars().take(160).collect::<String>()
+        ));
+    }
+    Ok(out)
+}
+
+
+/// 读取文本文件（规则档案导入用；限制大小避免误读超大文件）
+#[tauri::command]
+pub fn read_text_file_limited(path: String, max_bytes: Option<usize>) -> Result<String, String> {
+    let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    let limit = max_bytes.unwrap_or(2 * 1024 * 1024);
+    if meta.len() as usize > limit {
+        return Err(format!("文件过大（超过 {} KB），不是规则档案？", limit / 1024));
+    }
+    std::fs::read_to_string(&path).map_err(|e| e.to_string())
+}
+
+/// 写入文本文件（规则档案导出用）
+#[tauri::command]
+pub fn write_text_file(path: String, content: String) -> Result<(), String> {
+    std::fs::write(&path, content).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::deep_scan_jar;
+
+    /// 构造一个极简 .class：仅含常量池若干 Utf8 字符串
+    fn fake_class(strings: &[&str]) -> Vec<u8> {
+        let mut b = vec![0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x34];
+        b.extend_from_slice(&((strings.len() + 1) as u16).to_be_bytes());
+        for s in strings {
+            b.push(1); // CONSTANT_Utf8
+            let bytes = s.as_bytes();
+            b.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+            b.extend_from_slice(bytes);
+        }
+        b
+    }
+
+    fn write_jar(name: &str, manifest: &str, manifest_body: &str) -> std::path::PathBuf {
+        use std::io::Write;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            w.start_file(manifest, opts).unwrap();
+            w.write_all(manifest_body.as_bytes()).unwrap();
+            w.start_file("gui/Shop.class", opts).unwrap();
+            w.write_all(&fake_class(&["&aShop opened! Click to continue"])).unwrap();
+            w.finish().unwrap();
+        }
+        let dir = std::env::temp_dir().join("deep_scan_fallback_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(name);
+        std::fs::write(&p, buf.into_inner()).unwrap();
+        p
+    }
+
+    /// 兜底路径（未传规则）必须按包类型取默认：插件开代码文本、模组不开，
+    /// 否则插件会被静默套上模组规则、扫不到 .class 里的消息。
+    #[test]
+    fn deep_scan_fallback_picks_rules_by_pack_type() {
+        let plugin = write_jar(
+            "fallback_plugin.jar",
+            "plugin.yml",
+            "name: Demo\nmain: a.b.C\nversion: 1.0\n",
+        );
+        let modjar = write_jar(
+            "fallback_mod.jar",
+            "fabric.mod.json",
+            "{\"id\":\"demo\",\"version\":\"1.0\"}\n",
+        );
+        let p = deep_scan_jar(plugin.to_string_lossy().into(), "demo".into(), None).unwrap();
+        assert!(
+            !p.entries.is_empty(),
+            "插件兜底规则应包含代码内嵌文本（scope.class 默认开）"
+        );
+        let m = deep_scan_jar(modjar.to_string_lossy().into(), "demo".into(), None).unwrap();
+        assert!(
+            m.entries.is_empty(),
+            "模组兜底规则不应扫 .class（scope.class 默认关），实际得到 {} 条",
+            m.entries.len()
+        );
     }
 }

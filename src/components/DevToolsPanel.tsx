@@ -738,7 +738,13 @@ function RequestResponseTab() {
           onChange={(v) => setSelectedId(v)}
           options={optionPairs.map((p) => ({
             label: `#${p.id + 1} ${new Date(p.timestamp).toLocaleTimeString()} ${
-              p.purpose === "glossary" ? `[${t("devtools.requestResponse.glossary")}]` : ""
+              p.purpose === "glossary"
+                ? `[${t("devtools.requestResponse.glossary")}]`
+                : p.purpose === "name"
+                  ? `[${t("devtools.requestResponse.name")}]`
+                  : p.purpose === "test"
+                    ? `[${t("devtools.requestResponse.test")}]`
+                    : ""
             } ${p.response ? `(${p.response.status})` : "..."}`,
             value: p.id,
           }))}
@@ -758,10 +764,24 @@ function RequestResponseTab() {
             <Typography.Text strong>{t("devtools.requestResponse.request")}</Typography.Text>
             <div style={{ marginBottom: 4 }}>
               {selected.purpose && (
-                <Tag color={selected.purpose === "translate" ? "geekblue" : "gold"}>
+                <Tag
+                  color={
+                    selected.purpose === "translate"
+                      ? "geekblue"
+                      : selected.purpose === "name"
+                        ? "purple"
+                        : selected.purpose === "test"
+                          ? "cyan"
+                          : "gold"
+                  }
+                >
                   {selected.purpose === "glossary"
                     ? t("devtools.requestResponse.glossary")
-                    : t("devtools.requestResponse.translate")}
+                    : selected.purpose === "name"
+                      ? t("devtools.requestResponse.name")
+                      : selected.purpose === "test"
+                        ? t("devtools.requestResponse.test")
+                        : t("devtools.requestResponse.translate")}
                 </Tag>
               )}
               <Tag>{selected.model}</Tag>

@@ -4,4 +4,6 @@ pub mod json_lang;
 pub mod lang;
 pub mod model;
 pub mod pack;
+pub mod plugin;
 pub mod placeholder;
+pub mod scan_rules;

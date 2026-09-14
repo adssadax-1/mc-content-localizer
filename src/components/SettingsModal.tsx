@@ -1,13 +1,15 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
+  Checkbox,
   Divider,
   Form,
   Input,
   InputNumber,
   message,
   Modal,
+  notification,
   Radio,
   Select,
   Space,
@@ -32,10 +34,19 @@ import {
 import { getVersion } from "@tauri-apps/api/app";
 import { api } from "../api";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import type { ModelInfo, ProviderConfig, Settings } from "../types";
+import type {
+  ClearResult,
+  DeepScanRules,
+  ModelInfo,
+  ProviderConfig,
+  Settings,
+  StorageUsage,
+} from "../types";
 import { PROVIDER_PRESETS } from "../types";
 import { ProviderGrid, PROVIDER_HINTS } from "./ProviderIcon";
 import { PromptEditorModal } from "./PromptEditorModal";
+import { DeepScanRulesModal } from "./DeepScanRulesModal";
+import { DeepScanIcon } from "./DeepScanIcon";
 import { SlideNav, PanelBlock } from "./SlideNav";
 import { useTranslationContext } from "../i18n";
 
@@ -77,6 +88,8 @@ interface Props {
   initialSection?: string;
   onClose: () => void;
   onSaved: (s: Settings) => void;
+  /** 清除用户数据成功后触发：外层需清空内存中的列表与缓存引用并重新加载设置 */
+  onUserDataCleared?: () => void | Promise<void>;
 }
 
 interface FormValues {
@@ -111,25 +124,42 @@ interface FormValues {
   language?: "zh" | "en";
   /** 关闭行为：exit / minimize */
   closeBehavior?: "exit" | "minimize";
+  exportNaming?: "raw" | "suffix" | "ai";
+  deepScanPlugin?: boolean;
 }
 
 /** 版本号兜底值（实际显示用 Tauri 返回的应用版本，避免与发布版本不一致） */
 const FALLBACK_VERSION = "2.1.0";
 
+/** 字节数 → 可读体积 */
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+
 /** 项目 GitHub 地址 */
 const GITHUB_URL = "https://github.com/adssadax-1/mc-content-localizer";
 
-/** 设置分组（NAV / section 结构）：页面设置置顶为默认分组 */
+/** 设置分组（NAV / section 结构）：个性化设置置顶为默认分组 */
 const SECTIONS: { key: string; labelKey: string; icon: React.ReactNode }[] = [
   { key: "appearance", labelKey: "settings.section.appearance", icon: <BgColorsOutlined /> },
   { key: "provider", labelKey: "settings.section.provider", icon: <CloudServerOutlined /> },
   { key: "params", labelKey: "settings.section.params", icon: <SlidersOutlined /> },
   { key: "glossary", labelKey: "settings.section.glossary", icon: <BookOutlined /> },
+  { key: "deepscan", labelKey: "settings.section.deepscan", icon: <DeepScanIcon /> },
   { key: "threading", labelKey: "settings.section.threading", icon: <ThunderboltOutlined /> },
   { key: "about", labelKey: "settings.section.about", icon: <InfoCircleOutlined /> },
 ];
 
-export function SettingsModal({ open, settings, initialSection, onClose, onSaved }: Props) {
+export function SettingsModal({
+  open,
+  settings,
+  initialSection,
+  onClose,
+  onSaved,
+  onUserDataCleared,
+}: Props) {
   const { t } = useTranslationContext();
   const [form] = Form.useForm<FormValues>();
   const provider = Form.useWatch("provider", form);
@@ -141,7 +171,15 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
   const [loadingModels, setLoadingModels] = useState(false);
   const [testingModel, setTestingModel] = useState(false);
   const [promptEditorOpen, setPromptEditorOpen] = useState(false);
+  // 深度扫描规则弹窗（模组 / 插件）
+  const [deepScanEditor, setDeepScanEditor] = useState<"mod" | "plugin" | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  /** 软件自身数据占用（缓存 / 用户数据），仅在「关于」分组可见时拉取 */
+  const [storage, setStorage] = useState<StorageUsage | null>(null);
+  const [storageBusy, setStorageBusy] = useState<"cache" | "data" | null>(null);
+  /** 清除用户数据的第二步（危险确认）：0 = 未开始，2 = 等待勾选 */
+  const [wipeStage, setWipeStage] = useState<0 | 2>(0);
+  const [wipeAck, setWipeAck] = useState(false);
   /** 应用版本号：从 Tauri 运行时读取（= tauri.conf.json version） */
   const [appVersion, setAppVersion] = useState(FALLBACK_VERSION);
   useEffect(() => {
@@ -149,7 +187,105 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
       getVersion().then(setAppVersion).catch(() => {});
     }
   }, [open]);
-  /** 当前展示的设置分组（默认页面设置；打开时按 initialSection 定位） */
+  /** 重新统计软件自身数据占用 */
+  const loadStorage = useCallback(async () => {
+    try {
+      setStorage(await api.storageUsage());
+    } catch {
+      /* 统计失败不打断设置页 */
+    }
+  }, []);
+
+  /** 清除缓存（第 1 步 / 共 1 步）：只删会话快照与浏览器缓存 */
+  const handleClearCache = useCallback(() => {
+    Modal.confirm({
+      title: t("settings.storage.clearCacheTitle"),
+      icon: <InfoCircleOutlined style={{ color: "#1677ff" }} />,
+      content: (
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          {t("settings.storage.clearCacheDesc")}
+        </Typography.Text>
+      ),
+      okText: t("settings.storage.ok"),
+      cancelText: t("settings.storage.cancel"),
+      onOk: async () => {
+        setStorageBusy("cache");
+        try {
+          const res: ClearResult = await api.clearAppCache();
+          message.success(t("settings.storage.cacheCleared", { size: fmtBytes(res.freedBytes) }));
+          if (res.skipped.length > 0) {
+            message.info(t("settings.storage.skipped", { n: res.skipped.length }));
+          }
+          await loadStorage();
+        } catch (e) {
+          message.error(String(e));
+        } finally {
+          setStorageBusy(null);
+        }
+      },
+    });
+  }, [t, loadStorage]);
+
+  /** 清除用户数据的第 1 步：说明范围，确认后进入「危险确认」第 2 步 */
+  const handleClearData = useCallback(() => {
+    Modal.confirm({
+      title: t("settings.storage.clearDataTitle"),
+      icon: <InfoCircleOutlined style={{ color: "#ff4d4f" }} />,
+      content: (
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          {t("settings.storage.clearDataDesc")}
+        </Typography.Text>
+      ),
+      okText: t("settings.storage.goOn"),
+      okButtonProps: { danger: true },
+      cancelText: t("settings.storage.cancel"),
+      onOk: () => {
+        setWipeAck(false);
+        setWipeStage(2);
+      },
+    });
+  }, [t]);
+
+  /** 第 2 步真正执行：必须已勾选确认 */
+  const runWipe = useCallback(async () => {
+    if (!wipeAck) return;
+    setStorageBusy("data");
+    try {
+      const res: ClearResult = await api.clearAppData();
+      setWipeStage(0);
+      setWipeAck(false);
+      message.success(t("settings.storage.dataCleared", { size: fmtBytes(res.freedBytes) }));
+      if (res.skipped.length > 0) {
+        message.info(t("settings.storage.skipped", { n: res.skipped.length }));
+      }
+      // 让外层清空内存中的内容包列表 / 术语缓存等，并重新加载设置（此时磁盘上已是默认值）
+      await onUserDataCleared?.();
+      await loadStorage();
+      notification.info({
+        message: t("settings.storage.restartTitle"),
+        description: t("settings.storage.restartDesc"),
+        duration: 0,
+        placement: "bottomRight",
+        btn: (
+          <Button
+            size="small"
+            type="primary"
+            onClick={() =>
+              void api.restartApp().catch(() => message.error(t("settings.storage.restartFailed")))
+            }
+          >
+            {t("settings.storage.restartNow")}
+          </Button>
+        ),
+      });
+    } catch (e) {
+      message.error(String(e));
+    } finally {
+      setStorageBusy(null);
+    }
+  }, [wipeAck, t, onUserDataCleared, loadStorage]);
+
+  /** 当前展示的设置分组（默认个性化设置；打开时按 initialSection 定位） */
   const [activeSection, setActiveSection] = useState<string>("appearance");
   /** 面板错峰动画：渲染期同步带类（同帧提交不闪烁）；开关粘性，关闭弹窗时复位 */
   const [prevSection, setPrevSection] = useState<string | null>(null);
@@ -167,6 +303,11 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
   useEffect(() => {
     if (open) setActiveSection(initialSection ?? "appearance");
   }, [open, initialSection]);
+
+  // 打开「关于」分组时统计一次本地数据占用
+  useEffect(() => {
+    if (open && activeSection === "about") void loadStorage();
+  }, [open, activeSection, loadStorage]);
 
   // 切换分组时复位右侧滚动位置（提交后立即执行）
   useLayoutEffect(() => {
@@ -225,7 +366,6 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
         batchSizeAuto: settings.batchSizeAuto ?? true,
         extractGlossary: settings.extractGlossary,
         threadingEnabled: settings.threading?.enabled ?? false,
-        deepScan: settings.deepScan ?? false,
         threadCount: settings.threading?.threadCount ?? 2,
         requestIntervalSec: settings.threading?.requestIntervalSec ?? 4,
         packParallelEnabled: settings.packParallelEnabled ?? false,
@@ -236,6 +376,7 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
         theme: settings.theme ?? "light",
         language: settings.language ?? "zh",
         closeBehavior: settings.closeBehavior === "minimize" ? "minimize" : "exit",
+        exportNaming: settings.exportNaming ?? "suffix",
       });
       // 模型列表：用当前服务商缓存的列表（没拉取过则为空）
       const cur = settings.provider.provider;
@@ -381,11 +522,16 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
       packParallelEnabled: v.packParallelEnabled ?? false,
       recentGameDirs: settings?.recentGameDirs ?? [],
       packParallelCount: Math.max(v.packParallelCount ?? 2, 0),
-      deepScan: v.deepScan ?? false,
       theme: v.theme === "dark" ? "dark" : "light",
       language: v.language === "en" ? "en" : "zh",
       closeBehavior: v.closeBehavior === "minimize" ? "minimize" : "exit",
+      exportNaming:
+        v.exportNaming === "raw" || v.exportNaming === "ai" ? v.exportNaming : "suffix",
+      // 深度扫描规则：弹窗内即时保存，这里原样带过，避免保存设置时丢失
+      deepScanRules: settings?.deepScanRules,
       customPrompts: settings?.customPrompts ?? {},
+      // AI 汉化名称缓存：设置界面不编辑，保存时原样带过
+      aiNames: settings?.aiNames ?? {},
     };
     try {
       await api.saveSettings(next);
@@ -760,6 +906,56 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
             </div>
             )}
 
+            {/* ===== 分组：深度扫描（模组 / 插件各自独立规则） ===== */}
+            {activeSection === "deepscan" && (
+            <div>
+              <PanelBlock index={0}>
+                <Typography.Text strong>{t("settings.deepScan.groupTitle")}</Typography.Text>
+                <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 12 }}>
+                  {t("settings.deepScan.groupDesc")}
+                </Typography.Paragraph>
+              </PanelBlock>
+              <PanelBlock index={1}>
+                {(["mod", "plugin"] as const).map((k) => {
+                  const r = settings?.deepScanRules?.[k];
+                  const enabled = r
+                    ? [
+                        r.scopeJson, r.scopeLang, r.scopeText, r.scopeNested, r.scopeClass,
+                        r.skipMeta, r.skipLangfiles, r.skipLibs, r.onlySourceLocale, r.keepCjk,
+                        r.dropSql, r.dropDescriptor, r.dropLog, r.dropIdent, r.classNeedsMarker,
+                      ].filter(Boolean).length
+                    : 0;
+                  const customOn = r?.custom.filter((c) => c.enabled).length ?? 0;
+                  return (
+                    <div key={k} style={{ marginBottom: 16 }}>
+                      <Button
+                        block
+                        icon={<DeepScanIcon />}
+                        onClick={() => setDeepScanEditor(k)}
+                      >
+                        {t(k === "plugin" ? "settings.deepScan.titlePlugin" : "settings.deepScan.titleMod")}
+                      </Button>
+                      <Space size={6} wrap style={{ marginTop: 4 }}>
+                        <Tag color={r?.auto ? "green" : "default"}>
+                          {t(r?.auto ? "settings.deepScan.autoOn" : "settings.deepScan.autoOff")}
+                        </Tag>
+                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                          {t("settings.deepScan.summary", { n: enabled, auto: "" }).replace(" · ", "")}
+                          {customOn > 0 ? ` · ${t("settings.deepScan.customOn", { n: customOn })}` : ""}
+                        </Typography.Text>
+                      </Space>
+                    </div>
+                  );
+                })}
+              </PanelBlock>
+              <PanelBlock index={2}>
+                <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }}>
+                  {t("settings.deepScan.groupHint")}
+                </Typography.Paragraph>
+              </PanelBlock>
+            </div>
+            )}
+
             {/* ===== 分组：翻译加速 ===== */}
             {activeSection === "threading" && (
             <div>
@@ -859,28 +1055,10 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
               />
               </PanelBlock>
 
-              <PanelBlock index={3}>
-              <Divider style={{ margin: "8px 0 12px" }} />
-              <Form.Item
-                name="deepScan"
-                label={t("settings.threading.deepScan")}
-                valuePropName="checked"
-                style={{ marginBottom: 4 }}
-                tooltip={t("settings.threading.deepScanTooltip")}
-              >
-                <Switch />
-              </Form.Item>
-              <Typography.Paragraph
-                type="secondary"
-                style={{ fontSize: 12, marginBottom: 0 }}
-              >
-                {t("settings.threading.deepScanDesc")}
-              </Typography.Paragraph>
-              </PanelBlock>
             </div>
             )}
 
-            {/* ===== 分组：页面设置（主题 / 语言，两项独立配置互不影响） ===== */}
+            {/* ===== 分组：个性化设置（主题 / 语言 / 导出命名 / 关闭行为 / 深度扫描） ===== */}
             {activeSection === "appearance" && (
             <div>
               <PanelBlock index={0}>
@@ -907,6 +1085,29 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
                     <Radio.Button value="en">English</Radio.Button>
                   </Radio.Group>
                 </Form.Item>
+              </Space>
+
+              {/* 两列并排：导出命名偏好 | 关闭行为；模组深度扫描 | 插件深度扫描 */}
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+                  gap: "4px 32px",
+                  marginTop: 4,
+                }}
+              >
+                <Form.Item
+                  name="exportNaming"
+                  label={t("settings.appearance.exportNaming")}
+                  style={{ marginBottom: 8 }}
+                  tooltip={t("settings.appearance.exportNamingTip")}
+                >
+                  <Radio.Group optionType="button" buttonStyle="solid">
+                    <Radio.Button value="raw">{t("settings.appearance.namingRaw")}</Radio.Button>
+                    <Radio.Button value="suffix">{t("settings.appearance.namingSuffix")}</Radio.Button>
+                    <Radio.Button value="ai">{t("settings.appearance.namingAi")}</Radio.Button>
+                  </Radio.Group>
+                </Form.Item>
 
                 <Form.Item
                   name="closeBehavior"
@@ -919,7 +1120,8 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
                     <Radio.Button value="minimize">{t("settings.appearance.closeMinimize")}</Radio.Button>
                   </Radio.Group>
                 </Form.Item>
-              </Space>
+
+              </div>
               </PanelBlock>
             </div>
             )}
@@ -951,6 +1153,70 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
               <PanelBlock index={1}>
               <Divider style={{ margin: "16px 0 12px" }} />
 
+              {/* about:storage：本地数据统计与清理（只动软件自己的数据目录） */}
+              <div style={{ textAlign: "center" }}>
+                <Typography.Text strong>{t("settings.storage.title")}</Typography.Text>
+                <Typography.Paragraph type="secondary" style={{ fontSize: 12, margin: "4px 0 8px" }}>
+                  {t("settings.storage.desc")}
+                </Typography.Paragraph>
+                <Space size={6} wrap style={{ justifyContent: "center", width: "100%" }}>
+                  <Tag color="default">
+                    {t("settings.storage.cacheTag", { size: fmtBytes(storage?.cacheBytes ?? 0) })}
+                  </Tag>
+                  <Tag color="default">
+                    {t("settings.storage.userTag", { size: fmtBytes(storage?.userBytes ?? 0) })}
+                  </Tag>
+                  <Button
+                    size="small"
+                    type="text"
+                    icon={<ReloadOutlined />}
+                    loading={storageBusy !== null}
+                    onClick={() => void loadStorage()}
+                  >
+                    {t("settings.storage.refresh")}
+                  </Button>
+                </Space>
+                <div
+                  style={{
+                    marginTop: 8,
+                    display: "flex",
+                    gap: 8,
+                    flexWrap: "wrap",
+                    justifyContent: "center",
+                  }}
+                >
+                  <Button
+                    size="small"
+                    loading={storageBusy === "cache"}
+                    disabled={storageBusy === "data"}
+                    onClick={handleClearCache}
+                  >
+                    {t("settings.storage.clearCache")}
+                  </Button>
+                  <Button
+                    size="small"
+                    danger
+                    loading={storageBusy === "data"}
+                    disabled={storageBusy === "cache"}
+                    onClick={handleClearData}
+                  >
+                    {t("settings.storage.clearData")}
+                  </Button>
+                </div>
+                <Typography.Paragraph
+                  type="secondary"
+                  style={{ fontSize: 11, marginTop: 8, marginBottom: 0, wordBreak: "break-all" }}
+                  copyable={{ text: `${storage?.configDir ?? ""}
+${storage?.profileDir ?? ""}` }}
+                >
+                  {t("settings.storage.paths")}：{storage?.configDir || "—"}
+                  <br />
+                  {storage?.profileDir || "—"}
+                </Typography.Paragraph>
+              </div>
+
+              <Divider style={{ margin: "16px 0 12px" }} />
+
               {/* about:update：检查更新 */}
               <div style={{ textAlign: "center" }}>
                 <Button
@@ -969,6 +1235,72 @@ export function SettingsModal({ open, settings, initialSection, onClose, onSaved
             </Form>
         </div>
       </div>
+
+      {/* 清除用户数据第 2 步：明确询问「你确定你在干什么吗」，勾选后才允许执行 */}
+      <Modal
+        open={wipeStage === 2}
+        title={
+          <Space size={6}>
+            <span style={{ color: "#ff4d4f" }}>⚠</span>
+            {t("settings.storage.confirmTitle")}
+          </Space>
+        }
+        okText={t("settings.storage.exec")}
+        okButtonProps={{ danger: true, disabled: !wipeAck, loading: storageBusy === "data" }}
+        cancelText={t("settings.storage.cancel")}
+        onOk={() => void runWipe()}
+        onCancel={() => {
+          setWipeStage(0);
+          setWipeAck(false);
+        }}
+        width={460}
+        maskClosable={false}
+      >
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message={t("settings.storage.willDelete")}
+          description={t("settings.storage.clearDataDesc")}
+        />
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>
+          {t("settings.storage.confirmDesc")}
+        </Typography.Paragraph>
+        <Checkbox checked={wipeAck} onChange={(e) => setWipeAck(e.target.checked)}>
+          {t("settings.storage.ack")}
+        </Checkbox>
+      </Modal>
+
+      <DeepScanRulesModal
+        open={deepScanEditor !== null}
+        scopeKey={`global.${deepScanEditor ?? "mod"}`}
+        kind={deepScanEditor ?? "mod"}
+        rules={
+          (deepScanEditor === "plugin"
+            ? settings?.deepScanRules?.plugin
+            : settings?.deepScanRules?.mod) as DeepScanRules
+        }
+        onClose={() => setDeepScanEditor(null)}
+        onSave={async ({ rules }) => {
+          if (!rules || !settings) return;
+          if (!settings.deepScanRules) {
+            message.error(t("settings.deepScan.missingRules"));
+            return;
+          }
+          const next =
+            deepScanEditor === "plugin"
+              ? { ...settings, deepScanRules: { ...settings.deepScanRules, plugin: rules } }
+              : { ...settings, deepScanRules: { ...settings.deepScanRules, mod: rules } };
+          try {
+            await api.saveSettings(next);
+            onSaved(next);
+            message.success(t("settings.msg.saved"));
+          } catch (e) {
+            message.error(String(e));
+          }
+          setDeepScanEditor(null);
+        }}
+      />
 
       <PromptEditorModal
         open={promptEditorOpen}

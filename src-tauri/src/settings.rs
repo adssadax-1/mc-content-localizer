@@ -103,6 +103,21 @@ pub struct Settings {
   /// 最近打开的游戏目录（游戏目录模式快速重选，最多保留 5 个）
   #[serde(default)]
   pub recent_game_dirs: Vec<String>,
+  /// 深度扫描规则：模组与插件各自独立（JSON 键 `deepScanRules.{mod,plugin}`，
+  /// 与历史布尔键 `deepScan` / `deepScanPlugin` 分属不同命名空间，避免升级时键冲突）
+  #[serde(default)]
+  pub deep_scan_rules: DeepScanSettings,
+  /// 迁移用：旧版本遗留的布尔开关（读入后合并进规则集，不再写回）
+  #[serde(default, rename = "deepScan", skip_serializing)]
+  pub legacy_deep_scan: Option<bool>,
+  #[serde(default, rename = "deepScanPlugin", skip_serializing)]
+  pub legacy_deep_scan_plugin: Option<bool>,
+  /// 导出命名偏好：raw（原名）/ suffix（原名_zh_cn，默认）/ ai（AI 汉化名称）
+  #[serde(default = "default_export_naming")]
+  pub export_naming: String,
+  /// AI 汉化名称缓存（key = "文件名|大小"），仅在选择 AI 命名偏好时生成
+  #[serde(default)]
+  pub ai_names: HashMap<String, String>,
 }
 
 impl Default for Settings {
@@ -124,12 +139,48 @@ impl Default for Settings {
             language: default_language(),
             close_behavior: default_close_behavior(),
             recent_game_dirs: Vec::new(),
+            export_naming: default_export_naming(),
+            deep_scan_rules: DeepScanSettings::default(),
+            legacy_deep_scan: None,
+            legacy_deep_scan_plugin: None,
+            ai_names: HashMap::new(),
         }
     }
 }
 
 /// 主窗口关闭行为是否为「最小化到托盘」（进程级缓存，启动时与保存设置时刷新）
 static CLOSE_MINIMIZE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 深度扫描规则容器：模组与插件各自一套
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeepScanSettings {
+    #[serde(rename = "mod", default = "default_rules_mod")]
+    pub mod_rules: crate::core::scan_rules::DeepScanRules,
+    #[serde(default = "default_rules_plugin")]
+    pub plugin: crate::core::scan_rules::DeepScanRules,
+}
+
+impl Default for DeepScanSettings {
+    fn default() -> Self {
+        Self {
+            mod_rules: default_rules_mod(),
+            plugin: default_rules_plugin(),
+        }
+    }
+}
+
+fn default_rules_mod() -> crate::core::scan_rules::DeepScanRules {
+    crate::core::scan_rules::DeepScanRules::recommended(false)
+}
+
+fn default_rules_plugin() -> crate::core::scan_rules::DeepScanRules {
+    crate::core::scan_rules::DeepScanRules::recommended(true)
+}
+
+fn default_export_naming() -> String {
+    "suffix".to_string()
+}
 
 pub fn set_close_behavior(settings: &Settings) {
     use std::sync::atomic::Ordering;
@@ -142,10 +193,30 @@ pub fn close_minimize_enabled() -> bool {
 
 impl Settings {
     pub fn load(path: &Path) -> Self {
-        fs::read_to_string(path)
+        let mut s: Self = fs::read_to_string(path)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        s.migrate();
+        s
+    }
+
+    /// 旧设置迁移：把历史布尔开关并入规则集（auto），并归一化规则（锁定项强制开启）
+    pub fn migrate(&mut self) {
+        // 旧字段名：deepScan（模组，前端曾写入但此前 Rust 未声明 → 一直被丢弃）、
+        // deepScanPlugin（插件，历史确实落盘过）
+        if let Some(v) = self.legacy_deep_scan {
+            if v {
+                self.deep_scan_rules.mod_rules.auto = true;
+            }
+        }
+        if let Some(v) = self.legacy_deep_scan_plugin {
+            if v {
+                self.deep_scan_rules.plugin.auto = true;
+            }
+        }
+        self.deep_scan_rules.mod_rules.normalize();
+        self.deep_scan_rules.plugin.normalize();
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
@@ -154,5 +225,64 @@ impl Settings {
         }
         let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
         fs::write(path, text).map_err(|e| e.to_string())
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrates_legacy_flags_into_rules() {
+        // 以「完整默认设置」为基底，注入历史遗留的布尔键（真实升级场景：
+        // 老文件里有 deepScan / deepScanPlugin，没有 deepScanRules）
+        let mut val = serde_json::to_value(Settings::default()).unwrap();
+        val["deepScan"] = serde_json::json!(true);
+        val["deepScanPlugin"] = serde_json::json!(true);
+        let mut s: Settings = serde_json::from_value(val).unwrap();
+        s.migrate();
+
+        assert!(s.deep_scan_rules.mod_rules.auto, "历史 deepScan 应迁移为模组自动扫描");
+        assert!(s.deep_scan_rules.plugin.auto, "历史 deepScanPlugin 应迁移为插件自动扫描");
+        // 锁定项：即使设置文件里写成 false，也要被拉回 true
+        assert!(s.deep_scan_rules.mod_rules.skip_langfiles && s.deep_scan_rules.mod_rules.keep_cjk);
+        // 模组与插件的规则互相独立
+        assert!(!s.deep_scan_rules.mod_rules.scope_class, "模组推荐模板默认不扫代码内嵌");
+        assert!(s.deep_scan_rules.plugin.scope_class, "插件推荐模板默认扫代码内嵌");
+        // 旧布尔键不再写回；规则落在独立命名空间
+        let out = serde_json::to_string(&s).unwrap();
+        assert!(out.contains("deepScanRules"));
+        assert!(!out.contains("\"deepScan\":"), "旧键不应再写回：{out}");
+    }
+
+    #[test]
+    fn tolerates_fresh_defaults() {
+        // 全新安装：无规则字段 → 取推荐模板；两个 auto 默认关
+        let mut s: Settings = serde_json::from_value(serde_json::json!({})).unwrap_or_default();
+        s.migrate();
+        assert!(!s.deep_scan_rules.mod_rules.auto && !s.deep_scan_rules.plugin.auto);
+        assert!(s.deep_scan_rules.mod_rules.scope_json, "推荐模板默认开启 JSON 扫描");
+        assert!(s.deep_scan_rules.plugin.scope_class, "插件推荐模板默认扫代码内嵌");
+    }
+
+    #[test]
+    fn rules_survive_round_trip() {
+        let mut s = Settings::default();
+        s.deep_scan_rules.plugin.auto = true;
+        s.deep_scan_rules.plugin.scope_class = false;
+        s.deep_scan_rules.plugin.custom.push(crate::core::scan_rules::CustomRule {
+            id: "c1".into(),
+            name: "langx".into(),
+            enabled: true,
+            kind: crate::core::scan_rules::RuleKind::Ext,
+            pattern: "langx".into(),
+            action: crate::core::scan_rules::RuleAction::Include,
+            source: crate::core::scan_rules::RuleSource::User,
+        });
+        let text = serde_json::to_string(&s).unwrap();
+        let back: Settings = serde_json::from_str(&text).unwrap();
+        assert!(back.deep_scan_rules.plugin.auto);
+        assert!(!back.deep_scan_rules.plugin.scope_class);
+        assert_eq!(back.deep_scan_rules.plugin.custom.len(), 1);
+        assert_eq!(back.deep_scan_rules.plugin.custom[0].pattern, "langx");
     }
 }

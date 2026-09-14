@@ -3,6 +3,7 @@ mod core;
 mod export;
 mod game_dir;
 mod settings;
+mod storage;
 mod translate;
 #[cfg(feature = "devtools")]
 mod dev;
@@ -106,7 +107,22 @@ pub fn run() {
             commands::detect_pack_type,
             commands::get_prompt_template,
             commands::check_update,
+            storage::storage_usage,
+            storage::clear_app_cache,
+            storage::clear_app_data,
+            storage::restart_app,
+            commands::path_exists,
+            commands::generate_ai_names_batch,
             commands::deep_scan_jar,
+            commands::read_text_file_limited,
+            commands::write_text_file,
+            commands::deep_scan_template,
+            commands::deep_scan_rule_meta,
+            commands::deep_scan_preview,
+            commands::deep_scan_profile_validate,
+            commands::deep_scan_profile_export,
+            commands::parse_plugin_jar,
+            commands::export_plugin_jar,
             commands::export_shader_zh,
             commands::export_resource_pack_desc,
             // devtools 专用命令：仅在 devtools feature 下注册

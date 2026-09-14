@@ -12,6 +12,7 @@ import {
   message,
   Modal,
   notification,
+  Popover,
   Progress,
   Radio,
   Space,
@@ -39,8 +40,7 @@ import {
   StopOutlined,
   SunOutlined,
   ThunderboltOutlined,
-  ToolOutlined,
-} from "@ant-design/icons";
+  ToolOutlined, CloudServerOutlined } from "@ant-design/icons";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import zhCN from "antd/locale/zh_CN";
@@ -53,6 +53,8 @@ import { GameDirView } from "./components/GameDirView";
 import { EntryTable } from "./components/EntryTable";
 import { ContextPanel } from "./components/ContextPanel";
 import { SettingsModal } from "./components/SettingsModal";
+import { DeepScanRulesModal } from "./components/DeepScanRulesModal";
+import { DeepScanIcon } from "./components/DeepScanIcon";
 import { pushInvoke } from "./components/DevToolsPanel";
 import { type DevResultKind, DEV_SHOW_RESULT_ALERT, DEV_SHOW_EXPORT_ERROR, DEV_SETTINGS_SYNC, DEV_FAULT_CHANGED, type DevFaultNotice } from "./devtools/bus";
 import { invoke } from "@tauri-apps/api/core";
@@ -67,6 +69,9 @@ import type {
   LangEntry,
   LangFormat,
   ModFile,
+  PluginFile,
+  DeepScanOverride,
+  DeepScanRules,
   ProgressPayload,
   ResourcePackBundle,
   Settings,
@@ -159,14 +164,89 @@ function asDir(dir: string | string[] | null): string | null {
   return Array.isArray(dir) ? dir[0] : dir;
 }
 
+/** 插件导出条目：把条目键（file_path#key_path）拆成导出所需的两段 */
+function pluginItems(entries: LangEntry[]): { filePath: string; keyPath: string; translation: string }[] {
+  return entries.map((e) => ({
+    filePath: e.filePath,
+    keyPath: e.key.startsWith(e.filePath + "#") ? e.key.slice(e.filePath.length + 1) : e.key,
+    translation: e.translation ?? "",
+  }));
+}
+
 /** Windows 文件名非法字符清洗（* ? : < > | / \ "）→ _，并截断超过 100 字符。
  *  防止 modid / 文件名含非法字符时导出触发 os error 123（文件名语法不正确）。 */
 function sanitizeFileName(s: string): string {
   return s.replace(/[*?:<>|\\/"]/g, "_").slice(0, 100);
 }
 
+/** 导出命名偏好 → 基准名与后缀。
+ *  raw：原名（无后缀）；suffix：源文件名 + _zh_cn（jar/插件）/ _zh_CN（光影/资源包）；
+ *  ai：AI 中文名 + _汉化（未生成则回退源文件名，并标记 fallback 供导出提示） */
+function exportNameFor(
+  it: PackItem,
+  naming: "raw" | "suffix" | "ai",
+  aiNames: Record<string, string>,
+): { base: string; suffix: string; fallback: boolean } {
+  // 源文件主名（模组不再用 modid；插件也只改文件名、不动 plugin.yml 的 name）
+  const stem = sanitizeFileName(it.fileName.replace(/\.(zip|jar)$/i, ""));
+  if (naming === "ai") {
+    const ai = aiNames[aiKeyOf(it)];
+    if (ai && ai.trim()) return { base: sanitizeFileName(ai.trim()), suffix: "_汉化", fallback: false };
+    return { base: stem, suffix: "_zh_cn", fallback: true };
+  }
+  if (naming === "raw") return { base: stem, suffix: "", fallback: false };
+  const isJar = it.kind === "mod" || it.kind === "plugin";
+  return { base: stem, suffix: isJar ? "_zh_cn" : "_zh_CN", fallback: false };
+}
+
+/** AI 名称缓存键：文件名 + 大小（大小缺失时用路径兜底，避免同名不同包互相命中） */
+function aiKeyOf(it: PackItem): string {
+  return `${it.fileName}|${it.size ?? it.sourcePath}`;
+}
+
+/** 目标文件若已存在则自动加序号，避免覆盖既有产物 */
+async function uniqueDest(dir: string, base: string, suffix: string, ext: string): Promise<string> {
+  let name = `${base}${suffix}${ext}`;
+  let i = 0;
+  while (await api.pathExists(`${dir}/${name}`)) {
+    i += 1;
+    name = `${base}${suffix}_${i}${ext}`;
+    if (i >= 50) break;
+  }
+  return `${dir}/${name}`;
+}
+
+/** 内置规则布尔字段清单（摘要与差异计算共用） */
+const DEEP_RULE_KEYS = [
+  "scopeJson", "scopeLang", "scopeText", "scopeNested", "scopeClass",
+  "skipMeta", "skipLangfiles", "skipLibs", "onlySourceLocale", "keepCjk",
+  "dropSql", "dropDescriptor", "dropLog", "dropIdent", "classNeedsMarker",
+] as const;
+
+/** 与全局规则相比的差异（单包覆盖只存差异，避免缓存膨胀） */
+function diffDeepRules(base: DeepScanRules, next: DeepScanRules): Partial<DeepScanRules> {
+  const out: Partial<DeepScanRules> = {};
+  for (const k of DEEP_RULE_KEYS) {
+    if (base[k] !== next[k]) (out as Record<string, boolean>)[k] = next[k];
+  }
+  return out;
+}
+
+/** 某内容包实际生效的深度扫描规则：全局规则（按类型）+ 单包覆盖 */
+function effectiveDeepRules(item: PackItem, settings: Settings | null): DeepScanRules | null {
+  const base =
+    item.kind === "plugin" ? settings?.deepScanRules?.plugin : settings?.deepScanRules?.mod;
+  if (!base) return null;
+  const merged: DeepScanRules = { ...base, ...(item.deepScanOverride?.rules ?? {}) };
+  const enabled = item.deepScanOverride?.customEnabled;
+  if (enabled) {
+    merged.custom = merged.custom.map((r) => ({ ...r, enabled: enabled[r.id] ?? r.enabled }));
+  }
+  return merged;
+}
+
 /** 内容包类型 */
-type PackKind = "mod" | "shader" | "resourcepack";
+type PackKind = "mod" | "shader" | "resourcepack" | "plugin";
 
 /** 自由导入：单次导入超过该数量时，卡片默认收缩（展开会为每包挂载表格，数量大时卡顿） */
 const AUTO_EXPAND_MAX = 10;
@@ -276,6 +356,7 @@ const KIND_META: Record<PackKind, { labelKey: string; icon: React.ReactNode; col
   mod: { labelKey: "app.mod", icon: <AppstoreOutlined />, color: "#4A90D9" },
   shader: { labelKey: "app.shader", icon: <SunOutlined />, color: "#D97706" },
   resourcepack: { labelKey: "app.resourcepack", icon: <PictureOutlined />, color: "#16A34A" },
+  plugin: { labelKey: "app.plugin", icon: <CloudServerOutlined />, color: "#7C3AED" },
 };
 
 /** 右上角全局结果卡片：底部 2s 读条后自动收起，右上角 × 可手动关闭 */
@@ -326,6 +407,10 @@ interface PackCardProps {
   onToggleDeepGroup?: (packKey: string, label: string, checked: boolean) => void;
   /** 正在深度扫描的卡片 key */
   deepScanningKey?: string | null;
+  /** 该包当前生效的深度扫描规则摘要（悬停提示用） */
+  deepScanSummary?: string;
+  /** 打开该包的深度扫描规则配置（齿轮） */
+  onOpenDeepRules?: (key: string) => void;
 }
 
 /** 单个内容包卡片（memo 化：只有自己的数据/回调变化才重渲染） */
@@ -346,6 +431,8 @@ const PackCard = memo(function PackCard({
   onDeepScan,
   onToggleDeepGroup,
   deepScanningKey,
+  deepScanSummary,
+  onOpenDeepRules,
 }: PackCardProps) {
   const { t } = useTranslationContext();
   const total = item.entries.length;
@@ -423,10 +510,39 @@ const PackCard = memo(function PackCard({
         <Typography.Text type="secondary" style={{ marginLeft: "auto" }}>
           {translated}/{total} {t("app.translatedCount")}
         </Typography.Text>
-        {item.kind === "mod" && onDeepScan && (
-          <Tooltip title={t("app.deepScanDesc")}>
+        {(item.kind === "mod" || item.kind === "plugin") && onDeepScan && (
+          <Popover
+            trigger="hover"
+            title={
+              <Space size={6}>
+                <span>{t(item.kind === "plugin" ? "app.deepScanPlugin" : "app.deepScan")}</span>
+                {onOpenDeepRules && (
+                  <Tooltip title={t("app.deepScanOpenRules")}>
+                    <Button
+                      size="small"
+                      type="text"
+                      icon={<SettingOutlined />}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenDeepRules(item.key);
+                      }}
+                    />
+                  </Tooltip>
+                )}
+              </Space>
+            }
+            content={
+              <div style={{ maxWidth: 300, fontSize: 12 }}>
+                <div>{deepScanSummary ?? t("app.deepScanDesc")}</div>
+                <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+                  {t("app.deepScanPopoverHint")}
+                </Typography.Text>
+              </div>
+            }
+          >
             <Button
               size="small"
+              icon={<DeepScanIcon size={13} />}
               type={item.deepScanGroups ? "default" : "dashed"}
               loading={deepScanningKey === item.key}
               onClick={(e) => {
@@ -434,9 +550,11 @@ const PackCard = memo(function PackCard({
                 onDeepScan(item.key);
               }}
             >
-              {item.deepScanGroups ? `${t("app.deepScan")} ${deepCount}` : t("app.deepScan")}
+              {item.deepScanGroups
+                ? `${t(item.kind === "plugin" ? "app.deepScanPlugin" : "app.deepScan")} ${deepCount}`
+                : t(item.kind === "plugin" ? "app.deepScanPlugin" : "app.deepScan")}
             </Button>
-          </Tooltip>
+          </Popover>
         )}
       </div>
       {item.expanded && (
@@ -448,14 +566,12 @@ const PackCard = memo(function PackCard({
               </Typography.Text>
               {item.deepScanGroups.map((g) => (
                 <Checkbox
-                  key={g.label}
+                  key={g.key}
                   checked={g.checked}
-                  onChange={(e) =>
-                    onToggleDeepGroup?.(item.key, g.label, e.target.checked)
-                  }
+                  onChange={(e) => onToggleDeepGroup?.(item.key, g.key, e.target.checked)}
                   style={{ fontSize: 12 }}
                 >
-                  {g.label}({g.count})
+                  {t(`deepGroup.${g.key}`, { defaultValue: g.label })}({g.count})
                 </Checkbox>
               ))}
             </Space>
@@ -505,13 +621,35 @@ const PackCard = memo(function PackCard({
   );
 });
 
-const DEEP_PREFIX = "模组深度扫描·";
-
-/** 判断条目是否为深度扫描条目，返回其分组名 */
+/** 深度扫描条目的分组 key（新数据用 deepGroup；旧会话缓存回退到备注前缀按标签匹配） */
 function deepEntryGroup(e: LangEntry): string | null {
-  const n = e.notes?.[0];
-  return n?.startsWith(DEEP_PREFIX) ? n.slice(DEEP_PREFIX.length) : null;
+  if (e.deepGroup) return e.deepGroup;
+  const legacy = e.notes?.[0];
+  const prefixes = ["深度扫描·", "模组深度扫描·"];
+  for (const pre of prefixes) {
+    if (legacy?.startsWith(pre)) {
+      const label = legacy.slice(pre.length);
+      const hit = DEEP_LABEL_TO_KEY[label as keyof typeof DEEP_LABEL_TO_KEY];
+      return hit ?? label;
+    }
+  }
+  return null;
 }
+
+/** 旧备注标签 → 分组 key（仅为兼容历史会话缓存） */
+const DEEP_LABEL_TO_KEY = {
+  消息文本: "message",
+  成就: "achievement",
+  配置文件: "config",
+  数据文件: "data",
+  嵌套模组: "nested",
+  嵌套内容包: "nested",
+  "代码内嵌·其他": "class_text",
+  库文本: "lib_text",
+  其他语种: "other_locale",
+  普通文本: "plain",
+  其他文本: "plain",
+} as const;
 
 /** 队列中的单个内容包（模组 / 光影包 / 资源包统一结构） */
 export interface PackItem {
@@ -524,10 +662,14 @@ export interface PackItem {
   checked: boolean;
   height: number;
   entries: LangEntry[];
-  /** 深度扫描分组状态（{label,count,checked}） */
-  deepScanGroups?: { label: string; count: number; checked: boolean }[];
+  /** 深度扫描分组状态（key 为稳定标识，label 仅用于展示） */
+  deepScanGroups?: { key: string; label: string; count: number; checked: boolean }[];
   // 模组额外信息
   modFile?: ModFile;
+  /** 服务器插件额外信息 */
+  pluginFile?: PluginFile;
+  /** 单包深度扫描覆盖（只存与全局规则的差异；跟随会话缓存，不跨重新导入） */
+  deepScanOverride?: DeepScanOverride;
   langFormat?: LangFormat;
   hasZh?: boolean;
   zhCount?: number;
@@ -540,9 +682,12 @@ export interface PackItem {
 function AppInner({
   settings,
   setSettings,
+  reloadSettings,
 }: {
   settings: Settings | null;
   setSettings: (s: Settings | null) => void;
+  /** 从磁盘重新读取设置（清除用户数据后磁盘上已是默认值） */
+  reloadSettings: () => Promise<void>;
 }) {
   const { t } = useTranslationContext();
   const [queue, setQueue] = useState<PackItem[]>([]);
@@ -659,6 +804,27 @@ function AppInner({
   useEffect(() => {
     queueRef.current = queue;
   }, [queue]);
+  // 设置最新值同步（批量命名任务在异步流程里读）
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+
+  // 后台补齐 AI 名称：队列稳定 15s 后启动（导入/恢复/切换偏好都会触发），
+  // 翻译期间不启动（避免与翻译抢额度）；失败过的包不反复重试
+  useEffect(() => {
+    if (!settings || translating) return;
+    if ((settings.exportNaming ?? "suffix") !== "ai") return;
+    if (queue.length === 0 || aiNameJobRef.current) return;
+    const merged = { ...(settings.aiNames ?? {}), ...aiNamesRef.current };
+    const todo = queue.filter(
+      (it) => !merged[aiKeyOf(it)] && !aiNameFailedRef.current.has(aiKeyOf(it)),
+    );
+    if (todo.length === 0) return;
+    const timer = setTimeout(() => {
+      void startAiNameJob(queue);
+    }, 15000);
+    return () => clearTimeout(timer);
+  }, [queue, settings, translating]);
 
   // ── 会话缓存 v2：按包分片，只重写「发生变化」的包分片 ──────────────────────
   // 为什么：整份快照在上千包时会产生几十 MB 字符串 + IPC 拷贝，主线程被按死数秒、
@@ -693,6 +859,7 @@ function AppInner({
       notes,
       it.name,
       it.gameVersion ?? "",
+      // 单包深度扫描规则只存内存（不落盘），因此不纳入签名
     ].join("|");
   }, []);
 
@@ -721,7 +888,12 @@ function AppInner({
           id = `${sessionIdRef.current}-${shardSeqRef.current++}`;
           shardIdsRef.current.set(it.key, id);
         }
-        await api.sessionV2WriteShard("free", id, JSON.stringify(it));
+        await api.sessionV2WriteShard(
+          "free",
+          id,
+          // 单包深度扫描规则只保留在内存中（用户要求不落盘），落盘前剥离
+          JSON.stringify({ ...it, deepScanOverride: undefined }),
+        );
         writtenSigRef.current.set(it.key, sig);
         written += 1;
       }
@@ -776,6 +948,14 @@ function AppInner({
   const [sameWarnChecked, setSameWarnChecked] = useState<string[]>([]);
   // 翻译完成汇总弹窗（原文一致 / 术语表提取 / 术语建议 合并）
   const [transSummaryOpen, setTransSummaryOpen] = useState(false);
+  // AI 汉化名称：内存缓冲 + 任务互斥 + 失败集合（后台不反复重试）
+  const aiNamesRef = useRef<Record<string, string>>({});
+  const aiNameJobRef = useRef<Promise<void> | null>(null);
+  const aiNameFailedRef = useRef<Set<string>>(new Set());
+  // 首个失败原因（提示用，避免用户只看到"失败"却不知为何）
+  const aiNameErrRef = useRef<string | null>(null);
+  // 设置的最新快照（异步任务里读，避免闭包过期）
+  const settingsRef = useRef<Settings | null>(null);
   // 术语提取结果贯穿运行期的引用（glossary-done 事件异步到达，闭包内 state 会过期）
   const extractedGlossaryRef = useRef<[string, string][]>([]);
   const [currentPackName, setCurrentPackName] = useState("");
@@ -795,6 +975,8 @@ function AppInner({
   const [devFaultSummary, setDevFaultSummary] = useState<string | null>(null);
   // 清除译文对话框：可见性
   const [clearOpen, setClearOpen] = useState(false);
+  // 单包深度扫描规则配置（点击卡片齿轮打开，只允许调整规则与自定义规则启用位）
+  const [deepRulesFor, setDeepRulesFor] = useState<string | null>(null);
 
   // devtools：监听开发者工具第二窗口广播的触发事件，在主窗口弹出真实提示
   useEffect(() => {
@@ -1124,6 +1306,23 @@ function AppInner({
         entries: rp.entries,
       };
     }
+    if (kind === "plugin") {
+      const pf = await api.parsePluginJar(p);
+      return {
+        key: mkKey(pf.fileName),
+        kind: "plugin",
+        name: pf.pluginName,
+        fileName: pf.fileName,
+        sourcePath: p,
+        expanded: true,
+        checked: true,
+        height: 320,
+        entries: pf.entries,
+        pluginFile: pf,
+        hasZh: pf.hasZh,
+        zhCount: pf.zhCount,
+      };
+    }
     const mf = await api.parseJar(p);
     return {
       key: mkKey(mf.fileName),
@@ -1142,21 +1341,60 @@ function AppInner({
     };
   }
 
-  /** 导入文件到队列 */
-  /** 执行深度扫描：合并条目（默认不勾选）+ 设置分组状态；返回发现条数 */
+  /** 执行深度扫描：按「生效规则」扫描并与既有条目合并。
+   *  合并策略：同 key 保留已有译文与勾选；新条目按分组默认勾选；规则不再产出但已有译文的条目保留并标记「已排除」 */
   async function applyDeepScan(item: PackItem): Promise<number> {
-    const res = await api.deepScanJar(item.sourcePath, item.modFile?.modid ?? "mod");
-    if (res.entries.length === 0) return 0;
-    item.entries = [
-      ...item.entries,
-      ...res.entries.map((e) => ({ ...e, selected: false as const })),
-    ];
+    const rules = effectiveDeepRules(item, settingsRef.current);
+    const res = await api.deepScanJar(
+      item.sourcePath,
+      item.modFile?.modid ?? item.pluginFile?.pluginName ?? "mod",
+      rules ?? undefined,
+    );
+    const prevDeep = item.entries.filter((e) => deepEntryGroup(e));
+    const normal = item.entries.filter((e) => !deepEntryGroup(e));
+    const prevByKey = new Map(prevDeep.map((e) => [e.key, e]));
+    const checkedByKey = new Map((item.deepScanGroups ?? []).map((g) => [g.key, g.checked]));
+
+    const merged: LangEntry[] = [];
+    let added = 0;
+    for (const e of res.entries) {
+      const old = prevByKey.get(e.key);
+      if (old) {
+        // 同一条目：保留译文 / 状态 / 勾选，仅刷新分组与备注
+        merged.push({
+          ...e,
+          translation: old.translation,
+          status: old.status,
+          selected: old.selected,
+          translating: false,
+        });
+        prevByKey.delete(e.key);
+      } else {
+        const key = e.deepGroup ?? "plain";
+        merged.push({ ...e, selected: checkedByKey.get(key) ?? key === "message" });
+        added += 1;
+      }
+    }
+    // 规则不再产出：有译文则保留并标记「已排除」（不丢用户成果），无译文直接丢弃
+    const kept: LangEntry[] = [];
+    for (const old of prevByKey.values()) {
+      if (old.translation) {
+        kept.push({
+          ...old,
+          deepGroup: "excluded",
+          notes: ["深度扫描·已排除", ...(old.notes ?? []).filter((n) => !n.startsWith("深度扫描·"))],
+        });
+      }
+    }
+    item.entries = [...normal, ...merged, ...kept];
     item.deepScanGroups = res.groups.map((g) => ({
+      key: g.key,
       label: g.label,
       count: g.count,
-      checked: g.defaultChecked ?? false,
+      checked: checkedByKey.get(g.key) ?? g.defaultChecked ?? false,
     }));
-    return res.entries.length;
+    setQueue((prev) => [...prev]);
+    return added;
   }
 
   async function addFiles(paths: string[]) {
@@ -1220,25 +1458,30 @@ function AppInner({
       }
     }
     flush();
-    // 自动深度扫描（设置开关开启时）：普通解析为空的模组
+    // 自动深度扫描：模组与插件分别受「模组深度扫描」「插件深度扫描」开关控制
     let deepFound = 0;
-    if (settings?.deepScan) {
-      for (const it of added) {
-        if (it.kind === "mod" && it.entries.length === 0) {
-          try {
-            deepFound += await applyDeepScan(it);
-          } catch {
-            /* 强扫失败不阻断 */
-          }
-        }
+    for (const it of added) {
+      if (it.entries.length > 0) continue;
+      const rules = effectiveDeepRules(it, settings ?? null);
+      if (!rules?.auto) continue;
+      try {
+        deepFound += await applyDeepScan(it);
+      } catch {
+        /* 强扫失败不阻断 */
       }
     }
     setParsing(false);
     // ── 聚合导入检查：所有提示合并为单个弹窗，勾选后统一执行（去重精简）──
     const emptyPacks = added.filter((it) => it.entries.length === 0);
     // 深度扫描已开启时，空模组刚才已自动扫过，不再提供重复扫描（归入纯提示）
-    const modsEmpty = emptyPacks.filter((it) => it.kind === "mod" && !settings?.deepScan);
-    const scannedEmpty = emptyPacks.filter((it) => it.kind === "mod" && settings?.deepScan);
+    // 自动深度扫描已覆盖的类型（其规则集 auto 为开）→ 归入「已扫描仍为空」的纯提示
+    const autoScanned = (it: PackItem) => !!effectiveDeepRules(it, settings ?? null)?.auto;
+    const modsEmpty = emptyPacks.filter(
+      (it) => (it.kind === "mod" || it.kind === "plugin") && !autoScanned(it),
+    );
+    const scannedEmpty = emptyPacks.filter(
+      (it) => (it.kind === "mod" || it.kind === "plugin") && autoScanned(it),
+    );
     const otherEmpty = emptyPacks.filter((it) => it.kind !== "mod");
     const zhPacks = added.filter((it) => it.hasZh && (it.zhCount ?? 0) > 0);
     const small = added.filter((it) => it.entries.length > 0 && it.entries.length < 50);
@@ -1304,8 +1547,15 @@ function AppInner({
         message.info("深度扫描未发现更多可翻译文本，请在卡片上确认文本格式或类型是否受支持");
       }
       // “以后自动深度扫描”写回全局设置
-      if (decided.autoDeep && settings && !settings.deepScan) {
-        const next = { ...settings, deepScan: true };
+      const autoOn = settings?.deepScanRules?.mod?.auto && settings?.deepScanRules?.plugin?.auto;
+      if (decided.autoDeep && settings?.deepScanRules && !autoOn) {
+        const next = {
+          ...settings,
+          deepScanRules: {
+            mod: { ...settings.deepScanRules.mod, auto: true },
+            plugin: { ...settings.deepScanRules.plugin, auto: true },
+          },
+        };
         try {
           await api.saveSettings(next);
           setSettings(next);
@@ -1569,7 +1819,13 @@ function AppInner({
           : settings.batchSize;
       try {
         const packLabel = item.gameVersion
-          ? `${item.gameVersion}·${item.kind === "mod" ? "模组" : item.kind === "shader" ? "光影包" : "资源包"}·${item.fileName}`
+          ? `${item.gameVersion}·${item.kind === "mod"
+                ? "模组"
+                : item.kind === "shader"
+                  ? "光影包"
+                  : item.kind === "plugin"
+                    ? "插件"
+                    : "资源包"}·${item.fileName}`
           : undefined;
         const results = await api.runTranslation(
           provider,
@@ -1654,6 +1910,10 @@ function AppInner({
       };
       await Promise.all(Array.from({ length: Math.min(packLimit, tasks.length) }, () => worker()));
 
+      // 翻译结束：把本轮涉及的包放进后台批量命名（一次请求多个包名，分批间隔执行）
+      if ((settings.exportNaming ?? "suffix") === "ai") {
+        void startAiNameJob(targets);
+      }
       if (cancelRequestedRef.current) {
         message.info("已取消，已翻译部分已保留");
       } else if (doneAny) {
@@ -1848,7 +2108,7 @@ function AppInner({
     async (key: string) => {
       // 通过 ref 取最新队列，避免依赖 queue 导致回调身份变化（否则 PackCard 的 memo 全部失效）
       const item = queueRef.current.find((it) => it.key === key);
-      if (!item || item.kind !== "mod") return;
+      if (!item || (item.kind !== "mod" && item.kind !== "plugin")) return;
       setDeepScanningKey(key);
       try {
         const n = await applyDeepScan(item);
@@ -1869,21 +2129,171 @@ function AppInner({
   /** 卡片深度扫描入口：稳定身份传给 memo 化的 PackCard */
   const handleCardDeepScan = useCallback((k: string) => void runDeepScanFromCard(k), [runDeepScanFromCard]);
 
+  /** 清除用户数据后：丢弃内存中的列表与各类缓存引用，再从磁盘重新加载默认设置 */
+  const handleUserDataCleared = useCallback(async () => {
+    cancelRequestedRef.current = true;
+    queueRef.current = [];
+    setQueue([]);
+    shardIdsRef.current.clear();
+    writtenSigRef.current.clear();
+    sessionDirtyRef.current = false;
+    aiNamesRef.current = {};
+    packCountsRef.current.clear();
+    reuseRef.current.clear();
+    lastPruneRef.current = 0;
+    setTranslatingKeys({});
+    setPackProgress({});
+    setProgress(null);
+    setTranslating(false);
+    await reloadSettings();
+  }, [reloadSettings]);
+
   /** 切换深度扫描分组勾选（勾选组 → 组内条目参与翻译/导出） */
   const toggleDeepGroup = useCallback(
-    (packKey: string, label: string, checked: boolean) => {
+    (packKey: string, groupKey: string, checked: boolean) => {
       patchPack(packKey, (it) => ({
         ...it,
         deepScanGroups: it.deepScanGroups?.map((g) =>
-          g.label === label ? { ...g, checked } : g,
+          g.key === groupKey ? { ...g, checked } : g,
         ),
         entries: it.entries.map((e) =>
-          deepEntryGroup(e) === label ? { ...e, selected: checked } : e,
+          deepEntryGroup(e) === groupKey ? { ...e, selected: checked } : e,
         ),
       }));
     },
-    [],
+    [patchPack],
   );
+
+  /** 批量命名：一次请求装多个包名，按编号回填；批次之间加间隔，结果分批落盘 */
+  async function runNameBatches(
+    list: PackItem[],
+    intervalMs: number,
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<void> {
+    const BATCH = 20;
+    let done = 0;
+    let lastSaveAt = 0;
+    for (let i = 0; i < list.length; i += BATCH) {
+      // 偏好被改掉就立刻停（避免用户切回「原名」后还在偷偷烧 token）
+      if ((settingsRef.current?.exportNaming ?? "suffix") !== "ai") break;
+      const chunk = list.slice(i, i + BATCH);
+      onProgress?.(done, list.length);
+      try {
+        const res = await api.generateAiNames(
+          settingsRef.current!.provider,
+          chunk.map((it) => ({
+            id: aiKeyOf(it),
+            displayName: it.name,
+            kind: it.kind,
+            gameVersion: it.gameVersion ?? null,
+          })),
+        );
+        for (const [id, name] of Object.entries(res)) {
+          if (name && name.trim()) aiNamesRef.current[id] = name.trim();
+        }
+      } catch (e) {
+        // 单批失败：记录原因（首个），这批标记为已尝试，后台不再反复重试
+        if (!aiNameErrRef.current) aiNameErrRef.current = String(e);
+        for (const it of chunk) aiNameFailedRef.current.add(aiKeyOf(it));
+      }
+      done += chunk.length;
+      onProgress?.(done, list.length);
+      // 渐进落盘：最多每 10s 写一次，崩溃也不至于全丢
+      if (Date.now() - lastSaveAt > 10000) {
+        lastSaveAt = Date.now();
+        await persistAiNames();
+      }
+      if (i + BATCH < list.length) await new Promise((r) => setTimeout(r, intervalMs));
+    }
+  }
+
+  /** 把已生成的名称合并进设置（一次 saveSettings） */
+  async function persistAiNames(): Promise<void> {
+    const cur = settingsRef.current;
+    if (!cur) return;
+    const buf = aiNamesRef.current;
+    if (Object.keys(buf).length === 0) return;
+    const merged = { ...(cur.aiNames ?? {}), ...buf };
+    const next = { ...cur, aiNames: merged };
+    try {
+      await api.saveSettings(next);
+      settingsRef.current = next;
+      setSettings(next);
+    } catch {
+      /* 落盘失败：名称仍在内存里，下次会再试 */
+    }
+  }
+
+  /** 后台启动批量命名（不阻塞界面；同一时刻只跑一个任务） */
+  function startAiNameJob(packs: PackItem[]): Promise<void> {
+    const running = aiNameJobRef.current;
+    if (running) return running;
+    const names = { ...(settingsRef.current?.aiNames ?? {}), ...aiNamesRef.current };
+    const todo = packs.filter(
+      (it) => !names[aiKeyOf(it)] && !aiNameFailedRef.current.has(aiKeyOf(it)),
+    );
+    if (todo.length === 0 || (settingsRef.current?.exportNaming ?? "suffix") !== "ai") {
+      return Promise.resolve();
+    }
+    const job = (async () => {
+      const key = "ai-name-job";
+      try {
+        await runNameBatches(todo, 3000, (done, total) => {
+          message.loading({ content: t("app.aiNameProgress", { done, total }), key, duration: 0 });
+        });
+        await persistAiNames();
+        const missed = todo.filter((it) => !(settingsRef.current?.aiNames ?? {})[aiKeyOf(it)]).length;
+        if (missed > 0) {
+          message.warning(
+            t("app.aiNameFailed", { n: missed, reason: aiNameErrRef.current ?? "-" }),
+            6,
+          );
+        }
+        aiNameErrRef.current = null;
+      } finally {
+        message.destroy(key);
+        aiNameJobRef.current = null;
+      }
+    })();
+    aiNameJobRef.current = job;
+    return job;
+  }
+
+  /** 导出前确保名称就绪：先等正在跑的后台任务，再同步补齐缺的（供导出使用） */
+  async function ensureAiNames(packs: PackItem[]): Promise<{
+    naming: "raw" | "suffix" | "ai";
+    names: Record<string, string>;
+  }> {
+    const naming = (settingsRef.current?.exportNaming ?? "suffix") as "raw" | "suffix" | "ai";
+    if (naming !== "ai") {
+      return { naming, names: { ...(settingsRef.current?.aiNames ?? {}) } };
+    }
+    if (aiNameJobRef.current) await aiNameJobRef.current.catch(() => {});
+    const names = { ...(settingsRef.current?.aiNames ?? {}), ...aiNamesRef.current };
+    const missing = packs.filter((it) => !names[aiKeyOf(it)]);
+    if (missing.length === 0) return { naming, names };
+    if (!settingsRef.current?.provider.apiKey || !settingsRef.current.provider.model) {
+      message.warning(t("app.aiNameNoKey", { n: missing.length }));
+      return { naming, names };
+    }
+    const key = "ai-name-job";
+    try {
+      // 导出时用户就在等：间隔缩短，但仍分批，避免一口气打出几十个请求
+      await runNameBatches(missing, 1200, (done, total) => {
+        message.loading({ content: t("app.aiNameProgress", { done, total }), key, duration: 0 });
+      });
+      await persistAiNames();
+    } finally {
+      message.destroy(key);
+    }
+    const finalNames = { ...(settingsRef.current?.aiNames ?? {}), ...aiNamesRef.current };
+    const missed = packs.filter((it) => !finalNames[aiKeyOf(it)]).length;
+    if (missed > 0) {
+      message.warning(t("app.aiNameFailed", { n: missed, reason: aiNameErrRef.current ?? "-" }), 6);
+    }
+    aiNameErrRef.current = null;
+    return { naming, names: finalNames };
+  }
 
   /** 导出（按类型分流） */
   async function handleExport() {
@@ -1894,6 +2304,8 @@ function AppInner({
     }
     const hasGamedir = checked.some((it) => it.gameVersion);
     const kinds = new Set(checked.map((c) => c.kind));
+    // AI 命名偏好：先把缺失的名称补齐（含已翻译过、跳过翻译循环的包）
+    const { naming, names: aiNameMap } = await ensureAiNames(checked);
 
     // 混合类型或含游戏目录来源 → 统一按 版本/类别 子文件夹逐包导出
     if (hasGamedir || kinds.size > 1) {
@@ -1904,8 +2316,14 @@ function AppInner({
       if (!dir) return;
       let ok = 0;
       let skipped = 0;
+      let aiFallback = 0;
       const generated: string[] = [];
-      const kindFolder: Record<PackKind, string> = { mod: "mods", shader: "shaderpacks", resourcepack: "resourcepacks" };
+      const kindFolder: Record<PackKind, string> = {
+        mod: "mods",
+        shader: "shaderpacks",
+        resourcepack: "resourcepacks",
+        plugin: "plugins",
+      };
       for (const it of checked) {
         const translated = it.entries.filter((e) => (e.selected ?? true) && e.translation);
         if (translated.length === 0) {
@@ -1913,16 +2331,20 @@ function AppInner({
           continue;
         }
         try {
-          const base = sanitizeFileName(it.fileName.replace(/\.(zip|jar)$/i, ""));
           const ver = it.gameVersion ?? "公共目录";
+          const nm = exportNameFor(it, naming, aiNameMap);
+          if (nm.fallback) aiFallback += 1;
           if (it.kind === "mod") {
-            const dest = `${vdirFor(dir, it)}/mods/${sanitizeFileName(it.modFile?.modid ?? base)}_zh_cn.jar`;
+            const dest = await uniqueDest(`${vdirFor(dir, it)}/mods`, nm.base, nm.suffix, ".jar");
             await api.exportModJar(it.sourcePath, dest, it.modFile?.modid ?? "mod", translated, it.langFormat ?? "json");
           } else if (it.kind === "shader") {
-            const dest = `${vdirFor(dir, it)}/shaderpacks/${base}_zh_CN.zip`;
+            const dest = await uniqueDest(`${vdirFor(dir, it)}/shaderpacks`, nm.base, nm.suffix, ".zip");
             await api.exportShaderZh(it.sourcePath, dest, translated);
+          } else if (it.kind === "plugin") {
+            const dest = await uniqueDest(`${vdirFor(dir, it)}/plugins`, nm.base, nm.suffix, ".jar");
+            await api.exportPluginJar(it.sourcePath, dest, pluginItems(translated));
           } else {
-            const dest = `${vdirFor(dir, it)}/resourcepacks/${base}_改描述.zip`;
+            const dest = await uniqueDest(`${vdirFor(dir, it)}/resourcepacks`, nm.base, nm.suffix, ".zip");
             await api.exportResourcePackDesc(it.sourcePath, dest, translated);
           }
           generated.push(`${dir}/${ver}/${kindFolder[it.kind]}/`);
@@ -1932,12 +2354,46 @@ function AppInner({
         }
       }
       if (ok > 0) notifyExport(`已导出 ${ok} 个内容包（按版本分类）`, [...new Set(generated)]);
+      if (aiFallback > 0)
+        message.info(`${aiFallback} 个内容包没有 AI 中文名（未翻译或未生成），已回退为原名_zh_cn`);
       if (skipped > 0) message.warning(`${skipped} 个内容包没有可导出的译文（请先翻译）`);
       return;
     }
 
     // 纯自由导入：保留原有分支（光影 / 资源包直接导出，模组走合并/单包弹窗）
     const kind = checked[0].kind;
+
+    if (kind === "plugin") {
+      const dir = asDir(await open({ directory: true, title: "选择导出目录（生成汉化插件 jar）" }));
+      if (!dir) return;
+      let ok = 0;
+      let skipped = 0;
+      let aiFallback = 0;
+      const generated: string[] = [];
+      for (const it of checked) {
+        const translated = it.entries.filter((e) => (e.selected ?? true) && e.translation);
+        if (translated.length === 0) {
+          skipped += 1;
+          continue;
+        }
+        try {
+          const nm = exportNameFor(it, naming, aiNameMap);
+          if (nm.fallback) aiFallback += 1;
+          const dest = await uniqueDest(`${dir}/plugins`, nm.base, nm.suffix, ".jar");
+          const msg = await api.exportPluginJar(it.sourcePath, dest, pluginItems(translated));
+          if (msg) message.success(msg);
+          generated.push(`${dir}/plugins/`);
+          ok += 1;
+        } catch (e) {
+          message.error(`「${it.name}」导出失败：${String(e)}`);
+        }
+      }
+      if (ok > 0) notifyExport(`已导出 ${ok} 个汉化插件`, [...new Set(generated)]);
+      if (skipped > 0) message.warning(`${skipped} 个插件没有可导出的译文（请先翻译）`);
+      setExportOpen(false);
+      return;
+    }
+
     if (kind === "shader") {
       const dir = asDir(await open({ directory: true, title: "选择导出目录（生成汉化光影包）" }));
       if (!dir) return;
@@ -1953,8 +2409,8 @@ function AppInner({
           continue;
         }
         try {
-          const base = it.fileName.replace(/\.(zip|jar)$/i, "");
-          const dest = `${dir}/${sanitizeFileName(base)}_zh_CN.zip`;
+          const nm = exportNameFor(it, naming, aiNameMap);
+          const dest = await uniqueDest(dir, nm.base, nm.suffix, ".zip");
           await api.exportShaderZh(it.sourcePath, dest, translated);
           generated.push(dest);
           ok += 1;
@@ -1986,8 +2442,8 @@ function AppInner({
           continue;
         }
         try {
-          const base = it.fileName.replace(/\.(zip|jar)$/i, "");
-          const dest = `${dir}/${sanitizeFileName(base)}_zh_CN.zip`;
+          const nm = exportNameFor(it, naming, aiNameMap);
+          const dest = await uniqueDest(dir, nm.base, nm.suffix, ".zip");
           await api.exportResourcePackDesc(it.sourcePath, dest, translated);
           generated.push(dest);
           ok += 1;
@@ -2080,6 +2536,8 @@ function AppInner({
       title: `选择目录（将生成 ${checked.length} 个汉化 jar，不覆盖原文件）`,
     }));
     if (!dir) return;
+    // AI 命名偏好：缺失的名称在此补齐（与 handleExport 同一逻辑）
+    const { naming, names: aiNameMap } = await ensureAiNames(checked);
     let ok = 0;
     const generated: string[] = [];
     for (const it of checked) {
@@ -2092,7 +2550,8 @@ function AppInner({
         continue;
       }
       try {
-        const dest = `${vdirFor(dir, it)}/${sanitizeFileName(it.modFile?.modid ?? "mod")}_zh_cn.jar`;
+        const nm = exportNameFor(it, naming, aiNameMap);
+        const dest = await uniqueDest(vdirFor(dir, it), nm.base, nm.suffix, ".jar");
         await api.exportModJar(
           it.sourcePath,
           dest,
@@ -2117,6 +2576,19 @@ function AppInner({
   }
 
   // 以下统计都基于队列全量遍历，memo 化避免每次渲染（进度事件、输入框敲键等）重复计算
+  /** 卡片悬停摘要：当前生效规则条数与自动开关状态 */
+  const deepScanSummaryOf = useCallback(
+    (it: PackItem): string => {
+      const r = effectiveDeepRules(it, settingsRef.current);
+      if (!r) return "";
+      const n = DEEP_RULE_KEYS.filter((k) => r[k]).length + r.custom.filter((c) => c.enabled).length;
+      const auto = t(r.auto ? "settings.deepScan.autoOn" : "settings.deepScan.autoOff");
+      const overridden = it.deepScanOverride ? `${t("settings.deepScan.packOverridden")} · ` : "";
+      return `${overridden}${t("settings.deepScan.summary", { n, auto })}`;
+    },
+    [t],
+  );
+
   const visibleQueue = useMemo(() => queue.filter((it) => it.kind === activeTab), [queue, activeTab]);
   const allChecked = useMemo(
     () => visibleQueue.length > 0 && visibleQueue.every((it) => it.checked),
@@ -2269,6 +2741,8 @@ function AppInner({
                 let skipped = 0;
                 const existing = new Set(queue.map((x) => x.sourcePath));
                 const emptyPacks: typeof packs = [];
+                // 解析失败的文件名（此前静默计入 skipped，用户看不到原因）
+                const failed: string[] = [];
                 for (let i = 0; i < packs.length; i++) {
                   const gp = packs[i];
                   setGdAddProgress({ done: i, total: packs.length, current: gp.fileName });
@@ -2279,12 +2753,24 @@ function AppInner({
                   try {
                     let entries: LangEntry[];
                     let modFile: ModFile | undefined;
+                    let pluginFile: PluginFile | undefined;
                     let name: string;
+                    let hasZh: boolean | undefined;
+                    let zhCount: number | undefined;
                     if (gp.kind === "mod") {
                       const mf = await api.parseJar(gp.path);
                       entries = mf.entries;
                       modFile = mf;
                       name = mf.modName;
+                      hasZh = mf.hasZh;
+                      zhCount = mf.zhCount;
+                    } else if (gp.kind === "plugin") {
+                      const pf = await api.parsePluginJar(gp.path);
+                      entries = pf.entries;
+                      pluginFile = pf;
+                      name = pf.pluginName;
+                      hasZh = pf.hasZh;
+                      zhCount = pf.zhCount;
                     } else if (gp.kind === "shader") {
                       const sp = await api.parseShaderPack(gp.path);
                       entries = sp.entries;
@@ -2309,11 +2795,15 @@ function AppInner({
                       height: 480,
                       entries: entries.map((e) => ({ ...e, selected: e.selected ?? true })),
                       modFile,
+                      pluginFile,
+                      hasZh,
+                      zhCount,
                       langFormat: "json",
                       gameVersion: gp.gameVersion,
                     });
-                  } catch {
+                  } catch (e) {
                     skipped += 1;
+                    failed.push(`${gp.fileName}：${String(e).slice(0, 80)}`);
                   }
                 }
                 // 条目为空的包 → 聚合到导入检查弹窗，勾选后统一深度扫描（不再阻塞逐包询问）
@@ -2347,7 +2837,12 @@ function AppInner({
                       continue;
                     }
                     try {
-                      const res = await api.deepScanJar(gp.path, gp.fileName.replace(/\.jar$/i, ""));
+                      const res = await api.deepScanJar(
+                        gp.path,
+                        gp.fileName.replace(/\.jar$/i, ""),
+                        // 与手动深度扫描走同一套生效规则（全局模组规则），避免两处结果不一致
+                        settingsRef.current?.deepScanRules?.mod ?? undefined,
+                      );
                       if (res.entries.length === 0) {
                         skipped += 1;
                         continue;
@@ -2374,8 +2869,16 @@ function AppInner({
                     }
                   }
                   skipped += gdOthers.length;
-                  if (decided.autoDeep && settings && !settings.deepScan) {
-                    const next = { ...settings, deepScan: true };
+                  const gdAutoOn =
+                    settings?.deepScanRules?.mod?.auto && settings?.deepScanRules?.plugin?.auto;
+                  if (decided.autoDeep && settings?.deepScanRules && !gdAutoOn) {
+                    const next = {
+                      ...settings,
+                      deepScanRules: {
+                        mod: { ...settings.deepScanRules.mod, auto: true },
+                        plugin: { ...settings.deepScanRules.plugin, auto: true },
+                      },
+                    };
                     try {
                       await api.saveSettings(next);
                       setSettings(next);
@@ -2386,6 +2889,11 @@ function AppInner({
                 }
                 if (added.length > 0) setQueue((prev) => [...prev, ...added]);
                 setWorkMode("free");
+                if (failed.length > 0) {
+                  message.warning(`${failed.length} 个内容包解析失败：${failed.slice(0, 3).join("；")}${
+                    failed.length > 3 ? ` 等 ${failed.length} 个` : ""
+                  }`);
+                }
                 return { added: added.length, skipped };
               }}
             />
@@ -2515,6 +3023,8 @@ function AppInner({
                     onDeepScan={handleCardDeepScan}
                     onToggleDeepGroup={toggleDeepGroup}
                     deepScanningKey={deepScanningKey}
+                    deepScanSummary={deepScanSummaryOf(it)}
+                    onOpenDeepRules={setDeepRulesFor}
                   />
                 ))}
                 {visibleQueue.length > shownQueue.length && (
@@ -2535,7 +3045,7 @@ function AppInner({
       <Footer style={{ padding: "6px 12px", textAlign: "center", borderTop: "1px solid #E6E8EB" }}>
         <Space size="middle" wrap>
           <Typography.Text type="secondary">
-            支持模组 jar · 光影包 · 资源包 · 勾选要翻译/导出的内容包
+            支持模组 jar · 服务器插件 · 光影包 · 资源包 · 勾选要翻译/导出的内容包
           </Typography.Text>
           <Typography.Link onClick={openGithub} style={{ fontWeight: 600 }}>
             <img src="/github.svg" alt="" style={{ height: 14, marginRight: 4, verticalAlign: "middle" }} /> 完全开源免费 · GitHub 项目地址
@@ -2598,12 +3108,67 @@ function AppInner({
         </Radio.Group>
       </Modal>
 
+      {/* 单包深度扫描规则：与设置里同款弹窗，自定义规则区只读，保存为「相对全局的差异」 */}
+      {deepRulesFor &&
+        (() => {
+          const pack = queue.find((x) => x.key === deepRulesFor);
+          if (!pack) return null;
+          const base =
+            pack.kind === "plugin" ? settings?.deepScanRules?.plugin : settings?.deepScanRules?.mod;
+          if (!base) return null;
+          return (
+            <DeepScanRulesModal
+              open
+              key={pack.key}
+              scopeKey={pack.key}
+              kind={pack.kind === "plugin" ? "plugin" : "mod"}
+              rules={{ ...base, ...(pack.deepScanOverride?.rules ?? {}) }}
+              globalRules={base}
+              customReadOnly
+              customEnabled={pack.deepScanOverride?.customEnabled}
+              previewTarget={pack.sourcePath}
+              onClose={() => setDeepRulesFor(null)}
+              onSave={({ rules: next, customEnabled }) => {
+                // 只写入该包相对全局的差异，绝不回写全局设置；且仅存内存
+                const diff = diffDeepRules(base, next);
+                const baseCustom = new Map((base.custom ?? []).map((r) => [r.id, r.enabled]));
+                const changedCustom: Record<string, boolean> = {};
+                for (const [id, v] of Object.entries(customEnabled)) {
+                  if ((baseCustom.get(id) ?? true) !== v) changedCustom[id] = v;
+                }
+                // 与全局完全一致 → 视为「跟随全局」，直接清掉覆盖（否则无法取消本包配置）
+                const followsGlobal =
+                  Object.keys(diff).length === 0 && Object.keys(changedCustom).length === 0;
+                patchPack(pack.key, (it) => {
+                  if (followsGlobal) {
+                    const { deepScanOverride: _dropped, ...rest } = it;
+                    return rest;
+                  }
+                  return {
+                    ...it,
+                    deepScanOverride: { rules: diff, customEnabled: changedCustom },
+                  };
+                });
+                setDeepRulesFor(null);
+                message.success(
+                  t(
+                    followsGlobal
+                      ? "settings.deepScan.packFollowGlobal"
+                      : "settings.deepScan.packSaved",
+                  ),
+                );
+              }}
+            />
+          );
+        })()}
+
       <SettingsModal
         open={settingsOpen}
         settings={settings}
         initialSection={settingsSection}
         onClose={() => setSettingsOpen(false)}
         onSaved={setSettings}
+        onUserDataCleared={handleUserDataCleared}
       />
 
       {/* 聚合导入检查弹窗：导入完成后一次呈现（自带中文 / 空文本深度扫描 / 批次提示 / 解析失败） */}
@@ -3022,34 +3587,38 @@ function App() {
   // 外层组件在 TranslationProvider 之外，用不依赖 context 的 useTranslation
   const { t } = useTranslation(language);
 
+  /** 读取设置并补齐旧配置缺失的字段（初始化与「清除用户数据」后复用） */
+  const reloadSettings = useCallback(async () => {
+    try {
+      const s = await api.loadSettings();
+      setSettings({
+        ...s,
+        threading: s.threading ?? {
+          enabled: false,
+          threadCount: 2,
+          requestIntervalSec: 4,
+        },
+        customPrompts: s.customPrompts ?? {},
+        batchSizeAuto: s.batchSizeAuto ?? true,
+        packParallelEnabled: s.packParallelEnabled ?? false,
+        recentGameDirs: s.recentGameDirs ?? [],
+        closeBehavior: s.closeBehavior === "minimize" ? "minimize" : "exit",
+        packParallelCount: s.packParallelCount ?? 2,
+        // 深度扫描规则由后端填充默认值；此处仅在缺失时兜底为空对象交由后端归一化
+        deepScanRules: s.deepScanRules,
+        theme: s.theme === "dark" ? "dark" : "light",
+        language: s.language === "en" ? "en" : "zh",
+      });
+    } catch {
+      message.warning(t("app.msgSettingsLoadFailed"));
+      setSettings(null);
+    }
+  }, [t]);
+
   // 初始化：加载设置（兼容旧配置：补齐新字段默认值）
   useEffect(() => {
-    api
-      .loadSettings()
-      .then((s) =>
-        setSettings({
-          ...s,
-          threading: s.threading ?? {
-            enabled: false,
-            threadCount: 2,
-            requestIntervalSec: 4,
-          },
-          customPrompts: s.customPrompts ?? {},
-          batchSizeAuto: s.batchSizeAuto ?? true,
-          packParallelEnabled: s.packParallelEnabled ?? false,
-          recentGameDirs: s.recentGameDirs ?? [],
-          closeBehavior: s.closeBehavior === "minimize" ? "minimize" : "exit",
-          packParallelCount: s.packParallelCount ?? 2,
-          deepScan: s.deepScan ?? false,
-          theme: s.theme === "dark" ? "dark" : "light",
-          language: s.language === "en" ? "en" : "zh",
-        }),
-      )
-      .catch(() => {
-        message.warning(t("app.msgSettingsLoadFailed"));
-        setSettings(null);
-      });
-  }, []);
+    void reloadSettings();
+  }, [reloadSettings]);
 
   // 主题 CSS 变量挂在 html 根元素（App.css 的 [data-theme="dark"] 选择器）
   useEffect(() => {
@@ -3068,7 +3637,11 @@ function App() {
       locale={language === "zh" ? zhCN : enUS}
     >
       <TranslationProvider language={language}>
-        <AppInner settings={settings} setSettings={setSettings} />
+        <AppInner
+          settings={settings}
+          setSettings={setSettings}
+          reloadSettings={reloadSettings}
+        />
       </TranslationProvider>
     </ConfigProvider>
   );

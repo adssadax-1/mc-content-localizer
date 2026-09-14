@@ -345,6 +345,14 @@ body {
   from { opacity: 0; transform: translateX(14px); }
   to { opacity: 1; transform: none; }
 }
+/* ===== 通用：分层左右错峰淡入（父级带 .anim-stagger-root 时播放） ===== */
+.anim-stagger-root .anim-l {
+  animation: motion-slide-l var(--motion-dur-panel) var(--motion-ease-enter) both;
+}
+.anim-stagger-root .anim-r {
+  animation: motion-slide-r var(--motion-dur-panel) var(--motion-ease-enter) both;
+}
+
 .dev-tab-l {
   animation: motion-slide-l var(--motion-dur-panel) var(--motion-ease-enter) both;
 }

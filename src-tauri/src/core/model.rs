@@ -48,6 +48,9 @@ pub struct LangEntry {
     pub placeholders: Vec<String>,
     /// 备注（占位符警告、TM 来源等）
     pub notes: Vec<String>,
+    /// 深度扫描分组 key（仅深度扫描条目有；前端按它做分组勾选，避免依赖文案）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deep_group: Option<String>,
 }
 
 /// 模组加载器
@@ -70,6 +73,26 @@ pub enum LangFormat {
     LegacyLang,
     /// 1.13+ 的 .json 格式
     Json,
+}
+
+/// 一个服务器插件 jar 的解析结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginFile {
+    /// 原始文件名
+    pub file_name: String,
+    /// 插件名（plugin.yml 的 name）
+    pub plugin_name: String,
+    /// 插件版本
+    pub version: Option<String>,
+    /// 是否自带中文
+    #[serde(default)]
+    pub has_zh: bool,
+    /// 自带中文条数
+    #[serde(default)]
+    pub zh_count: usize,
+    /// 全部语言条目
+    pub entries: Vec<LangEntry>,
 }
 
 /// 一个模组 jar 的解析结果

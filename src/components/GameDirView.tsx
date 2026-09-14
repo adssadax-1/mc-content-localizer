@@ -29,7 +29,7 @@ interface Props {
       path: string;
       fileName: string;
       size: number;
-      kind: "mod" | "shader" | "resourcepack";
+      kind: "mod" | "shader" | "resourcepack" | "plugin";
       gameVersion: string;
     }[],
   ) => Promise<{ added: number; skipped: number }>;
@@ -38,18 +38,24 @@ interface Props {
   onAutoScanConsumed?: () => void;
 }
 
-type Kind = "mod" | "shader" | "resourcepack";
+type Kind = "mod" | "shader" | "resourcepack" | "plugin";
 
-const KIND_LABEL_KEY: Record<Kind, string> = { mod: "gamedir.kindMod", shader: "gamedir.kindShader", resourcepack: "gamedir.kindRp" };
+const KIND_LABEL_KEY: Record<Kind, string> = {
+  mod: "gamedir.kindMod",
+  shader: "gamedir.kindShader",
+  resourcepack: "gamedir.kindRp",
+  plugin: "gamedir.kindPlugin",
+};
 
 function packsOf(g: GameVersionGroup, kind: Kind): GamePackEntry[] {
   if (kind === "mod") return g.mods;
+  if (kind === "plugin") return g.plugins;
   if (kind === "resourcepack") return g.resourcepacks;
   return g.shaderpacks;
 }
 
 function groupAllPacks(g: GameVersionGroup): GamePackEntry[] {
-  return [...g.mods, ...g.resourcepacks, ...g.shaderpacks];
+  return [...g.mods, ...g.resourcepacks, ...g.shaderpacks, ...g.plugins];
 }
 
 export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQueue, autoScanDir, onAutoScanConsumed }: Props) {
@@ -118,7 +124,7 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
         };
         let packTotal = 0;
         for (const g of result.groups) {
-          for (const p of [...g.mods, ...g.resourcepacks, ...g.shaderpacks]) {
+          for (const p of groupAllPacks(g)) {
             reg(p);
             packTotal += 1;
           }
@@ -127,9 +133,7 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
         for (const n of dupKeys.values()) if (n > 1) dup += n - 1;
         setScanSummary({ scan: result, packTotal, dup, versions: result.groups.length });
         // 自动选中第一个有内容包的分组，主界面立即有内容
-        const first = result.groups.find(
-          (g) => g.mods.length > 0 || g.resourcepacks.length > 0 || g.shaderpacks.length > 0,
-        );
+        const first = result.groups.find((g) => groupAllPacks(g).length > 0);
         setActiveGroup(first ? "g:" + first.relPath : null);
         setSummaryOpen(true);
       } catch (e) {
@@ -171,7 +175,7 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
   const allPacks = useMemo(() => {
     const out: { group: GroupRow; kind: Kind; pack: GamePackEntry }[] = [];
     for (const g of groups) {
-      for (const kind of ["mod", "resourcepack", "shader"] as Kind[]) {
+      for (const kind of ["mod", "resourcepack", "shader", "plugin"] as Kind[]) {
         for (const pack of packsOf(g.group, kind)) out.push({ group: g, kind, pack });
       }
     }
@@ -219,7 +223,7 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
     if (!activeGroupRow) return null;
     const qq = search.trim().toLowerCase();
     const out: { kind: Kind; pack: GamePackEntry }[] = [];
-    for (const kind of ["mod", "resourcepack", "shader"] as Kind[]) {
+    for (const kind of ["mod", "resourcepack", "shader", "plugin"] as Kind[]) {
       for (const pack of packsOf(activeGroupRow.group, kind)) {
         if (qq && !pack.fileName.toLowerCase().includes(qq)) continue;
         out.push({ kind, pack });
@@ -252,7 +256,7 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
     if (!selPanel) return [];
     const out: { group: GroupRow; kind: Kind; pack: GamePackEntry }[] = [];
     for (const g of groups) {
-      const kinds: Kind[] = selPanel === "all" ? ["mod", "resourcepack", "shader"] : [selPanel as Kind];
+      const kinds: Kind[] = selPanel === "all" ? ["mod", "resourcepack", "shader", "plugin"] : [selPanel as Kind];
       for (const kind of kinds) {
         for (const pack of packsOf(g.group, kind)) out.push({ group: g, kind, pack });
       }
@@ -400,7 +404,7 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontWeight: activeGroup === row.key ? 600 : 400 }}>{row.name}</div>
                     <div style={{ fontSize: 11, opacity: 0.8 }}>
-                      {t("gamedir.counts", { mods: row.group.mods.length, rp: row.group.resourcepacks.length, sp: row.group.shaderpacks.length })}
+                      {t("gamedir.counts", { mods: row.group.mods.length, rp: row.group.resourcepacks.length, sp: row.group.shaderpacks.length, plug: row.group.plugins.length })}
                     </div>
                   </div>
                 </div>
@@ -453,7 +457,7 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
               }}>
                 {(allPacks.length > 0 && allPacks.every((p) => selected[p.pack.path])) ? t("gamedir.btnNone") : t("gamedir.btnAll")}
               </Button>
-              {(["mod", "resourcepack", "shader"] as Kind[]).map((k) => (
+              {(["mod", "resourcepack", "shader", "plugin"] as Kind[]).map((k) => (
                 <Button
                   key={k}
                   size="small"
@@ -575,7 +579,7 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
               activePacks.packs.length === 0 ? (
                 <Empty description={t("gamedir.noPacks")} image={Empty.PRESENTED_IMAGE_SIMPLE} />
               ) : (
-                ["mod", "resourcepack", "shader"].map((kind) => {
+                ["mod", "resourcepack", "shader", "plugin"].map((kind) => {
                   const k = kind as Kind;
                   const list = activePacks.packs.filter((p) => p.kind === k);
                   if (list.length === 0) return null;

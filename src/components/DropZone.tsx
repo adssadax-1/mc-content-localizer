@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { LoadingOutlined, SunOutlined, PictureOutlined, AppstoreOutlined } from "@ant-design/icons";
+import { LoadingOutlined, SunOutlined, PictureOutlined, AppstoreOutlined, CloudServerOutlined } from "@ant-design/icons";
 import { Spin, Typography } from "antd";
 import { useTranslationContext } from "../i18n";
 
-export type DropKind = "mod" | "shader" | "resourcepack";
+export type DropKind = "mod" | "shader" | "resourcepack" | "plugin";
 
 interface Props {
   dragOver: boolean;
@@ -34,6 +34,12 @@ const KIND_TEXT: Record<
     title: "app.clickSelectResource",
     dragTitle: "app.dragOverResource",
     desc: "app.resourceDesc",
+  },
+  plugin: {
+    icon: <CloudServerOutlined />,
+    title: "app.clickSelectPlugin",
+    dragTitle: "app.dragOverPlugin",
+    desc: "app.pluginDesc",
   },
 };
 

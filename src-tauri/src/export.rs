@@ -355,6 +355,7 @@ mod tests {
             translating: false,
             placeholders: Vec::new(),
             notes: Vec::new(),
+            deep_group: None,
         }
     }
 
@@ -533,6 +534,7 @@ mod tests {
             translating: false,
             placeholders: vec![],
             notes: vec![],
+            deep_group: None,
         };
         let dest = std::env::temp_dir().join("hc_dest.jar");
         export_mod_jar(&src, &dest, "hcmod", &[e1, e2], LangFormat::Json).unwrap();
@@ -575,5 +577,415 @@ mod serde_tests {
         assert_eq!(b.entries.len(), 1);
         assert_eq!(b.entries[0].translation.as_deref(), Some("你好"));
         assert_eq!(b.lang_format, LangFormat::LegacyLang);
+    }
+}
+
+// ── 服务器插件导出 ────────────────────────────────────────────────────────────
+
+/// 插件导出条目：jar 内文件 + 键路径 + 译文
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginExportItem {
+    pub file_path: String,
+    pub key_path: String,
+    pub translation: String,
+}
+
+/// 导出汉化插件 jar：复制原 jar，仅替换被翻译的成员；其余成员原字节保留
+/// （不重压缩、不破坏插件完整性）。返回摘要（写入/跳过条数）。
+pub fn export_plugin_jar(
+    source: &Path,
+    dest: &Path,
+    items: &[PluginExportItem],
+) -> Result<String, String> {
+    use zip::{ZipArchive, ZipWriter};
+
+    let mut by_file: HashMap<&str, Vec<&PluginExportItem>> = HashMap::new();
+    for it in items {
+        by_file.entry(it.file_path.as_str()).or_default().push(it);
+    }
+
+    let file = File::open(source).map_err(|e| format!("无法打开原插件: {e}"))?;
+    let mut archive = ZipArchive::new(file).map_err(|e| e.to_string())?;
+
+    if let Some(parent) = dest.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let out_file = File::create(dest).map_err(|e| format!("无法创建目标文件: {e}"))?;
+    let mut w = ZipWriter::new(out_file);
+
+    let mut written = 0usize;
+    let mut skipped = 0usize;
+    for i in 0..archive.len() {
+        let mut f = archive.by_index(i).map_err(|e| e.to_string())?;
+        if f.is_dir() {
+            continue;
+        }
+        let name = f.name().to_string();
+        if let Some(list) = by_file.get(name.as_str()).cloned() {
+            // 被翻译的成员：读出 → 文本级替换 → 保留原压缩方式与权限写回
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut f, &mut buf).map_err(|e| e.to_string())?;
+            let compression = f.compression();
+            let unix_mode = f.unix_mode();
+            let text = String::from_utf8_lossy(&buf).into_owned();
+            let lower = name.to_lowercase();
+            let (new_text, rep, miss) = if lower.ends_with(".json") {
+                rewrite_json_text(&text, &list)
+            } else if lower.ends_with(".properties") {
+                rewrite_properties_text(&text, &list)
+            } else {
+                rewrite_yaml_text(&text, &list)
+            };
+            written += rep;
+            skipped += miss;
+            let opts = SimpleFileOptions::default()
+                .compression_method(compression)
+                .unix_permissions(unix_mode.unwrap_or(0o644));
+            w.start_file(name.clone(), opts).map_err(|e| e.to_string())?;
+            w.write_all(new_text.as_bytes()).map_err(|e| e.to_string())?;
+        } else {
+            // 未翻译的成员：原字节复制（不重压缩）
+            w.raw_copy_file(f).map_err(|e| e.to_string())?;
+        }
+    }
+    w.finish().map_err(|e| e.to_string())?;
+    Ok(format!(
+        "已写入 {written} 条译文{}",
+        if skipped > 0 {
+            format!("（跳过 {skipped} 条：原文件中未找到对应键）")
+        } else {
+            String::new()
+        }
+    ))
+}
+
+/// YAML 保格式回写：文本级行替换，保留注释、键序、缩进与引号风格。
+/// 块标量（| 或 >）整块替换为双引号单行（\n 转义），内容不丢。
+fn rewrite_yaml_text(text: &str, items: &[&PluginExportItem]) -> (String, usize, usize) {
+    let mut map: HashMap<String, String> = HashMap::new();
+    for it in items {
+        map.insert(it.key_path.clone(), it.translation.clone());
+    }
+    let mut replaced = 0usize;
+    let mut out = String::new();
+    let mut stack: Vec<(usize, String)> = Vec::new();
+    let mut block_body_indent: Option<usize> = None;
+    let lines: Vec<&str> = text.lines().collect();
+    let mut i = 0usize;
+    while i < lines.len() {
+        let line = lines[i];
+        let indent = line.len() - line.trim_start().len();
+        let t = line.trim_start();
+        // 处于被替换块标量的体内：丢弃（内容已并入单行引号标量）
+        if block_body_indent.map_or(false, |ind| t.is_empty() || indent > ind) {
+            i += 1;
+            continue;
+        }
+        block_body_indent = None;
+        if t.is_empty() || t.starts_with('#') || t == "---" {
+            out.push_str(line);
+            out.push('\n');
+            i += 1;
+            continue;
+        }
+        while let Some((ind, _)) = stack.last() {
+            if *ind >= indent {
+                stack.pop();
+            } else {
+                break;
+            }
+        }
+        match t.find(':') {
+            Some(pos) => {
+                let key_raw = &t[..pos];
+                let key = key_raw.trim().trim_matches('"').trim_matches('\'');
+                let raw_value = t[pos + 1..].trim();
+                if raw_value.is_empty() || raw_value.starts_with('#') {
+                    // 父键或键后直接注释：入栈，等待子键
+                    stack.push((indent, key.to_string()));
+                    out.push_str(line);
+                    out.push('\n');
+                    i += 1;
+                    continue;
+                }
+                stack.push((indent, key.to_string()));
+                let full = stack
+                    .iter()
+                    .map(|(_, k)| k.as_str())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                if let Some(tr) = map.get(&full).cloned() {
+                    if raw_value == "|" || raw_value == "|-" || raw_value == ">" || raw_value == ">-" {
+                        block_body_indent = Some(indent);
+                        out.push_str(&format!(
+                            "{}{}: {}\n",
+                            " ".repeat(indent),
+                            key_raw.trim(),
+                            yaml_quote(&tr)
+                        ));
+                    } else {
+                        out.push_str(&format!(
+                            "{}{}: {}\n",
+                            " ".repeat(indent),
+                            key_raw.trim(),
+                            yaml_value(&tr, raw_value)
+                        ));
+                    }
+                    replaced += 1;
+                    map.remove(&full);
+                } else {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+            None => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        i += 1;
+    }
+    let skipped = map.len();
+    (out, replaced, skipped)
+}
+
+/// 译文是否必须加引号才符合 YAML 纯量规则
+fn yaml_needs_quote(s: &str) -> bool {
+    if s.is_empty() {
+        return true;
+    }
+    if s != s.trim() {
+        return true;
+    }
+    if s.contains('\n') || s.contains(": ") || s.contains(" #") || s.contains('"') {
+        return true;
+    }
+    matches!(
+        s.chars().next(),
+        Some(
+            '-' | '?'
+                | ':'
+                | ','
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '#'
+                | '&'
+                | '*'
+                | '!'
+                | '|'
+                | '>'
+                | '\''
+                | '"'
+                | '%'
+                | '@'
+                | '`'
+        )
+    ) || matches!(s.chars().next_back(), Some(':'))
+}
+
+/// 按原值的引号风格写出译文
+fn yaml_value(tr: &str, raw_value: &str) -> String {
+    if raw_value.starts_with('"') {
+        yaml_quote(tr)
+    } else if raw_value.starts_with('\'') {
+        format!("'{}'", tr.replace('\'', "''"))
+    } else if yaml_needs_quote(tr) {
+        yaml_quote(tr)
+    } else {
+        tr.to_string()
+    }
+}
+
+/// 双引号 YAML 标量（转义 \ " 与换行）
+fn yaml_quote(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// properties 保序回写：仅替换命中键的值，注释与键原样保留（UTF-8 直写）
+fn rewrite_properties_text(text: &str, items: &[&PluginExportItem]) -> (String, usize, usize) {
+    let mut map: HashMap<String, String> = HashMap::new();
+    for it in items {
+        map.insert(it.key_path.clone(), it.translation.clone());
+    }
+    let mut replaced = 0usize;
+    let mut skipped = map.len();
+    let mut out = String::new();
+    for line in text.lines() {
+        let t = line.trim_start();
+        let indent_len = line.len() - t.len();
+        if t.is_empty() || t.starts_with('#') || t.starts_with('!') {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        let pos = match t.find(|c| c == '=' || c == ':') {
+            Some(p) => p,
+            None => {
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+        };
+        let key = t[..pos].trim().to_string();
+        if let Some(tr) = map.remove(&key) {
+            // 保留 "key = value" 这类原始分隔符与空白
+            let after = &t[pos + 1..];
+            let lead_ws: String = after.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+            let lead = if lead_ws.is_empty() { " " } else { &lead_ws };
+            out.push_str(&format!("{}{}{}", &line[..indent_len + pos + 1], lead, tr));
+            out.push('\n');
+            replaced += 1;
+            skipped -= 1;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    (out, replaced, skipped)
+}
+
+/// JSON 回写：顶层键替换（插件语言 json 通常为扁平键值），pretty(2) 输出
+fn rewrite_json_text(text: &str, items: &[&PluginExportItem]) -> (String, usize, usize) {
+    let mut v: serde_json::Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(_) => return (text.to_string(), 0, items.len()),
+    };
+    let obj = match v.as_object_mut() {
+        Some(o) => o,
+        None => return (text.to_string(), 0, items.len()),
+    };
+    let mut replaced = 0usize;
+    let mut missing = items.len();
+    for it in items {
+        if let Some(slot) = obj.get_mut(&it.key_path) {
+            if slot.is_string() {
+                *slot = serde_json::Value::String(it.translation.clone());
+                replaced += 1;
+                missing -= 1;
+            }
+        }
+    }
+    let out = serde_json::to_string_pretty(&v).unwrap_or_else(|_| text.to_string());
+    (out, replaced, missing)
+}
+
+#[cfg(test)]
+mod plugin_export_tests {
+    use super::*;
+
+    fn item(fp: &str, kp: &str, tr: &str) -> PluginExportItem {
+        PluginExportItem {
+            file_path: fp.into(),
+            key_path: kp.into(),
+            translation: tr.into(),
+        }
+    }
+
+    #[test]
+    fn yaml_rewrite_preserves_format() {
+        let text = "# 主配置\nmessages:\n  welcome: \"&aWelcome!\"\n  bye: Goodbye\n  motd: |\n    line one\n    line two\nmysql:\n  host: localhost\n";
+        let items = vec![
+            item("config.yml", "messages.welcome", "&a欢迎！"),
+            item("config.yml", "messages.bye", "再见: 下次见"),
+            item("config.yml", "messages.motd", "第一行\n第二行"),
+            item("config.yml", "nope.missing", "x"),
+        ];
+        let refs: Vec<&PluginExportItem> = items.iter().collect();
+        let (out, replaced, skipped) = rewrite_yaml_text(text, &refs);
+        assert_eq!(replaced, 3);
+        assert_eq!(skipped, 1);
+        assert!(out.contains("# 主配置")); // 注释保留
+        assert!(out.contains("welcome: \"&a欢迎！\"")); // 原引号风格保留
+        assert!(out.contains("bye: \"再见: 下次见\"")); // 含冒号 → 自动加引号
+        assert!(out.contains("motd: \"第一行\\n第二行\"")); // 块标量转单行
+        assert!(!out.contains("line one")); // 原块体已替换
+        assert!(out.contains("mysql:") && out.contains("host: localhost")); // 未涉及部分原样
+    }
+
+    #[test]
+    fn plugin_export_round_trip_keeps_other_members() {
+        use std::io::Write;
+        use zip::ZipArchive;
+
+        // 构造插件 jar：配置（含注释与内部键）+ 二进制成员（须原样保留）
+        let src = std::env::temp_dir().join("plug_rt_src.jar");
+        let dst = std::env::temp_dir().join("plug_rt_dst.jar");
+        let binary: Vec<u8> = (0..512u32).map(|i| (i % 251) as u8).collect();
+        {
+            let f = File::create(&src).unwrap();
+            let mut w = zip::ZipWriter::new(f);
+            let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            w.start_file("plugin.yml", opts).unwrap();
+            w.write_all(b"name: RtPlugin
+version: 1.0
+description: A test plugin
+").unwrap();
+            w.start_file("config.yml", opts).unwrap();
+            w.write_all("# 头部注释
+messages:
+  welcome: \"&aWelcome!\"
+mysql:
+  host: localhost
+".as_bytes()).unwrap();
+            w.start_file("com/example/Test.class", opts).unwrap();
+            w.write_all(&binary).unwrap();
+            w.finish().unwrap();
+        }
+
+        let items = vec![
+            item("config.yml", "messages.welcome", "&a欢迎！"),
+            item("plugin.yml", "description", "测试插件"),
+        ];
+        let summary = export_plugin_jar(&src, &dst, &items).unwrap();
+        assert!(summary.contains("已写入 2"), "{}", summary);
+
+        // 校验产物：译文写入、注释保留、二进制成员字节一致、成员数不变
+        let f = File::open(&dst).unwrap();
+        let mut a = ZipArchive::new(f).unwrap();
+        let mut cfg = String::new();
+        a.by_name("config.yml").unwrap().read_to_string(&mut cfg).unwrap();
+        assert!(cfg.contains("# 头部注释"));
+        assert!(cfg.contains("welcome: \"&a欢迎！\""));
+        assert!(cfg.contains("host: localhost"));
+        let mut man = String::new();
+        a.by_name("plugin.yml").unwrap().read_to_string(&mut man).unwrap();
+        assert!(man.contains("description: 测试插件"));
+        let mut bin = Vec::new();
+        a.by_name("com/example/Test.class").unwrap().read_to_end(&mut bin).unwrap();
+        assert_eq!(bin, binary);
+        assert_eq!(a.len(), 3);
+
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_file(&dst).ok();
+    }
+
+    #[test]
+    fn properties_rewrite_hits_key() {
+        let text = "# msg\nwelcome = Hello\nprefix: [Server]\n";
+        let items = vec![
+            item("messages.properties", "welcome", "欢迎"),
+            item("messages.properties", "missing", "x"),
+        ];
+        let refs: Vec<&PluginExportItem> = items.iter().collect();
+        let (out, replaced, skipped) = rewrite_properties_text(text, &refs);
+        assert_eq!(replaced, 1);
+        assert_eq!(skipped, 1);
+        assert!(out.contains("welcome = 欢迎"));
+        assert!(out.contains("prefix: [Server]"));
+        assert!(out.contains("# msg"));
     }
 }

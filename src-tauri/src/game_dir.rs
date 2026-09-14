@@ -35,6 +35,8 @@ pub struct GameVersionGroup {
     pub mods: Vec<GamePackEntry>,
     pub resourcepacks: Vec<GamePackEntry>,
     pub shaderpacks: Vec<GamePackEntry>,
+    /// 服务器插件（服务器根目录 plugins/ 下）
+    pub plugins: Vec<GamePackEntry>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -58,7 +60,7 @@ fn scan_dir_packs(dir: &std::path::Path, kind: &str) -> Vec<GamePackEntry> {
                 .and_then(|x| x.to_str())
                 .map(|x| x.to_lowercase());
             let ok = match kind {
-                "mod" => ext.as_deref() == Some("jar"),
+                "mod" | "plugin" => ext.as_deref() == Some("jar"),
                 "shader" | "resourcepack" => ext.as_deref() == Some("zip"),
                 _ => false,
             };
@@ -80,10 +82,78 @@ fn scan_dir_packs(dir: &std::path::Path, kind: &str) -> Vec<GamePackEntry> {
     out
 }
 
+/// 按 jar 清单内容判定类型（文件夹名仅作为识别失败时的兜底）：
+/// 插件清单 → plugin；模组清单 → mod。避免把插件当模组解析导致后续失败
+fn detect_jar_kind(p: &std::path::Path, hint: &str) -> &'static str {
+    match crate::core::pack::detect_pack_type(p) {
+        Ok(crate::core::pack::PackType::Plugin) => "plugin",
+        Ok(crate::core::pack::PackType::Mod) => "mod",
+        _ => {
+            if hint == "plugins" {
+                "plugin"
+            } else {
+                "mod"
+            }
+        }
+    }
+}
+
+/// 扫描目录下的 jar，按内容拆分为（模组, 插件）两组。
+/// mods/ 里误放的插件、plugins/ 里误放的模组都能被正确打标签。
+fn scan_dir_jars_typed(
+    dir: &std::path::Path,
+    hint: &str,
+) -> (Vec<GamePackEntry>, Vec<GamePackEntry>) {
+    let mut mods = Vec::new();
+    let mut plugins = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_file() {
+                continue;
+            }
+            let is_jar = p
+                .extension()
+                .and_then(|x| x.to_str())
+                .map(|x| x.eq_ignore_ascii_case("jar"))
+                .unwrap_or(false);
+            if !is_jar {
+                continue;
+            }
+            let kind = detect_jar_kind(&p, hint);
+            let entry = GamePackEntry {
+                path: p.to_string_lossy().to_string(),
+                file_name: p
+                    .file_name()
+                    .map(|x| x.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                size: e.metadata().map(|m| m.len()).unwrap_or(0),
+                kind: kind.to_string(),
+            };
+            if kind == "plugin" {
+                plugins.push(entry);
+            } else {
+                mods.push(entry);
+            }
+        }
+    }
+    let cmp = |a: &GamePackEntry, b: &GamePackEntry| {
+        a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase())
+    };
+    mods.sort_by(cmp);
+    plugins.sort_by(cmp);
+    (mods, plugins)
+}
+
 /// 直接扫描目录内的内容包文件（文件夹名作为分类提示，名称不匹配时读 zip 内容判定）
 fn scan_dir_packs_direct(
     dir: &std::path::Path,
-) -> (Vec<GamePackEntry>, Vec<GamePackEntry>, Vec<GamePackEntry>) {
+) -> (
+    Vec<GamePackEntry>,
+    Vec<GamePackEntry>,
+    Vec<GamePackEntry>,
+    Vec<GamePackEntry>,
+) {
     let name_hint = dir
         .file_name()
         .and_then(|n| n.to_str())
@@ -93,6 +163,7 @@ fn scan_dir_packs_direct(
     let mut mods = Vec::new();
     let mut rps = Vec::new();
     let mut sps = Vec::new();
+    let mut pls = Vec::new();
 
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
@@ -106,20 +177,19 @@ fn scan_dir_packs_direct(
                 .map(|x| x.to_lowercase());
 
             let kind: &str = match (name_hint.as_str(), ext.as_deref()) {
-                // 文件夹名为 mods → .jar = mod
-                ("mods", Some("jar")) => "mod",
+                // 任意文件夹下的 .jar：读清单判定模组 / 插件（文件名不可靠时以内容为准）
+                (hint, Some("jar")) => detect_jar_kind(&p, hint),
                 // 文件夹名为 resourcepacks → .zip = resourcepack
                 ("resourcepacks", Some("zip")) => "resourcepack",
                 // 文件夹名为 shaderpacks → .zip = shader
                 ("shaderpacks", Some("zip")) => "shader",
-                // 通用文件夹：.jar = mod
-                (_, Some("jar")) => "mod",
                 // 通用文件夹：.zip → 读 zip 中央目录判定类型
                 (_, Some("zip")) => {
                     match crate::core::pack::detect_pack_type(&p) {
                         Ok(crate::core::pack::PackType::Shader) => "shader",
                         Ok(crate::core::pack::PackType::ResourcePack) => "resourcepack",
                         Ok(crate::core::pack::PackType::Mod) => "mod",
+                        Ok(crate::core::pack::PackType::Plugin) => "plugin",
                         Err(_) => "resourcepack", // 无法识别时默认资源包
                     }
                 }
@@ -139,6 +209,7 @@ fn scan_dir_packs_direct(
                 "mod" => mods.push(entry),
                 "resourcepack" => rps.push(entry),
                 "shader" => sps.push(entry),
+                "plugin" => pls.push(entry),
                 _ => {}
             }
         }
@@ -148,10 +219,11 @@ fn scan_dir_packs_direct(
         a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase())
     };
     mods.sort_by(cmp);
-    rps.sort_by(|a, b| a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase()));
-    sps.sort_by(|a, b| a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase()));
+    rps.sort_by(cmp);
+    sps.sort_by(cmp);
+    pls.sort_by(cmp);
 
-    (mods, rps, sps)
+    (mods, rps, sps, pls)
 }
 
 /// 递归向下扫描：找到所有含 mods / resourcepacks / shaderpacks 的文件夹作为版本分组
@@ -165,27 +237,32 @@ fn collect_groups(
     if depth > 5 || GAME_SCAN_CANCEL.load(Ordering::Relaxed) {
         return false;
     }
-    let mut mods = scan_dir_packs(&dir.join("mods"), "mod");
+    let (mut mods, mut pls) = scan_dir_jars_typed(&dir.join("mods"), "mods");
+    let (extra_mods, extra_pls) = scan_dir_jars_typed(&dir.join("plugins"), "plugins");
+    mods.extend(extra_mods);
+    pls.extend(extra_pls);
     let mut rps = scan_dir_packs(&dir.join("resourcepacks"), "resourcepack");
     let mut sps = scan_dir_packs(&dir.join("shaderpacks"), "shader");
     // 仅扫描根目录：把根文件夹直接包含的 .jar/.zip 并入根分组
     // （用户直接指向 mods 等内容包文件夹时也能识别；子层级不扫描，避免把
     //   processedMods 等杂文件夹误判为版本分组）
     if depth == 0 {
-        let (dm, dr, ds) = scan_dir_packs_direct(dir);
-        if !dm.is_empty() || !dr.is_empty() || !ds.is_empty() {
+        let (dm, dr, ds, dp) = scan_dir_packs_direct(dir);
+        if !dm.is_empty() || !dr.is_empty() || !ds.is_empty() || !dp.is_empty() {
             mods.extend(dm);
             rps.extend(dr);
             sps.extend(ds);
+            pls.extend(dp);
             let cmp = |a: &GamePackEntry, b: &GamePackEntry| {
                 a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase())
             };
             mods.sort_by(cmp);
             rps.sort_by(cmp);
             sps.sort_by(cmp);
+            pls.sort_by(cmp);
         }
     }
-    let has = !mods.is_empty() || !rps.is_empty() || !sps.is_empty();
+    let has = !mods.is_empty() || !rps.is_empty() || !sps.is_empty() || !pls.is_empty();
 
     if has {
         let dir_name = rel.split('/').next_back().unwrap_or(rel).to_string();
@@ -199,6 +276,7 @@ fn collect_groups(
             mods,
             resourcepacks: rps,
             shaderpacks: sps,
+            plugins: pls,
         });
         let _ = app.emit(
             "game-scan-progress",
@@ -286,7 +364,10 @@ pub async fn scan_game_dir(app: AppHandle, root: String) -> Result<GameDirScan, 
 
     // 空分组（无内容包）不返回；公共目录（""）排最前；其余按路径排序
     groups.retain(|g| {
-        !g.mods.is_empty() || !g.resourcepacks.is_empty() || !g.shaderpacks.is_empty()
+        !g.mods.is_empty()
+            || !g.resourcepacks.is_empty()
+            || !g.shaderpacks.is_empty()
+            || !g.plugins.is_empty()
     });
     for g in &mut groups {
         if !g.rel_path.is_empty() {
@@ -315,4 +396,69 @@ pub fn cancel_game_scan() {
 #[tauri::command]
 pub fn path_is_dir(path: String) -> bool {
     std::path::Path::new(&path).is_dir()
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_jar(path: &std::path::Path, files: &[(&str, &str)]) {
+        let f = std::fs::File::create(path).unwrap();
+        let mut w = zip::ZipWriter::new(f);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, content) in files {
+            w.start_file(*name, opts).unwrap();
+            w.write_all(content.as_bytes()).unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    /// 回归：文件夹名与内容不一致时以内容为准
+    /// （用户把插件放在名为"下载"的文件夹里，此前被当成模组，导致解析失败后包丢失）
+    #[test]
+    fn direct_scan_detects_plugin_by_manifest_not_folder_name() {
+        let dir = std::env::temp_dir().join("gd_scan_plugin_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_jar(
+            &dir.join("LuckPerms.jar"),
+            &[("plugin.yml", "name: LuckPerms
+version: 5.4
+main: me.lucko.Main
+")],
+        );
+        write_jar(
+            &dir.join("RealMod.jar"),
+            &[(
+                "fabric.mod.json",
+                r#"{"id":"realmod","name":"Real Mod","version":"1.0"}"#,
+            )],
+        );
+
+        let (mods, rps, sps, plugins) = scan_dir_packs_direct(&dir);
+        assert_eq!(plugins.len(), 1, "插件应被识别为插件");
+        assert_eq!(plugins[0].file_name, "LuckPerms.jar");
+        assert_eq!(mods.len(), 1, "模组仍识别为模组");
+        assert_eq!(mods[0].file_name, "RealMod.jar");
+        assert!(rps.is_empty() && sps.is_empty());
+
+        // mods/ 里误放的插件：也要归到插件组
+        let mods_dir = dir.join("mods");
+        std::fs::create_dir_all(&mods_dir).unwrap();
+        write_jar(
+            &mods_dir.join("Misplaced.jar"),
+            &[("plugin.yml", "name: Misplaced
+main: x.Y
+")],
+        );
+        let (m2, p2) = scan_dir_jars_typed(&mods_dir, "mods");
+        assert_eq!(m2.len(), 0);
+        assert_eq!(p2.len(), 1);
+        assert_eq!(p2[0].kind, "plugin");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

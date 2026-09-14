@@ -28,10 +28,12 @@ export interface LangEntry {
   translating?: boolean;
   placeholders: string[];
   notes: string[];
+  /** 深度扫描分组 key（仅深度扫描条目有；前端按 key 做分组勾选，不依赖文案） */
+  deepGroup?: string;
 }
 
 /** 内容包类型 */
-export type PackType = "mod" | "shader" | "resourcepack";
+export type PackType = "mod" | "shader" | "resourcepack" | "plugin";
 
 export interface ModFile {
   fileName: string;  modName: string;
@@ -44,6 +46,89 @@ export interface ModFile {
   hasZh?: boolean;
   /** 自带中文条数 */
   zhCount?: number;
+  entries: LangEntry[];
+}
+
+/** 深度扫描：一条自定义规则 */
+export interface CustomRule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  kind: "ext" | "fileGlob" | "pathGlob" | "textRegex";
+  pattern: string;
+  action: "include" | "exclude";
+  source?: "user" | "imported";
+}
+
+/** 深度扫描：一套规则 */
+export interface DeepScanRules {
+  /** 总开关：导入时对解析为空的内容包自动强化扫描 */
+  auto: boolean;
+  scopeJson: boolean;
+  scopeLang: boolean;
+  scopeText: boolean;
+  scopeNested: boolean;
+  scopeClass: boolean;
+  skipMeta: boolean;
+  /** 不可关闭（语言文件由常规解析处理） */
+  skipLangfiles: boolean;
+  skipLibs: boolean;
+  onlySourceLocale: boolean;
+  /** 不可关闭（含中文一律保留） */
+  keepCjk: boolean;
+  dropSql: boolean;
+  dropDescriptor: boolean;
+  dropLog: boolean;
+  dropIdent: boolean;
+  classNeedsMarker: boolean;
+  custom: CustomRule[];
+}
+
+/** 深度扫描：模组 / 插件两套 */
+export interface DeepScanSettings {
+  mod: DeepScanRules;
+  plugin: DeepScanRules;
+}
+
+/** 内置规则元数据（由后端下发，避免规则名前后端漂移） */
+export interface RuleMetaItem {
+  id: keyof DeepScanRules | string;
+  group: "scope" | "path" | "filter";
+  key: string;
+  locked: boolean;
+  defaultMod: boolean;
+  defaultPlugin: boolean;
+}
+
+export interface RuleMeta {
+  rules: RuleMetaItem[];
+  templates: string[];
+  maxCustom: number;
+  maxPatternLen: number;
+}
+
+/** 规则测试台预览结果 */
+export interface DeepScanPreview {
+  total: number;
+  groups: { key: string; label: string; count: number; defaultChecked: boolean }[];
+  samples: { source: string; filePath: string; group: string }[];
+}
+
+/** 单包级深度扫描覆盖（只存与全局规则的差异） */
+export interface DeepScanOverride {
+  rules?: Partial<DeepScanRules>;
+  /** 单包处只允许切换自定义规则的启用状态，不能新增/编辑 */
+  customEnabled?: Record<string, boolean>;
+}
+
+/** 服务器插件 jar 解析结果 */
+export interface PluginFile {
+  fileName: string;
+  /** 插件名（plugin.yml 的 name） */
+  pluginName: string;
+  version: string | null;
+  hasZh: boolean;
+  zhCount: number;
   entries: LangEntry[];
 }
 
@@ -81,8 +166,8 @@ export interface TranslateContext {
   modid: string;
   mcVersion: string | null;
   loader: string;
-  /** 内容包类型：mod / shader / resourcepack（决定翻译提示词） */
-  packType: "mod" | "shader" | "resourcepack";
+  /** 内容包类型：mod / shader / resourcepack / plugin（决定翻译提示词） */
+  packType: "mod" | "shader" | "resourcepack" | "plugin";
   /** 用户自定义可编辑提示词段（null = 用默认） */
   customPrompt: string | null;
   userGlossary: [string, string][];
@@ -98,6 +183,35 @@ export interface PromptTemplate {
 export interface UpdateInfo {
   latestVersion: string;
   url: string;
+}
+
+/** 软件自身数据的一项（「关于」页的存储明细） */
+export interface StorageItem {
+  group: "cache" | "user";
+  /** 文件名 / 目录名（相对软件数据目录） */
+  name: string;
+  path: string;
+  bytes: number;
+}
+
+/** 软件自身数据占用（缓存与用户数据分开统计） */
+export interface StorageUsage {
+  configDir: string;
+  localDir: string;
+  /** WebView2 配置目录（浏览器缓存与界面状态的存放处） */
+  profileDir: string;
+  cacheBytes: number;
+  userBytes: number;
+  cacheItems: StorageItem[];
+  userItems: StorageItem[];
+}
+
+/** 清理结果 */
+export interface ClearResult {
+  freedBytes: number;
+  removed: string[];
+  /** 被占用而跳过的条目（正常关闭软件后再清一次即可） */
+  skipped: string[];
 }
 
 /** 深度扫描分组（前端分组勾选视图） */
@@ -170,13 +284,18 @@ export interface Settings {
   /** 自定义提示词（key: mod/shader/resourcepack → 用户自定义的可编辑段） */
   customPrompts: Record<string, string>;
   /** 深度文本扫描：普通解析为空时自动启用强化扫描 */
-  deepScan: boolean;
+  /** 深度扫描规则：模组与插件各自独立（旧 deepScan/deepScanPlugin 布尔已迁移进 rules.auto） */
+  deepScanRules?: DeepScanSettings;
   /** 主题模式：light（亮色）/ dark（暗色） */
   theme: 'light' | 'dark';
   /** 界面语言：zh（中文）/ en（英文） */
   language: 'zh' | 'en';
   /** 主窗口关闭行为：exit 直接退出 / minimize 最小化到托盘 */
   closeBehavior: 'exit' | 'minimize';
+  /** 导出命名偏好：raw 原名 / suffix 原名_zh_cn（默认）/ ai AI 汉化名称 */
+  exportNaming?: 'raw' | 'suffix' | 'ai';
+  /** AI 汉化名称缓存（key = "文件名|大小"） */
+  aiNames?: Record<string, string>;
   /** 最近打开的游戏目录（游戏目录模式快速重选） */
   recentGameDirs: string[];
 }
@@ -186,7 +305,7 @@ export interface GamePackEntry {
   path: string;
   fileName: string;
   size: number;
-  kind: 'mod' | 'shader' | 'resourcepack';
+  kind: 'mod' | 'shader' | 'resourcepack' | 'plugin';
 }
 
 export interface GameVersionGroup {
@@ -200,6 +319,8 @@ export interface GameVersionGroup {
   mods: GamePackEntry[];
   resourcepacks: GamePackEntry[];
   shaderpacks: GamePackEntry[];
+  /** 服务器插件（服务器根目录 plugins/ 下） */
+  plugins: GamePackEntry[];
 }
 
 export interface GameDirScan {

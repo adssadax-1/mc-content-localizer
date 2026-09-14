@@ -1,6 +1,6 @@
 [package]
 name = "mc-content-localizer"
-version = "3.0.0"
+version = "3.1.0"
 description = "MC 汉化工坊：Minecraft 模组/光影包/资源包 AI 汉化工具"
 authors = ["you"]
 edition = "2021"
@@ -33,5 +33,6 @@ zip = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 thiserror = "2"
 regex = "1"
+yaml-rust2 = "0.10"
 tokio = { version = "1", features = ["time"] }
 zhconv = "0.3"

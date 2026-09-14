@@ -19,6 +19,8 @@ use super::placeholder;
 pub enum PackType {
     /// 模组 jar
     Mod,
+    /// 服务器插件 jar（Bukkit/Spigot/Paper/BungeeCord/Velocity 等）
+    Plugin,
     /// 光影包 zip
     Shader,
     /// 资源包 zip
@@ -113,6 +115,7 @@ pub fn detect_pack_type(path: &Path) -> Result<PackType, PackError> {
     let mut has_shader_lang = false;
     let mut has_mcmeta = false;
     let mut has_mod_meta = false;
+    let mut has_plugin_manifest = false;
     let mut has_jar_assets = false;
 
     let names: Vec<String> = (0..archive.len())
@@ -126,6 +129,13 @@ pub fn detect_pack_type(path: &Path) -> Result<PackType, PackError> {
             has_shader_props = true;
         } else if name.starts_with("shaders/lang/") && name.ends_with(".lang") {
             has_shader_lang = true;
+        } else if name == "plugin.yml"
+            || name == "paper-plugin.yml"
+            || name == "bungee.yml"
+            || name == "velocity-plugin.json"
+            || name == "META-INF/sponge_plugins.json"
+        {
+            has_plugin_manifest = true;
         } else if name == "pack.mcmeta" {
             has_mcmeta = true;
         } else if name == "fabric.mod.json"
@@ -144,6 +154,9 @@ pub fn detect_pack_type(path: &Path) -> Result<PackType, PackError> {
     // 优先级：光影 > 模组（有 mod 元数据，即使带 pack.mcmeta 也是模组）> 资源包 > 模组（assets lang）
     if has_shader_props || has_shader_lang {
         return Ok(PackType::Shader);
+    }
+    if has_plugin_manifest {
+        return Ok(PackType::Plugin);
     }
     if has_mod_meta {
         return Ok(PackType::Mod);
@@ -276,6 +289,7 @@ pub fn parse_shader_pack(path: &Path) -> Result<ShaderPack, PackError> {
             } else {
                 Vec::new()
             },
+            deep_group: None,
         });
         if has_existing {
             zh_count += 1;
@@ -344,6 +358,7 @@ pub fn parse_resource_pack(path: &Path) -> Result<ResourcePackInfo, PackError> {
             translating: false,
             placeholders: placeholder::extract_placeholders(line),
             notes: vec!["资源包描述".to_string()],
+            deep_group: None,
         });
     }
 
@@ -758,6 +773,7 @@ mod tests {
             translating: false,
             placeholders: vec![],
             notes: vec![],
+            deep_group: None,
         };
         let dest = std::env::temp_dir().join("sh_dest.zip");
         export_shader_zh(&src, &dest, &[e]).unwrap();
@@ -804,6 +820,7 @@ mod tests {
             translating: false,
             placeholders: vec![],
             notes: vec![],
+            deep_group: None,
         };
         let dest = std::env::temp_dir().join("rp_dest.zip");
         export_resource_pack_desc(&src, &dest, &[e]).unwrap();
