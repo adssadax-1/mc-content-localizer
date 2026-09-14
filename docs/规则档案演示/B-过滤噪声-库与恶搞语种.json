@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "kind": "plugin",
+  "name": "演示B · 过滤噪声（打包库 + 恶搞语种 + 文本白名单）",
+  "note": "三条「排除」规则砍掉打包进来的库类与恶搞语种文件，再用一条文本正则白名单只留带 %变量% / {0} / &a 颜色码的玩家可见文本。",
+  "rules": {
+    "auto": false,
+    "scopeJson": true,
+    "scopeLang": true,
+    "scopeText": true,
+    "scopeNested": true,
+    "scopeClass": true,
+    "skipMeta": true,
+    "skipLangfiles": true,
+    "skipLibs": true,
+    "onlySourceLocale": true,
+    "keepCjk": true,
+    "dropSql": true,
+    "dropDescriptor": true,
+    "dropLog": true,
+    "dropIdent": true,
+    "classNeedsMarker": true,
+    "custom": [
+      {
+        "id": "b1",
+        "name": "跳过打包进来的 CoreUtils 库",
+        "enabled": true,
+        "kind": "pathGlob",
+        "pattern": "com/github/joelgodofwar/sps/lib/**",
+        "action": "exclude",
+        "source": "user"
+      },
+      {
+        "id": "b2",
+        "name": "跳过打包进来的 org.json 库",
+        "enabled": true,
+        "kind": "pathGlob",
+        "pattern": "org/json/**",
+        "action": "exclude",
+        "source": "user"
+      },
+      {
+        "id": "b3",
+        "name": "跳过恶搞语种 lol_US",
+        "enabled": true,
+        "kind": "fileGlob",
+        "pattern": "*lol_us*",
+        "action": "exclude",
+        "source": "user"
+      },
+      {
+        "id": "b4",
+        "name": "只留带占位符或颜色码的文本",
+        "enabled": true,
+        "kind": "textRegex",
+        "pattern": "%[a-z_]+%|\\{[0-9]+\\}|&[0-9a-fk-or]",
+        "action": "include",
+        "source": "user"
+      }
+    ]
+  }
+}

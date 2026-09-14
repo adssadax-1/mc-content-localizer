@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "kind": "plugin",
+  "name": "演示A · 收窄范围（语言目录 + 消息文件）",
+  "note": "两条「包含」规则合成白名单：只扫 lang/ 目录与 messages.yml，其余文件不进深度扫描。适合「只想核对语言文件有没有漏翻」的场景。",
+  "rules": {
+    "auto": false,
+    "scopeJson": true,
+    "scopeLang": true,
+    "scopeText": true,
+    "scopeNested": true,
+    "scopeClass": true,
+    "skipMeta": true,
+    "skipLangfiles": true,
+    "skipLibs": true,
+    "onlySourceLocale": true,
+    "keepCjk": true,
+    "dropSql": true,
+    "dropDescriptor": true,
+    "dropLog": true,
+    "dropIdent": true,
+    "classNeedsMarker": true,
+    "custom": [
+      {
+        "id": "a1",
+        "name": "只扫语言目录 lang/**",
+        "enabled": true,
+        "kind": "pathGlob",
+        "pattern": "lang/**",
+        "action": "include",
+        "source": "user"
+      },
+      {
+        "id": "a2",
+        "name": "只扫消息文件 messages.yml",
+        "enabled": true,
+        "kind": "fileGlob",
+        "pattern": "*messages.yml",
+        "action": "include",
+        "source": "user"
+      }
+    ]
+  }
+}
