@@ -85,6 +85,10 @@ export const api = {
 
   loadSettings: () => invoke<Settings>("load_settings"),
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
+  /** 增量保存：只覆盖 patch 里出现的键（对象递归合并），其余原样保留。
+   *  各处保存自己那部分设置时必须用它——整份写回会把别处刚写入的内容覆盖掉。 */
+  patchSettings: (patch: Record<string, unknown>) =>
+    invoke<void>("patch_settings", { patch }),
 
   /** 判定内容包类型（mod/shader/resourcepack） */
   detectPackType: (path: string) => invoke<PackType>("detect_pack_type", { path }),

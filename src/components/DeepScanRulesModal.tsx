@@ -358,10 +358,14 @@ export function DeepScanRulesModal({
               })
             : t("settings.deepScan.customized")}
         </Tag>
-        <Divider type="vertical" />
-        <Button size="small" icon={<UploadOutlined />} onClick={() => void importProfile()}>
-          {t("settings.deepScan.importProfile")}
-        </Button>
+        {!customReadOnly && (
+          <>
+            <Divider type="vertical" />
+            <Button size="small" icon={<UploadOutlined />} onClick={() => void importProfile()}>
+              {t("settings.deepScan.importProfile")}
+            </Button>
+          </>
+        )}
         <Button size="small" icon={<DownloadOutlined />} onClick={() => void exportProfile()}>
           {t("settings.deepScan.exportProfile")}
         </Button>
@@ -451,7 +455,13 @@ export function DeepScanRulesModal({
                   />
                 )}
                 {rules.custom.length === 0 && (
-                  <Typography.Text type="secondary">{t("settings.deepScan.customEmpty")}</Typography.Text>
+                  <Typography.Text type="secondary">
+                    {t(
+                      customReadOnly
+                        ? "settings.deepScan.customEmptyPack"
+                        : "settings.deepScan.customEmpty",
+                    )}
+                  </Typography.Text>
                 )}
                 {rules.custom.map((r) => (
                   <div
@@ -470,16 +480,16 @@ export function DeepScanRulesModal({
                       {r.pattern}
                     </Typography.Text>
                     <Tag>{r.action === "include" ? t("settings.deepScan.actInclude") : t("settings.deepScan.actExclude")}</Tag>
-                    <Button
-                      size="small"
-                      disabled={customReadOnly}
-                      onClick={() => setEditing({ ...r })}
-                    >
-                      {t("settings.deepScan.edit")}
-                    </Button>
-                    <Button size="small" danger disabled={customReadOnly} onClick={() => removeRule(r.id)}>
-                      {t("settings.deepScan.remove")}
-                    </Button>
+                    {!customReadOnly && (
+                      <>
+                        <Button size="small" onClick={() => setEditing({ ...r })}>
+                          {t("settings.deepScan.edit")}
+                        </Button>
+                        <Button size="small" danger onClick={() => removeRule(r.id)}>
+                          {t("settings.deepScan.remove")}
+                        </Button>
+                      </>
+                    )}
                   </div>
                 ))}
                 <Divider style={{ margin: "10px 0" }} />

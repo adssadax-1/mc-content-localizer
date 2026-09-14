@@ -496,7 +496,11 @@ export function SettingsModal({
       ...(v.providerModelOptions ?? {}),
       [v.provider]: modelOptions,
     };
-    const next: Settings = {
+    // 表单负责的键；深度扫描规则 / 提示词 / AI 命名缓存不在此列（它们各自即时保存）
+    const formPart: Omit<
+      Settings,
+      "deepScanRules" | "customPrompts" | "aiNames" | "recentGameDirs"
+    > = {
       provider: {
         provider: v.provider,
         apiKey: v.apiKey.trim(),
@@ -520,23 +524,19 @@ export function SettingsModal({
         requestIntervalSec: Math.min(Math.max(v.requestIntervalSec ?? 4, 1), 60),
       },
       packParallelEnabled: v.packParallelEnabled ?? false,
-      recentGameDirs: settings?.recentGameDirs ?? [],
       packParallelCount: Math.max(v.packParallelCount ?? 2, 0),
       theme: v.theme === "dark" ? "dark" : "light",
       language: v.language === "en" ? "en" : "zh",
       closeBehavior: v.closeBehavior === "minimize" ? "minimize" : "exit",
       exportNaming:
         v.exportNaming === "raw" || v.exportNaming === "ai" ? v.exportNaming : "suffix",
-      // 深度扫描规则：弹窗内即时保存，这里原样带过，避免保存设置时丢失
-      deepScanRules: settings?.deepScanRules,
-      customPrompts: settings?.customPrompts ?? {},
-      // AI 汉化名称缓存：设置界面不编辑，保存时原样带过
-      aiNames: settings?.aiNames ?? {},
     };
     try {
-      await api.saveSettings(next);
+      // 增量保存：只写表单里的这些键。深度扫描规则、提示词、AI 命名缓存由各自的
+      // 入口即时保存，绝不在这里整份写回（否则会用过期的内存快照把它们覆盖掉）
+      await api.patchSettings(formPart as unknown as Record<string, unknown>);
       message.success(t("settings.msg.saved"));
-      onSaved(next);
+      if (settings) onSaved({ ...settings, ...formPart });
       onClose();
     } catch (e) {
       message.error(String(e));
@@ -1292,7 +1292,10 @@ ${storage?.profileDir ?? ""}` }}
               ? { ...settings, deepScanRules: { ...settings.deepScanRules, plugin: rules } }
               : { ...settings, deepScanRules: { ...settings.deepScanRules, mod: rules } };
           try {
-            await api.saveSettings(next);
+            // 增量保存：只覆盖这一侧的规则（含自定义规则），其它设置一律不动
+            await api.patchSettings({
+              deepScanRules: { [deepScanEditor ?? "mod"]: rules },
+            });
             onSaved(next);
             message.success(t("settings.msg.saved"));
           } catch (e) {

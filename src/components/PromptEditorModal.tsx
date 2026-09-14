@@ -85,17 +85,24 @@ export function PromptEditorModal({ open, settings, onClose, onSaved }: Props) {
 
   const isCustomized = !!custom && custom !== template?.editableDefault;
 
-  function handleSave() {
+  async function handleSave() {
     if (!settings || !template) return;
-    const next = { ...settings, customPrompts: { ...(settings.customPrompts ?? {}) } };
+    const customPrompts = { ...(settings.customPrompts ?? {}) };
     const trimmed = edited.trim();
     if (!trimmed || trimmed === template.editableDefault) {
       // 等于默认或清空 → 视为使用默认（删掉自定义）
-      delete next.customPrompts[activeType];
+      delete customPrompts[activeType];
     } else {
-      next.customPrompts[activeType] = edited;
+      customPrompts[activeType] = edited;
     }
-    onSaved(next);
+    try {
+      // 即时落盘：只 patch 提示词这一项，不整份写回（否则会用过期快照覆盖别处刚保存的内容）
+      await api.patchSettings({ customPrompts });
+    } catch (e) {
+      message.error(String(e));
+      return;
+    }
+    onSaved({ ...settings, customPrompts });
     messageSaved();
   }
 

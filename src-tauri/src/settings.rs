@@ -193,10 +193,23 @@ pub fn close_minimize_enabled() -> bool {
 
 impl Settings {
     pub fn load(path: &Path) -> Self {
-        let mut s: Self = fs::read_to_string(path)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default();
+        let text = fs::read_to_string(path).ok();
+        let mut s: Self = match text.as_deref().map(serde_json::from_str::<Self>) {
+            Some(Ok(v)) => v,
+            Some(Err(_)) => {
+                // 文件存在但解析失败（旧版本写过不兼容的结构、或文件被外部改坏）：
+                // 先把原文件改名留档，再退回默认值。否则后续任何一次保存都会把
+                // 用户的 API Key / 规则 / 术语表永久覆盖掉，且无从察觉。
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let backup = path.with_file_name(format!("settings.corrupt-{stamp}.json"));
+                let _ = fs::rename(path, &backup);
+                Self::default()
+            }
+            None => Self::default(),
+        };
         s.migrate();
         s
     }
@@ -230,6 +243,30 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 损坏的设置文件必须被改名留档（否则一次读取失败 + 一次保存就把用户数据清空）
+    #[test]
+    fn corrupt_settings_file_is_backed_up_not_overwritten() {
+        let dir = std::env::temp_dir().join("settings_corrupt_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        fs::write(&path, "{ this is not json ").unwrap();
+
+        let loaded = Settings::load(&path);
+        assert_eq!(loaded.theme, Settings::default().theme, "解析失败应退回默认值");
+        assert!(!path.exists(), "原文件应被移走留档");
+        let backups: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with("settings.corrupt-"))
+            .collect();
+        assert_eq!(backups.len(), 1, "应生成一个留档文件，实际：{backups:?}");
+        let kept = fs::read_to_string(dir.join(&backups[0])).unwrap();
+        assert!(kept.contains("not json"), "留档内容必须是原始文本");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn migrates_legacy_flags_into_rules() {

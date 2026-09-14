@@ -1547,17 +1547,19 @@ function AppInner({
         message.info("深度扫描未发现更多可翻译文本，请在卡片上确认文本格式或类型是否受支持");
       }
       // “以后自动深度扫描”写回全局设置
-      const autoOn = settings?.deepScanRules?.mod?.auto && settings?.deepScanRules?.plugin?.auto;
-      if (decided.autoDeep && settings?.deepScanRules && !autoOn) {
+      const cur = settingsRef.current;
+      const autoOn = cur?.deepScanRules?.mod?.auto && cur?.deepScanRules?.plugin?.auto;
+      if (decided.autoDeep && cur?.deepScanRules && !autoOn) {
         const next = {
-          ...settings,
+          ...cur,
           deepScanRules: {
-            mod: { ...settings.deepScanRules.mod, auto: true },
-            plugin: { ...settings.deepScanRules.plugin, auto: true },
+            mod: { ...cur.deepScanRules.mod, auto: true },
+            plugin: { ...cur.deepScanRules.plugin, auto: true },
           },
         };
         try {
-          await api.saveSettings(next);
+          // 增量保存：只覆盖 deepScanRules，不碰其它键（整份写回会覆盖别处刚保存的内容）
+          await api.patchSettings({ deepScanRules: next.deepScanRules });
           setSettings(next);
         } catch {
           /* 忽略 */
@@ -2011,7 +2013,8 @@ function AppInner({
     }
     // 2. 加入勾选的术语（提取的 + 建议的合并去重，已在术语表中的跳过）
     const picked = new Set([...extractedChecked, ...suggestChecked]);
-    const already = new Set((settings.userGlossary ?? []).map(([en]) => en.toLowerCase()));
+    const glossaryBase = settingsRef.current ?? settings;
+    const already = new Set((glossaryBase.userGlossary ?? []).map(([en]) => en.toLowerCase()));
     const seen = new Map<string, string>();
     for (const [en, zh] of [...(extractedGlossary ?? []), ...(glossarySuggest ?? [])]) {
       if (!picked.has(en) || already.has(en.toLowerCase()) || seen.has(en)) continue;
@@ -2019,11 +2022,11 @@ function AppInner({
     }
     if (seen.size > 0) {
       const next = {
-        ...settings,
-        userGlossary: [...(settings.userGlossary ?? []), ...seen.entries()],
+        ...glossaryBase,
+        userGlossary: [...(glossaryBase.userGlossary ?? []), ...seen.entries()],
       };
       try {
-        await api.saveSettings(next);
+        await api.patchSettings({ userGlossary: next.userGlossary });
         setSettings(next);
       } catch (e) {
         message.error(String(e));
@@ -2216,7 +2219,7 @@ function AppInner({
     const merged = { ...(cur.aiNames ?? {}), ...buf };
     const next = { ...cur, aiNames: merged };
     try {
-      await api.saveSettings(next);
+      await api.patchSettings({ aiNames: merged });
       settingsRef.current = next;
       setSettings(next);
     } catch {
@@ -2869,18 +2872,19 @@ function AppInner({
                     }
                   }
                   skipped += gdOthers.length;
+                  const gdCur = settingsRef.current;
                   const gdAutoOn =
-                    settings?.deepScanRules?.mod?.auto && settings?.deepScanRules?.plugin?.auto;
-                  if (decided.autoDeep && settings?.deepScanRules && !gdAutoOn) {
+                    gdCur?.deepScanRules?.mod?.auto && gdCur?.deepScanRules?.plugin?.auto;
+                  if (decided.autoDeep && gdCur?.deepScanRules && !gdAutoOn) {
                     const next = {
-                      ...settings,
+                      ...gdCur,
                       deepScanRules: {
-                        mod: { ...settings.deepScanRules.mod, auto: true },
-                        plugin: { ...settings.deepScanRules.plugin, auto: true },
+                        mod: { ...gdCur.deepScanRules.mod, auto: true },
+                        plugin: { ...gdCur.deepScanRules.plugin, auto: true },
                       },
                     };
                     try {
-                      await api.saveSettings(next);
+                      await api.patchSettings({ deepScanRules: next.deepScanRules });
                       setSettings(next);
                     } catch {
                       /* 忽略 */

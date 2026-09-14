@@ -96,6 +96,7 @@ pub fn run() {
             commands::export_resource_pack_multi,
             commands::load_settings,
             commands::save_settings,
+            commands::patch_settings,
             commands::list_models,
             commands::test_model,
             commands::export_mod_jar,

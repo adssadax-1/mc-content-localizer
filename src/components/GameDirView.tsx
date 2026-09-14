@@ -101,7 +101,10 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
       if (!settings) return;
       const list = [dir, ...(settings.recentGameDirs ?? []).filter((d) => d !== dir)].slice(0, 5);
       const next = { ...settings, recentGameDirs: list };
-      void api.saveSettings(next).then(() => onSettingsUpdate(next)).catch(() => {});
+      void api
+        .patchSettings({ recentGameDirs: list })
+        .then(() => onSettingsUpdate(next))
+        .catch(() => {});
     },
     [settings, onSettingsUpdate],
   );

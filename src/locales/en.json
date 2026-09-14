@@ -383,7 +383,7 @@
       "remove": "Delete",
       "ruleIncomplete": "Name and pattern are required",
       "customEmpty": "No custom rules yet. Add an extension / glob / regex, or import a community profile.",
-      "customReadOnly": "For a single pack you can only toggle custom rules; add or edit them in Settings → Personalization.",
+      "customReadOnly": "For a single pack you can only tick the custom rules already defined in Settings; add, import or edit them in Settings → Deep scan.",
       "testPick": "Pick a pack",
       "testNoTarget": "No pack selected",
       "testTotal": "{n} entries",
@@ -400,7 +400,8 @@
       "groupHint": "The \"Recommended\" template is active by default: noisy rules are off and high-confidence message text is pre-checked. Switch to \"Everything (legacy)\" to restore the old behaviour. Rule changes apply to later scans; re-click the scan button on a pack to re-scan (existing translations are preserved).",
       "customOn": "{n} custom rules on",
       "activeTemplate": "Template: {name}",
-      "customized": "Customized (matches no template)"
+      "customized": "Customized (matches no template)",
+      "customEmptyPack": "No custom rules to tick for this pack. Add or import them in Settings → Deep scan."
     },
     "storage": {
       "title": "Local data",

@@ -554,6 +554,57 @@ pub fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
     Ok(())
 }
 
+/// 递归合并两个 JSON 对象：对象逐键递归，其余（数组/标量）整体替换；
+/// patch 里的 `null` 表示删除该键。
+fn merge_json(dst: &mut serde_json::Value, patch: serde_json::Value) {
+    match (dst, patch) {
+        (serde_json::Value::Object(d), serde_json::Value::Object(p)) => {
+            for (k, v) in p {
+                if v.is_null() {
+                    d.remove(&k);
+                    continue;
+                }
+                match d.get_mut(&k) {
+                    Some(slot) => merge_json(slot, v),
+                    None => {
+                        d.insert(k, v);
+                    }
+                }
+            }
+        }
+        (slot, p) => *slot = p,
+    }
+}
+
+/// 增量保存设置：只覆盖 patch 里出现的键，其余原样保留。
+///
+/// 起因：前端若干处会各自保存「自己那部分」设置（深度扫描规则、AI 命名缓存、术语表、
+/// 设置页表单…），若每次都把内存里的整份设置写回，任何一处用到过期快照保存，
+/// 都会把别处刚写入的内容（例如导入规则档案得到的自定义规则）悄悄覆盖掉。
+/// 改为按需打补丁后，各处只动自己关心的键，互不干扰。
+#[tauri::command]
+pub fn patch_settings(app: AppHandle, patch: serde_json::Value) -> Result<(), String> {
+    use serde_json::Value;
+    let path = settings_path(&app);
+    // 以磁盘上的现有内容为基底（不存在或损坏则从空对象开始，读取端有默认值兜底）
+    let mut cur: Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| Value::Object(Default::default()));
+    merge_json(&mut cur, patch);
+    let text = serde_json::to_string_pretty(&cur).map_err(|e| e.to_string())?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    // 关闭行为可能被 patch 改动：按合并后的内容刷新进程级缓存
+    if let Ok(merged) = serde_json::from_value::<Settings>(cur) {
+        crate::settings::set_close_behavior(&merged);
+    }
+    Ok(())
+}
+
 /// 拉取所选 provider 的可用模型列表
 #[tauri::command]
 pub async fn list_models(config: ProviderConfig) -> Result<Vec<crate::translate::provider::ModelInfo>, String> {
@@ -1189,5 +1240,116 @@ mod tests {
             "模组兜底规则不应扫 .class（scope.class 默认关），实际得到 {} 条",
             m.entries.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod patch_tests {
+    use super::merge_json;
+    use serde_json::json;
+
+    /// 增量保存不能碰到没提到的键：这是「导入规则后自定义规则消失」的根因防线
+    #[test]
+    fn patch_keeps_untouched_keys() {
+        let mut cur = json!({
+            "theme": "dark",
+            "userGlossary": [["a", "b"]],
+            "deepScanRules": {
+                "mod": { "scopeJson": true, "custom": [] },
+                "plugin": {
+                    "scopeClass": true,
+                    "custom": [{ "id": "a1", "name": "只扫语言目录", "kind": "pathGlob",
+                                 "pattern": "lang/**", "action": "include", "source": "user" }]
+                }
+            }
+        });
+        // 场景：设置页只保存表单字段（不含 deepScanRules）、AI 命名只保存 aiNames
+        merge_json(&mut cur, json!({ "provider": { "provider": "qwen" } }));
+        merge_json(&mut cur, json!({ "aiNames": { "x|1": "名字" } }));
+
+        assert_eq!(cur["theme"], "dark", "未提及的键必须原样保留");
+        assert_eq!(cur["userGlossary"][0][0], "a");
+        let custom = cur["deepScanRules"]["plugin"]["custom"].as_array().unwrap();
+        assert_eq!(custom.len(), 1, "自定义规则不能被无关的保存覆盖");
+        assert_eq!(custom[0]["pattern"], "lang/**");
+        assert_eq!(cur["provider"]["provider"], "qwen", "新键应被写入");
+    }
+
+    /// 只 patch 一个子对象时，同级的另一个子对象不受影响
+    #[test]
+    fn patch_merges_nested_objects_only() {
+        let mut cur = json!({
+            "deepScanRules": {
+                "mod": { "scopeJson": false, "custom": [{ "id": "m1", "pattern": "snbt" }] },
+                "plugin": { "scopeClass": true }
+            }
+        });
+        merge_json(
+            &mut cur,
+            json!({ "deepScanRules": { "plugin": { "scopeClass": false } } }),
+        );
+        assert_eq!(cur["deepScanRules"]["plugin"]["scopeClass"], false);
+        assert_eq!(
+            cur["deepScanRules"]["mod"]["custom"][0]["pattern"], "snbt",
+            "mod 侧规则不应被 plugin 的保存影响"
+        );
+        assert_eq!(cur["deepScanRules"]["mod"]["scopeJson"], false);
+    }
+
+    /// 端到端复现用户报的「导入规则 → 保存 → 关闭软件 → 规则没了」：
+    /// 规则保存之后，设置页总保存 / AI 命名后台保存都不能把它抹掉
+    #[test]
+    fn rule_patch_survives_later_unrelated_saves() {
+        let dir = std::env::temp_dir().join("patch_settings_e2e");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+
+        // 1) 初始：应用真实写出的设置文件（用 Settings 序列化，保证字段齐全）
+        let mut base = crate::settings::Settings::default();
+        base.provider.api_key = "sk-secret".into();
+        base.theme = "dark".into();
+        base.deep_scan_rules.plugin.scope_class = true;
+        base.save(&path).unwrap();
+
+        // 2) 规则弹窗保存：只 patch 插件侧规则（含导入档案带来的自定义规则）
+        let mut cur: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        merge_json(
+            &mut cur,
+            json!({ "deepScanRules": { "plugin": {
+                "scopeClass": true,
+                "custom": [{ "id": "b1", "name": "跳过打包库", "kind": "pathGlob",
+                             "pattern": "com/x/lib/**", "action": "exclude", "source": "user" }]
+            } } }),
+        );
+        std::fs::write(&path, serde_json::to_string_pretty(&cur).unwrap()).unwrap();
+
+        // 3) 之后两次无关保存（设置页表单、AI 命名后台落盘）
+        let mut cur: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        merge_json(&mut cur, json!({ "theme": "light", "batchSize": 30 }));
+        merge_json(&mut cur, json!({ "aiNames": { "a.jar|10": "示例" } }));
+        std::fs::write(&path, serde_json::to_string_pretty(&cur).unwrap()).unwrap();
+
+        // 4) 重启软件：读取设置
+        let loaded = crate::settings::Settings::load(&path);
+        assert_eq!(loaded.deep_scan_rules.plugin.custom.len(), 1);
+        assert_eq!(loaded.deep_scan_rules.plugin.custom[0].pattern, "com/x/lib/**");
+        assert_eq!(loaded.deep_scan_rules.mod_rules.custom.len(), 0);
+        assert_eq!(loaded.theme, "light");
+        assert_eq!(loaded.provider.api_key, "sk-secret");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 数组整体替换，null 表示删除键
+    #[test]
+    fn patch_replaces_arrays_and_deletes_nulls() {
+        let mut cur = json!({ "userGlossary": [["a", "b"]], "model": "m1", "keep": 1 });
+        merge_json(&mut cur, json!({ "userGlossary": [["c", "d"]], "model": null }));
+        assert_eq!(cur["userGlossary"].as_array().unwrap().len(), 1);
+        assert_eq!(cur["userGlossary"][0][1], "d");
+        assert!(cur.get("model").is_none(), "null 应删除该键");
+        assert_eq!(cur["keep"], 1);
     }
 }
