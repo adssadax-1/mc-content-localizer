@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "kind": "mod",
+  "name": "投影打印机 · 过滤拼音数据库",
+  "note": "投影打印机把所有 MC 版本的子 jar 与 pinyin4j 拼音库一起打包：pinyindb/*.txt 是「中文词 + 拼音注音」的数据表（近万行，且每个版本子 jar 各带一份），因为含中文会被「中文一律保留」收进来，属于纯噪声。本档案按路径 + 文件名双重排除整个 pinyin4j 库。",
+  "rules": {
+    "auto": false,
+    "scopeJson": true,
+    "scopeLang": true,
+    "scopeText": true,
+    "scopeNested": true,
+    "scopeClass": false,
+    "skipMeta": true,
+    "skipLangfiles": true,
+    "skipLibs": true,
+    "onlySourceLocale": true,
+    "keepCjk": true,
+    "dropSql": true,
+    "dropDescriptor": true,
+    "dropLog": true,
+    "dropIdent": true,
+    "classNeedsMarker": true,
+    "custom": [
+      {
+        "id": "p1",
+        "name": "排除 pinyin4j 嵌套库",
+        "enabled": true,
+        "kind": "pathGlob",
+        "pattern": "**/pinyin4j*/**",
+        "action": "exclude",
+        "source": "user"
+      },
+      {
+        "id": "p2",
+        "name": "排除拼音数据文件",
+        "enabled": true,
+        "kind": "fileGlob",
+        "pattern": "*pinyin*.txt",
+        "action": "exclude",
+        "source": "user"
+      }
+    ]
+  }
+}
