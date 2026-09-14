@@ -169,7 +169,8 @@
     "aiNameFailed": "AI name generation failed for {n} pack(s) — falling back to Original_zh_cn. Reason: {reason}",
     "deepScanPlugin": "Plugin deep scan",
     "deepScanOpenRules": "Rules for this pack",
-    "deepScanPopoverHint": "Click to scan with current rules; use the gear to tune rules for this pack"
+    "deepScanPopoverHint": "Click to scan with current rules; use the gear to tune rules for this pack",
+    "deepScanTooltip": "Extracts embedded text a normal scan may miss: config files, advancements, manuals, nested jars, and hardcoded strings in the .class constant pool (player-visible messages, GUI titles, item names…). Noisy for mods, so it is off by default — enable it in Deep scan → Mod rules."
   },
   "settings": {
     "title": "Settings",
@@ -239,7 +240,7 @@
       "intervalTooltip": "Gap between requests within each thread — longer gaps are less likely to trigger rate limits",
       "seconds": "s",
       "deepScan": "Deep scan mods",
-      "deepScanTooltip": "Parses embedded text that a normal scan may miss (config files, advancements, manuals, nested jars, etc.). Compiled .class code text is not supported yet.",
+      "deepScanTooltip": "Extracts embedded text a normal scan may miss: config files, advancements, manuals, nested jars, and hardcoded strings in the compiled .class constant pool (player-visible messages, GUI titles, item names…). Noisy for mods, so it is off by default — enable it in the deep-scan rules.",
       "deepScanDesc": "When on, mods whose normal parse is empty automatically get a deep scan; you can also click \"Deep scan\" on a mod card",
       "packEnable": "Pack-level parallelism",
       "packCount": "Packs in parallel",
@@ -265,7 +266,7 @@
       "namingSuffix": "Original_zh_cn",
       "namingAi": "AI name",
       "deepScanMod": "Mod deep scan",
-      "deepScanModTip": "Extract embedded text that regular parsing may miss (configs, advancements, guide books, nested jars). Text compiled into .class is not supported.",
+      "deepScanModTip": "Extract embedded text a regular parse may miss: configs, advancements, manuals, nested jars, plus hardcoded strings in the .class constant pool (off by default; enable it in the deep-scan rules).",
       "deepScanPlugin": "Plugin deep scan",
       "deepScanPluginTip": "Extract text that regular parsing may miss: message configs, command/permission descriptions, plus hardcoded strings in the .class constant pool (chat prefixes, GUI titles, scoreboards).",
       "deepScanHint": "When enabled, packs with no text found during import are scanned automatically; you can also click \"Deep scan\" on a card manually"
@@ -349,7 +350,7 @@
         "scopeLang": ".lang and .properties outside assets/lang (common in plugins). High value.",
         "scopeText": "toml/ini/cfg/conf/yaml/yml/txt/md. Configs are valuable; txt/md docs add noise.",
         "scopeNested": "Jars inside jars (jar-in-jar mods). Valuable, but bundled library text comes too.",
-        "scopeClass": "Hardcoded strings in the .class constant pool - the main source for plugins; noisy for mods, off by default.",
+        "scopeClass": "Parse hardcoded strings in the .class constant pool (player-visible messages, GUI titles, item names…); the main source of plugin messages, off by default for mods because of noise.",
         "skipMeta": "META-INF, LICENSE, CHANGELOG and similar untranslatable content.",
         "skipLangfiles": "Language files are handled by the normal parser; re-scanning duplicates entries, so this stays on.",
         "skipLibs": "Skips bundled third-party libraries (bukkit/json/google/kotlin...) - about 8% pure noise removed in tests.",

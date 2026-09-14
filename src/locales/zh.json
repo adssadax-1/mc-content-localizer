@@ -169,7 +169,8 @@
     "aiNameFailed": "AI 名称生成失败（{n} 个内容包仍用原名_zh_cn）。原因：{reason}",
     "deepScanPlugin": "插件深度扫描",
     "deepScanOpenRules": "本包深度扫描规则",
-    "deepScanPopoverHint": "点击按钮立即按当前规则扫描；点齿轮可单独调整本包规则"
+    "deepScanPopoverHint": "点击按钮立即按当前规则扫描；点齿轮可单独调整本包规则",
+    "deepScanTooltip": "解析模组中普通扫描可能遗漏的内嵌文本：配置文件、成就、手册、嵌套 jar，以及已编译 .class 常量池里的硬编码文本（玩家可见消息、GUI 标题、物品名称等；模组侧噪声较大，默认关闭，可在「深度扫描 → 模组」的规则里开启）。"
   },
   "settings": {
     "title": "设置",
@@ -239,7 +240,7 @@
       "intervalTooltip": "每个线程每次请求之间的间隔，间隔越大越不容易触发限流",
       "seconds": "秒",
       "deepScan": "模组深度扫描",
-      "deepScanTooltip": "解析模组中普通扫描可能遗漏的内嵌文本（配置文件/成就/手册/嵌套 jar 等）。已编译的 .class 代码内文本暂不支持。",
+      "deepScanTooltip": "解析模组中普通扫描可能遗漏的内嵌文本：配置文件、成就、手册、嵌套 jar，以及已编译 .class 常量池里的硬编码文本（玩家可见消息、GUI 标题、物品名称等；模组侧噪声较大，默认关闭，可在深度扫描规则里开启）。",
       "deepScanDesc": "开启后，普通解析为空的模组会自动启用强化扫描；也可在模组卡片上手动点击「模组深度扫描」",
       "packEnable": "内容包并行",
       "packCount": "同时翻译包数",
@@ -265,7 +266,7 @@
       "namingSuffix": "原名_zh_cn",
       "namingAi": "AI 汉化名称",
       "deepScanMod": "模组深度扫描",
-      "deepScanModTip": "解析模组中普通扫描可能遗漏的内嵌文本（配置文件/成就/手册/嵌套 jar 等）。已编译的 .class 代码内文本暂不支持。",
+      "deepScanModTip": "解析模组中普通扫描可能遗漏的内嵌文本：配置文件、成就、手册、嵌套 jar，以及 .class 常量池里的硬编码文本（默认关闭，可在深度扫描规则中开启）。",
       "deepScanPlugin": "插件深度扫描",
       "deepScanPluginTip": "解析插件中普通扫描可能遗漏的文本：消息配置、命令/权限描述，以及 .class 常量池里的硬编码文本（聊天前缀、GUI 标题、计分板等）。",
       "deepScanHint": "开启后，导入时普通解析为空的内容包会自动执行强化扫描；也可在卡片上手动点击「深度扫描」"
@@ -349,7 +350,7 @@
         "scopeLang": "非 assets/lang 结构的 .lang 与 .properties 文本（插件常见）。价值高。",
         "scopeText": "toml/ini/cfg/conf/yaml/yml/txt/md。配置文件价值高，但 txt/md 说明文档噪声偏多。",
         "scopeNested": "递归扫描 jar 内的 jar（jar-in-jar 模组）。价值高，但被嵌套的库文本也会进来。",
-        "scopeClass": "解析 .class 常量池里的硬编码文本，是插件消息的主要来源；模组侧噪声大，默认关闭。",
+        "scopeClass": "解析 .class 常量池里的硬编码文本（玩家可见消息、GUI 标题、物品名称等）；插件消息的主要来源，模组侧噪声较大故默认关闭。",
         "skipMeta": "META-INF、LICENSE、CHANGELOG 等不可翻译内容，建议保持开启。",
         "skipLangfiles": "语言文件已由常规解析处理，重复扫描会产生重复条目，因此固定开启。",
         "skipLibs": "跳过插件打包进来的第三方库（bukkit/json/google/kotlin 等），实测可去掉约 8% 纯噪声。",
