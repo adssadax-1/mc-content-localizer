@@ -89,24 +89,23 @@ export function DeepScanRulesModal({
   const [templates, setTemplates] = useState<Record<string, DeepScanRules>>({});
   // 自定义规则的启用状态（单包场景只允许改这里，不落全局设置）
   const [customEnabled, setCustomEnabled] = useState<Record<string, boolean>>(customEnabledProp ?? {});
-  // 打开瞬间的入参快照（避免依赖可变对象导致的编辑被重置）
-  const initialRulesRef = useRef(initialRules);
-  const customEnabledRef = useRef(customEnabledProp);
-  if (!isOpen) {
-    initialRulesRef.current = initialRules;
-    customEnabledRef.current = customEnabledProp;
-  }
-
-  // 仅在「打开」或「切换作用域」时初始化本地状态。
-  // 注意：不能依赖 initialRules —— 父组件每次渲染都会新建该对象，
-  // 否则弹窗打开期间任何父级重渲染都会清空用户正在修改的内容。
+  // 已加载的「作用域」（全局 mod/plugin，或单包的 pack.key）。
+  // 用「渲染期按作用域对齐状态」而不是入参快照 ref：
+  // 这个弹窗在设置页里是**常挂载**的（关闭时父组件传的是默认的模组规则），
+  // 若只在关闭时记录快照，首次打开「插件」编辑器时 isOpen 与 scope 同帧变化，
+  // 快照仍是模组规则集 → 界面里看不到插件那套（含导入档案带来的自定义规则），
+  // 但设置页外部的统计又是按插件规则算的（表现为「外面显示了自定义规则，里面没有」）。
+  // 直接按当前作用域读取当前入参即可规避；同一作用域内的父级重渲染仍是新对象，
+  // 因此这里只在作用域变化（或重新打开）时对齐，不会清空正在编辑的内容。
+  const [loadedScope, setLoadedScope] = useState<string | null>(null);
   const scope = scopeKey ?? kind;
-  useEffect(() => {
-    if (!isOpen) return;
-    setRules(initialRulesRef.current);
-    setCustomEnabled(customEnabledRef.current ?? {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, scope]);
+  if (isOpen && loadedScope !== scope) {
+    setLoadedScope(scope);
+    setRules(initialRules);
+    setCustomEnabled(customEnabledProp ?? {});
+  } else if (!isOpen && loadedScope !== null) {
+    setLoadedScope(null);
+  }
 
   useEffect(() => {
     if (!isOpen || meta) return;

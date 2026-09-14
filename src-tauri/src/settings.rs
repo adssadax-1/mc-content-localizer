@@ -278,11 +278,39 @@ mod tests {
             action: crate::core::scan_rules::RuleAction::Include,
             source: crate::core::scan_rules::RuleSource::User,
         });
+        // 从规则档案导入的规则（source = imported）也必须原样往返：
+        // 导入后保存 → 重启读取时若被丢掉，界面就会出现「外面有统计、里面是空的」
+        s.deep_scan_rules.plugin.custom.push(crate::core::scan_rules::CustomRule {
+            id: "p1".into(),
+            name: "只看语言目录".into(),
+            enabled: true,
+            kind: crate::core::scan_rules::RuleKind::PathGlob,
+            pattern: "lang/**".into(),
+            action: crate::core::scan_rules::RuleAction::Include,
+            source: crate::core::scan_rules::RuleSource::Imported,
+        });
         let text = serde_json::to_string(&s).unwrap();
         let back: Settings = serde_json::from_str(&text).unwrap();
         assert!(back.deep_scan_rules.plugin.auto);
         assert!(!back.deep_scan_rules.plugin.scope_class);
-        assert_eq!(back.deep_scan_rules.plugin.custom.len(), 1);
+        assert_eq!(back.deep_scan_rules.plugin.custom.len(), 2);
         assert_eq!(back.deep_scan_rules.plugin.custom[0].pattern, "langx");
+        let imported = &back.deep_scan_rules.plugin.custom[1];
+        assert_eq!(imported.pattern, "lang/**");
+        assert!(imported.enabled, "导入的规则启用状态不能被重置");
+        assert_eq!(
+            imported.source,
+            crate::core::scan_rules::RuleSource::Imported,
+            "导入来源标记必须保留",
+        );
+        // 落盘后再走一次 load（含迁移/归一化），确保不会被归一化吃掉
+        let dir = std::env::temp_dir().join("settings_round_trip_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        s.save(&path).unwrap();
+        let loaded = Settings::load(&path);
+        assert_eq!(loaded.deep_scan_rules.plugin.custom.len(), 2);
+        assert_eq!(loaded.deep_scan_rules.plugin.custom[1].pattern, "lang/**");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
