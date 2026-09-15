@@ -5,7 +5,7 @@
 <h1 align="center">MC 汉化工坊</h1>
 
 <p align="center">
-  面向《我的世界》模组、光影包与资源包的 AI 汉化桌面工具
+  面向《我的世界》模组、光影包与资源包以及服务器插件的 AI 汉化桌面工具
 </p>
 <p align="center">
   <a href="https://get.microsoft.com/installer/download/9p9bn1lhbjk4?referrer=appbadge" target="_self">
