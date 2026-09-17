@@ -358,7 +358,10 @@ v2.0 起内置 11 家服务商预设（智谱 / 通义 / DeepSeek / 火山豆包
 │  ├─ components/           DropZone / EntryTable / GameDirView  │
 │  │                        / SettingsModal / DeepScanRulesModal │
 │  │                        / PromptEditorModal / DevToolsPanel  │
-│  │                        / DeepScanIcon / ErrorBoundary 等     │
+│  │                        / SlideNav / ProviderIcon            │
+│  │                        / IconOnlyIcon（无字模式图标）等       │
+│  ├─ kindMeta.tsx          内容包类型的图标与名称单一来源          │
+│  ├─ gameDirScanCache.ts   游戏目录扫描缓存（内存 LRU + 写穿磁盘） │
 │  ├─ devtools/             开发者工具独立窗口入口与事件契约        │
 │  │                        （__DEVTOOLS__ 门控，生产构建剔除）     │
 │  ├─ api.ts                Tauri invoke 与事件封装               │
@@ -367,7 +370,8 @@ v2.0 起内置 11 家服务商预设（智谱 / 通义 / DeepSeek / 火山豆包
 │                           服务商预设                           │
 ├──────────────────────────────────────────────────────────────┤
 │  后端（Rust / src-tauri/src）                                   │
-│  ├─ commands.rs           Tauri 命令层（解析/翻译/导出/设置/清理） │
+│  ├─ commands.rs           Tauri 命令层（解析/翻译/导出/设置/清理/  │
+│  │                        扫描缓存读写）                        │
 │  │   └─ devtools 模块      dev_* 命令（仅 devtools feature）     │
 │  ├─ dev.rs                devtools 插桩：事件广播/故障注入        │
 │  │                        （feature 门控，生产零代码）            │
@@ -388,10 +392,11 @@ v2.0 起内置 11 家服务商预设（智谱 / 通义 / DeepSeek / 火山豆包
 │  │   ├─ provider.rs       OpenAI 兼容客户端（含故障注入点）       │
 │  │   └─ pipeline.rs       术语表提取、分批翻译、重试、校验         │
 │  ├─ export.rs             资源包 / 模组 jar / 插件 jar / 光影包导出 │
-│  └─ settings.rs           设置持久化（增量保存、迁移、规则与命名偏好）│
+│  ├─ settings.rs           设置持久化（增量保存 patch_settings、    │
+│  │                        迁移、损坏留档）                       │
+│  └─ tauri.devtools.conf.json  开发版打包覆盖（独立 productName   │
+│                           与 identifier，可与正式版共存安装）     │
 └──────────────────────────────────────────────────────────────┘
-```
-
 ---
 
 ## 数据处理流程
@@ -400,6 +405,8 @@ v2.0 起内置 11 家服务商预设（智谱 / 通义 / DeepSeek / 火山豆包
 
 ```
 导入文件 / 文件夹（拖入、选择，或游戏目录扫描）
+   │  · 游戏目录模式：扫描结果按目录缓存（内存 LRU + 落盘 scan-cache-gamedir.json），
+   │    切回最近目录 / 重启软件命中缓存即复用；「重新扫描」忽略缓存强刷
    │
    ▼
 类型探测（读内容判定，文件夹名只作提示）
@@ -426,6 +433,7 @@ v2.0 起内置 11 家服务商预设（智谱 / 通义 / DeepSeek / 火山豆包
    │
    ▼
 用户勾选分组 / 逐条审校
+   │  （外观与设置走各自入口即时落盘：顶栏开关与设置项按需增量保存，不整份写回）
    │
    ▼
 开始翻译 ──► 术语表提取（可选，受设置开关控制）
