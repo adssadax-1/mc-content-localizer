@@ -290,6 +290,8 @@ export interface Settings {
   theme: 'light' | 'dark';
   /** 界面语言：zh（中文）/ en（英文） */
   language: 'zh' | 'en';
+  /** 无字模式：隐藏外壳（顶栏/侧栏/工具栏/页脚）文字，只留图标；内容区不受影响 */
+  iconOnly?: boolean;
   /** 主窗口关闭行为：exit 直接退出 / minimize 最小化到托盘 */
   closeBehavior: 'exit' | 'minimize';
   /** 导出命名偏好：raw 原名 / suffix 原名_zh_cn（默认）/ ai AI 汉化名称 */

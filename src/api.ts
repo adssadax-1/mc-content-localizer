@@ -226,6 +226,9 @@ export const api = {
     invoke<void>("save_session_cache", { name, content }),
   loadSessionCache: (name: string) => invoke<string | null>("load_session_cache", { name }),
   clearSessionCache: (name: string) => invoke<void>("clear_session_cache", { name }),
+  /** 游戏目录扫描缓存：**落盘**，重启后不必重扫同一目录（整份 JSON 由前端序列化） */
+  saveScanCache: (content: string) => invoke<void>("save_scan_cache", { content }),
+  loadScanCache: () => invoke<string | null>("load_scan_cache"),
   /** 会话缓存 v2（按包分片）：只写变化的分片，单次写入很小 */
   sessionV2WriteShard: (name: string, id: string, content: string) =>
     invoke<void>("session_v2_write_shard", { name, id, content }),

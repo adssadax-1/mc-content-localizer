@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Alert,
   Button,
@@ -64,6 +64,27 @@ function snakeToCamel(s: string): string {
 }
 
 /**
+ * 页签内容包装：挂载时给直接子块交替挂 .dev-tab-l / .dev-tab-r（min(i,4)*40ms 错峰）。
+ * 配合 Tabs 的 destroyOnHidden，每次切换都会重新挂载 → 动画重播。
+ * 与开发者工具面板（DevToolsPanel 的 DevTabBody）同源，保证两处页签手感一致。
+ *
+ * 注意：自定义规则页传 animate=false —— 该页的行自带 .anim-list-item 入场，
+ * 容器再滑一次会变成两层同向动画，"整块滑入 + 行同时上浮"观感反而更乱。
+ */
+function TabBody({ k, animate, children }: { k: string; animate: boolean; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el || !animate) return;
+    [].slice.call(el.children).forEach((c: HTMLElement, i: number) => {
+      c.classList.add(i % 2 === 0 ? "dev-tab-l" : "dev-tab-r");
+      c.style.animationDelay = `${Math.min(i, 4) * 40}ms`;
+    });
+  }, [k, animate]);
+  return <div ref={ref}>{children}</div>;
+}
+
+/**
  * 深度扫描规则配置弹窗（模组 / 插件共用）：
  * 顶部总开关 → 模板与档案 → 内置规则分组（含说明与锁定项）→ 自定义规则 → 规则测试台。
  * 规则清单由后端元数据下发，前端不写死规则名。
@@ -84,6 +105,10 @@ export function DeepScanRulesModal({
   const [meta, setMeta] = useState<RuleMeta | null>(null);
   const [rules, setRules] = useState<DeepScanRules>(initialRules);
   const [editing, setEditing] = useState<CustomRule | null>(null);
+  /** 页签错峰动画：首次打开不播，之后每次切换重播（关闭弹窗时复位） */
+  const [tabSwitched, setTabSwitched] = useState(false);
+  /** 自定义规则：正在播离场动画的行（存规则 id），动画结束才真正删除 */
+  const [leavingCustom, setLeavingCustom] = useState<string[]>([]);
   const isPlugin = kind === "plugin";
   // 三套模板（打开时预取，用于高亮「当前生效模板」与判断是否已自定义）
   const [templates, setTemplates] = useState<Record<string, DeepScanRules>>({});
@@ -105,9 +130,13 @@ export function DeepScanRulesModal({
   // 直接按当前作用域读取当前入参即可规避；同一作用域内的父级重渲染仍是新对象，
   // 因此这里只在作用域变化（或重新打开）时对齐，不会清空正在编辑的内容。
   const [loadedScope, setLoadedScope] = useState<string | null>(null);
+  /** 规则测试台的测试目标：由弹窗层持有，避免切页重挂载后丢失手动选的包 */
+  const [testTarget, setTestTarget] = useState<string | null>(previewTarget ?? null);
   const scope = scopeKey ?? kind;
   if (isOpen && loadedScope !== scope) {
     setLoadedScope(scope);
+    // 换作用域（模组↔插件 / 换包）时测试目标回到调用方给的默认值
+    setTestTarget(previewTarget ?? null);
     // 单包场景：调用方把「该包相对全局的启用差异」放在 customEnabled，落进规则本体
     setRules(
       customEnabledProp
@@ -122,6 +151,9 @@ export function DeepScanRulesModal({
     );
   } else if (!isOpen && loadedScope !== null) {
     setLoadedScope(null);
+    // 关闭时复位：下次打开视为"首次展示"，不播页签动画
+    setTabSwitched(false);
+    setLeavingCustom([]);
   }
 
   useEffect(() => {
@@ -375,11 +407,15 @@ export function DeepScanRulesModal({
       </Space>
 
       <Tabs
+        // 每次切换都重新挂载 → TabBody 的错峰动画得以重播（与开发者工具面板同一套做法）
+        destroyOnHidden
+        onChange={() => setTabSwitched(true)}
         items={[
           {
             key: "rules",
             label: t("settings.deepScan.tabRules"),
             children: (
+              <TabBody k="rules" animate={tabSwitched}>
               <div style={{ maxHeight: "46vh", overflowY: "auto", paddingRight: 4 }}>
                 {GROUP_ORDER.map((group) => (
                   <div key={group} style={{ marginBottom: 12 }}>
@@ -435,16 +471,20 @@ export function DeepScanRulesModal({
                       })}
                   </div>
                 ))}
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {/* 无字模式收起：固定项说明属"想得起才问"的格式约定（判定报告 ②#6）。
+                    这里落在弹窗内、没有相邻黑字标题可挂 Tooltip，按报告给的另一条出路直接隐藏。 */}
+                <Typography.Text type="secondary" className="io-hide" style={{ fontSize: 12 }}>
                   {t("settings.deepScan.fixedNote")}
                 </Typography.Text>
               </div>
+              </TabBody>
             ),
           },
           {
             key: "custom",
             label: t("settings.deepScan.tabCustom", { n: rules.custom.length }),
             children: (
+              <TabBody k="custom" animate={false}>
               <div style={{ maxHeight: "46vh", overflowY: "auto" }}>
                 {customReadOnly && (
                   <Alert
@@ -463,35 +503,56 @@ export function DeepScanRulesModal({
                     )}
                   </Typography.Text>
                 )}
-                {rules.custom.map((r) => (
+                {rules.custom.map((r) => {
+                  const leaving = leavingCustom.includes(r.id);
+                  return (
                   <div
                     key={r.id}
-                    style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0" }}
+                    className={`anim-list-item anim-collapse${leaving ? " is-leaving" : ""}`}
                   >
-                    <Checkbox
-                      checked={r.enabled}
-                      onChange={(e) => setCustomEnabled(r.id, e.target.checked)}
-                    />
-                    <Tag color={r.source === "imported" ? "geekblue" : "green"}>
-                      {t(`settings.deepScan.kind.${r.kind}`)}
-                    </Tag>
-                    <Typography.Text style={{ fontSize: 13 }}>{r.name}</Typography.Text>
-                    <Typography.Text code style={{ fontSize: 12, flex: 1, minWidth: 0 }} ellipsis>
-                      {r.pattern}
-                    </Typography.Text>
-                    <Tag>{r.action === "include" ? t("settings.deepScan.actInclude") : t("settings.deepScan.actExclude")}</Tag>
-                    {!customReadOnly && (
-                      <>
-                        <Button size="small" onClick={() => setEditing({ ...r })}>
-                          {t("settings.deepScan.edit")}
-                        </Button>
-                        <Button size="small" danger onClick={() => removeRule(r.id)}>
-                          {t("settings.deepScan.remove")}
-                        </Button>
-                      </>
-                    )}
+                    <div
+                      className={leaving ? "anim-item-slide-out" : undefined}
+                      style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0" }}
+                      onAnimationEnd={(e) => {
+                        // 入场动画同样会冒泡 animationend：只认离场关键帧，
+                        // 否则新行入场结束就会把自己删掉
+                        if (e.target !== e.currentTarget || e.animationName !== "motion-slide-out") return;
+                        setLeavingCustom((s) => s.filter((id) => id !== r.id));
+                        removeRule(r.id);
+                      }}
+                    >
+                      <Checkbox
+                        checked={r.enabled}
+                        onChange={(e) => setCustomEnabled(r.id, e.target.checked)}
+                      />
+                      <Tag color={r.source === "imported" ? "geekblue" : "green"}>
+                        {t(`settings.deepScan.kind.${r.kind}`)}
+                      </Tag>
+                      <Typography.Text style={{ fontSize: 13 }}>{r.name}</Typography.Text>
+                      <Typography.Text code style={{ fontSize: 12, flex: 1, minWidth: 0 }} ellipsis>
+                        {r.pattern}
+                      </Typography.Text>
+                      <Tag>{r.action === "include" ? t("settings.deepScan.actInclude") : t("settings.deepScan.actExclude")}</Tag>
+                      {!customReadOnly && (
+                        <>
+                          <Button size="small" onClick={() => setEditing({ ...r })}>
+                            {t("settings.deepScan.edit")}
+                          </Button>
+                          <Button
+                            size="small"
+                            danger
+                            onClick={() =>
+                              setLeavingCustom((s) => (s.includes(r.id) ? s : [...s, r.id]))
+                            }
+                          >
+                            {t("settings.deepScan.remove")}
+                          </Button>
+                        </>
+                      )}
+                    </div>
                   </div>
-                ))}
+                  );
+                })}
                 <Divider style={{ margin: "10px 0" }} />
                 <RuleForm
                   rule={editing}
@@ -501,6 +562,7 @@ export function DeepScanRulesModal({
                   disabled={customReadOnly}
                 />
               </div>
+              </TabBody>
             ),
           },
           {
@@ -508,7 +570,16 @@ export function DeepScanRulesModal({
             label: t("settings.deepScan.tabTest"),
             // 传入的就是当前编辑中的规则对象：改开关/勾选后测试台 400ms 内自动重跑，
             // 不需要先保存再重开弹窗
-            children: <RuleTestbed kind={kind} rules={rules} target={previewTarget ?? null} />,
+            children: (
+              <TabBody k="testbed" animate={tabSwitched}>
+                <RuleTestbed
+                  kind={kind}
+                  rules={rules}
+                  target={testTarget}
+                  onTargetChange={setTestTarget}
+                />
+              </TabBody>
+            ),
           },
         ]}
       />
@@ -599,15 +670,23 @@ function RuleForm({
   );
 }
 
-/** 规则测试台：对一个包按当前规则预览扫描结果 */
+/**
+ * 规则测试台：对一个包按当前规则预览扫描结果。
+ *
+ * target 由弹窗层持有（而不是本组件内部 state）：Tabs 设了 destroyOnHidden，
+ * 每次切页都会重新挂载本组件，若手动选过的 jar 路径只存在局部 state 就会被清掉。
+ * 提升到弹窗层后，切走再切回仍是同一个测试目标。
+ */
 function RuleTestbed({
   kind,
   rules,
   target,
+  onTargetChange,
 }: {
   kind: Kind;
   rules: DeepScanRules;
   target: string | null;
+  onTargetChange: (path: string) => void;
 }) {
   const { t } = useTranslationContext();
   const [path, setPath] = useState<string | null>(target);
@@ -651,7 +730,10 @@ function RuleTestbed({
       multiple: false,
       filters: [{ name: kind === "plugin" ? "Plugin" : "Mod", extensions: ["jar", "zip"] }],
     });
-    if (picked && typeof picked === "string") setPath(picked);
+    if (picked && typeof picked === "string") {
+      setPath(picked);
+      onTargetChange(picked);
+    }
   };
 
   return (

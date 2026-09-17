@@ -38,10 +38,15 @@ fn is_cache_entry(name: &str) -> bool {
         || lower == "browsermetrics"
 }
 
-/// 会话缓存文件/目录的命名规则（仅在我们自己的配置目录内按名匹配）
-fn is_session_cache_name(name: &str) -> bool {
+/// 可安全删除的缓存文件/目录的命名规则（仅在我们自己的配置目录内按名匹配）。
+/// 判据是"**能由软件重新生成、删掉不丢用户数据**"：
+/// · session-*      → 上次打开的内容包列表快照（丢了只是少一次恢复）
+/// · scan-cache-*   → 游戏目录扫描结果（丢了下次重扫一遍，代价是时间不是数据）
+/// settings.json 不在此列 —— 里面有 API Key 与术语表，属于用户数据。
+fn is_cache_file_name(name: &str) -> bool {
     (name.starts_with("session-cache-") && name.ends_with(".json"))
         || (name.starts_with("session-") && name.ends_with("-shards"))
+        || (name.starts_with("scan-cache-") && name.ends_with(".json"))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -174,7 +179,7 @@ fn plan(config: Option<&Path>, local: Option<&Path>) -> Vec<Target> {
             for e in rd.flatten() {
                 let name = e.file_name().to_string_lossy().to_string();
                 let is_dir = e.file_type().map(|f| f.is_dir()).unwrap_or(false);
-                let group = if is_session_cache_name(&name) { "cache" } else { "user" };
+                let group = if is_cache_file_name(&name) { "cache" } else { "user" };
                 out.push(Target {
                     path: e.path(),
                     group,
@@ -500,13 +505,16 @@ mod tests {
     }
 
     #[test]
-    fn session_cache_name_matching() {
-        assert!(is_session_cache_name("session-cache-free.json"));
-        assert!(is_session_cache_name("session-cache-gamedir.json"));
-        assert!(is_session_cache_name("session-free-shards"));
-        assert!(!is_session_cache_name("settings.json"));
-        assert!(!is_session_cache_name("session-cache-free.json.bak"));
-        assert!(!is_session_cache_name("session-"));
+    fn cache_name_matching() {
+        assert!(is_cache_file_name("session-cache-free.json"));
+        assert!(is_cache_file_name("session-cache-gamedir.json"));
+        assert!(is_cache_file_name("session-free-shards"));
+        // 游戏目录扫描缓存：重启不重扫靠它，但「清除缓存」应当能清掉
+        assert!(is_cache_file_name("scan-cache-gamedir.json"));
+        assert!(!is_cache_file_name("settings.json"));
+        assert!(!is_cache_file_name("session-cache-free.json.bak"));
+        assert!(!is_cache_file_name("session-"));
+        assert!(!is_cache_file_name("scan-cache-gamedir.json.bak"));
     }
 
     #[test]

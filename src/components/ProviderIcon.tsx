@@ -1,3 +1,4 @@
+import { Tooltip } from "antd";
 import { useTranslationContext } from "../i18n";
 import { PROVIDER_PRESETS } from "../types";
 
@@ -125,58 +126,107 @@ export function ProviderIcon({ id, size = 30 }: { id: string; size?: number }) {
   );
 }
 
-/** 服务商选择网格（antd Form 受控组件）：图标 + 名称卡片，替代下拉框便于查找 */
+/**
+ * 服务商选择网格（antd Form 受控组件）。
+ *
+ * 两副形态，由 `iconOnly` 决定：
+ * · **常规**（iconOnly=false）—— 图标 + 名称卡片，4 列。这是原有形态，一字未改。
+ * · **无字**（iconOnly=true）—— 只留图标、卡片压扁：品牌色本身已是强标识
+ *   （智谱蓝 / 豆包红 / OpenAI 绿…），名称再写一遍会让每张卡片高度翻倍、
+ *   把 11 个服务商撑成 3 行。名称改由 Tooltip（鼠标）+ aria-label（读屏）承担，
+ *   信息一点没少；选中态仍靠描边 + 底色表达，不依赖文字加粗。
+ *
+ * 常规档刻意**不挂 Tooltip**：那时名称就写在卡片上，再弹一层是纯噪声。
+ * 同理，常规档也不需要 aria-label —— 可见文字本身就是最好的无障碍名。
+ */
 export function ProviderGrid({
   value,
   onChange,
+  iconOnly,
 }: {
   value?: string;
   onChange?: (v: string) => void;
+  iconOnly?: boolean;
 }) {
   const { t } = useTranslationContext();
   return (
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "repeat(4, 1fr)",
+        gridTemplateColumns: iconOnly ? "repeat(auto-fill, minmax(56px, 1fr))" : "repeat(4, 1fr)",
         gap: 8,
         width: "100%",
       }}
     >
       {Object.entries(PROVIDER_PRESETS).map(([id, p]) => {
         const active = value === id;
-        return (
-          <div
-            key={id}
-            className="provider-grid-card"
-            onClick={() => onChange?.(id)}
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              gap: 6,
-              padding: "12px 4px 8px",
-              borderRadius: 10,
-              border: `1.5px solid ${active ? "#4A90D9" : "var(--border-color, #E6E8EB)"}`,
-              background: active ? "rgba(74,144,217,0.08)" : "transparent",
-              cursor: "pointer",
-              transition: "all 0.15s",
-              userSelect: "none",
-            }}
-          >
-            <ProviderIcon id={id} size={30} />
-            <span
+        const name = t(`providers.${id}`) !== `providers.${id}` ? t(`providers.${id}`) : p.label;
+        const cardStyle: React.CSSProperties = {
+          borderRadius: 10,
+          border: `1.5px solid ${active ? "#4A90D9" : "var(--border-color, #E6E8EB)"}`,
+          background: active ? "rgba(74,144,217,0.08)" : "transparent",
+          cursor: "pointer",
+          transition: "all 0.15s",
+          userSelect: "none",
+        };
+
+        if (!iconOnly) {
+          return (
+            <div
+              key={id}
+              className="provider-grid-card"
+              onClick={() => onChange?.(id)}
               style={{
-                fontSize: 12,
-                textAlign: "center",
-                lineHeight: 1.2,
-                color: active ? "#1F2937" : "inherit",
-                fontWeight: active ? 600 : 400,
+                ...cardStyle,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                gap: 6,
+                padding: "12px 4px 8px",
               }}
             >
-              {t(`providers.${id}`) !== `providers.${id}` ? t(`providers.${id}`) : p.label}
-            </span>
-          </div>
+              <ProviderIcon id={id} size={30} />
+              <span
+                style={{
+                  fontSize: 12,
+                  textAlign: "center",
+                  lineHeight: 1.2,
+                  color: active ? "#1F2937" : "inherit",
+                  fontWeight: active ? 600 : 400,
+                }}
+              >
+                {name}
+              </span>
+            </div>
+          );
+        }
+
+        return (
+          <Tooltip key={id} title={name} mouseEnterDelay={0.15}>
+            <div
+              className="provider-grid-card"
+              role="button"
+              tabIndex={0}
+              aria-label={name}
+              aria-pressed={active}
+              onClick={() => onChange?.(id)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onChange?.(id);
+                }
+              }}
+              style={{
+                ...cardStyle,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: "10px 4px",
+              }}
+            >
+              <ProviderIcon id={id} size={28} />
+            </div>
+          </Tooltip>
         );
       })}
     </div>

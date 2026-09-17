@@ -15,13 +15,16 @@ import {
   Space,
   Switch,
   Tag,
+  Tooltip,
   Typography,
 } from "antd";
 import {
   ApiOutlined,
   BookOutlined,
   BgColorsOutlined,
+  ClearOutlined,
   CloudServerOutlined,
+  DeleteOutlined,
   EditOutlined,
   InfoCircleOutlined,
   LinkOutlined,
@@ -49,34 +52,57 @@ import { DeepScanRulesModal } from "./DeepScanRulesModal";
 import { DeepScanIcon } from "./DeepScanIcon";
 import { SlideNav, PanelBlock } from "./SlideNav";
 import { useTranslationContext } from "../i18n";
+import { clearScanCache } from "../gameDirScanCache";
 
-/** 主题选项的简约 SVG 图标（替代 emoji） */
-function SunGlyph({ size = 13 }: { size?: number }) {
+/* 主题选项的太阳/月亮图标已随「主题」一起搬到顶栏快捷开关（用 antd 的
+   SunOutlined / MoonOutlined，跟随按钮文字色）；这里的彩色 SVG 版本、
+   以及它所在的整块「主题 / 语言 / 无字模式」表单，本轮一并移除。 */
+
+/* ── 表单标签用的简约 SVG ──────────────────────────────────────────
+   为什么标签换成图标：这几个字段的名字（API Key / 模型）在输入框的 placeholder
+   与右侧按钮里本来就重复出现了，标签再写一遍纯属占宽。换成图标后悬停仍可看全名，
+   横向空间还给输入框本身。描边用 currentColor → 亮/暗主题自动跟色，不用两套。 */
+function KeyGlyph({ size = 14 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" style={{ verticalAlign: "-2px" }} aria-hidden="true">
-      <circle cx="12" cy="12" r="4.6" fill="#F9A825" />
-      <g stroke="#F9A825" strokeWidth="1.9" strokeLinecap="round">
-        {[0, 45, 90, 135, 180, 225, 270, 315].map((a) => {
-          const rad = (a * Math.PI) / 180;
-          return (
-            <line
-              key={a}
-              x1={12 + 6.6 * Math.cos(rad)}
-              y1={12 + 6.6 * Math.sin(rad)}
-              x2={12 + 9 * Math.cos(rad)}
-              y2={12 + 9 * Math.sin(rad)}
-            />
-          );
-        })}
-      </g>
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ verticalAlign: "-2px" }}
+      aria-hidden="true"
+    >
+      <circle cx="8" cy="8" r="4.2" />
+      <path d="M11.2 11.2 20.5 20.5" />
+      <path d="M17.4 17.4 15.2 19.6" />
+      <path d="M19.6 15.2 17.4 17.4" />
     </svg>
   );
 }
 
-function MoonGlyph({ size = 13 }: { size?: number }) {
+/** 模型：立方体（"模型"一词最直观的图形，不用 emoji 以免跨平台观感不一） */
+function ModelGlyph({ size = 14 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" style={{ verticalAlign: "-2px" }} aria-hidden="true">
-      <path d="M20.5 14.8A8.8 8.8 0 1 1 9.2 3.5a7.2 7.2 0 1 0 11.3 11.3z" fill="#5B7CFA" />
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ verticalAlign: "-2px" }}
+      aria-hidden="true"
+    >
+      <path d="M12 3.2 20 7.6v8.8L12 20.8 4 16.4V7.6z" />
+      <path d="M12 12 20 7.6" />
+      <path d="M12 12v8.8" />
+      <path d="M12 12 4 7.6" />
     </svg>
   );
 }
@@ -118,18 +144,19 @@ interface FormValues {
   packParallelCount?: number;
   /** 深度文本扫描 */
   deepScan?: boolean;
-  /** 主题：light / dark */
-  theme?: "light" | "dark";
-  /** 界面语言：zh / en */
-  language?: "zh" | "en";
+  /* theme / language / iconOnly 已移出表单：由顶栏快捷开关即时写盘，
+     本弹窗不再读写这三项（字段留着会让人以为保存路径还在弹窗里）。 */
   /** 关闭行为：exit / minimize */
   closeBehavior?: "exit" | "minimize";
   exportNaming?: "raw" | "suffix" | "ai";
   deepScanPlugin?: boolean;
 }
 
-/** 版本号兜底值（实际显示用 Tauri 返回的应用版本，避免与发布版本不一致） */
-const FALLBACK_VERSION = "2.1.0";
+/** 版本号兜底值：正常走 Tauri 的 getVersion()（读 tauri.conf.json），
+ *  只有它的 Promise 失败时才会显示这个值。
+ *  **升版本时要跟 tauri.conf.json / package.json / Cargo.toml 一起改** ——
+ *  它曾经长期停在旧版本号上，一旦 getVersion() 失败就会在「关于」里显示一个假版本。 */
+const FALLBACK_VERSION = "3.1.1";
 
 /** 字节数 → 可读体积 */
 function fmtBytes(n: number): string {
@@ -161,6 +188,10 @@ export function SettingsModal({
   onUserDataCleared,
 }: Props) {
   const { t } = useTranslationContext();
+  /* 无字模式取**已保存**的设置（不是表单里的临时值）：它与驱动
+     <html data-icon-only> 的是同一个来源，页面已经是无字态了这个分支才成立。
+     表单里刚改还没保存时，页面尚未切换，这里也跟着不切 —— 两者始终一致。 */
+  const iconOnly = settings?.iconOnly ?? false;
   const [form] = Form.useForm<FormValues>();
   const provider = Form.useWatch("provider", form);
   const selectedModel = Form.useWatch("model", form);
@@ -196,7 +227,7 @@ export function SettingsModal({
     }
   }, []);
 
-  /** 清除缓存（第 1 步 / 共 1 步）：只删会话快照与浏览器缓存 */
+  /** 清除缓存（第 1 步 / 共 1 步）：只删会话快照、游戏目录扫描缓存与浏览器缓存 */
   const handleClearCache = useCallback(() => {
     Modal.confirm({
       title: t("settings.storage.clearCacheTitle"),
@@ -212,6 +243,11 @@ export function SettingsModal({
         setStorageBusy("cache");
         try {
           const res: ClearResult = await api.clearAppCache();
+          // 扫描缓存是**落盘 + 内存两层**：上面那句只删了磁盘那一份，
+          // 内存 Map 才是 `getScanCache` 的读路径 —— 不清它的话，本次运行里
+          // 命中缓存照旧、而且下一次 put/drop 会把整份快照**又写回磁盘**，
+          // 表现为"点了清除缓存却没清掉"。两边必须一起清。
+          clearScanCache();
           message.success(t("settings.storage.cacheCleared", { size: fmtBytes(res.freedBytes) }));
           if (res.skipped.length > 0) {
             message.info(t("settings.storage.skipped", { n: res.skipped.length }));
@@ -254,6 +290,10 @@ export function SettingsModal({
       const res: ClearResult = await api.clearAppData();
       setWipeStage(0);
       setWipeAck(false);
+      // 与「清除缓存」同理：扫描缓存是落盘 + 内存两层，磁盘那份由 Rust 侧一并删掉
+      // （storage.rs 的 is_cache_file_name 同时匹配 session-* 与 scan-cache-*），
+      // 内存这份必须自己清，否则会写穿回一个已经"被清除"的文件。
+      clearScanCache();
       message.success(t("settings.storage.dataCleared", { size: fmtBytes(res.freedBytes) }));
       if (res.skipped.length > 0) {
         message.info(t("settings.storage.skipped", { n: res.skipped.length }));
@@ -299,6 +339,24 @@ export function SettingsModal({
     setPrevSection(null);
     setPanelAnim(false);
   }
+
+  /** 服务商切换错峰动画：与面板切换同款做法（渲染期同步带类，同帧提交不闪烁）。
+      粘性开关，离开该分组或关闭弹窗时复位，保证"首次进入不播、之后每次切换重播"。 */
+  const [prevProvider, setPrevProvider] = useState<string | undefined>(undefined);
+  const [providerAnim, setProviderAnim] = useState(false);
+  if (open && activeSection === "provider") {
+    if (prevProvider !== provider) {
+      if (prevProvider !== undefined) setProviderAnim(true);
+      setPrevProvider(provider);
+    }
+  } else if (prevProvider !== undefined || providerAnim) {
+    setPrevProvider(undefined);
+    setProviderAnim(false);
+  }
+
+  /** 术语表：正在播离场动画的行（存 Form.List 的 field key）。
+      动画结束后才真正 remove，避免空态文案与离场行叠在一起。 */
+  const [leavingGlossary, setLeavingGlossary] = useState<number[]>([]);
   const panelScrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (open) setActiveSection(initialSection ?? "appearance");
@@ -373,8 +431,8 @@ export function SettingsModal({
         userGlossary: settings.userGlossary.length ? settings.userGlossary : [],
         providerApiKeys: settings.providerApiKeys ?? {},
         providerModels: settings.providerModels ?? {},
-        theme: settings.theme ?? "light",
-        language: settings.language ?? "zh",
+        // 主题 / 语言 / 无字模式不在这里：它们已搬到顶栏快捷开关（点一下即写盘）。
+        // 表单不持有这三项，「确定」时就不会拿一份可能过期的快照把它们覆盖回去。
         closeBehavior: settings.closeBehavior === "minimize" ? "minimize" : "exit",
         exportNaming: settings.exportNaming ?? "suffix",
       });
@@ -496,10 +554,12 @@ export function SettingsModal({
       ...(v.providerModelOptions ?? {}),
       [v.provider]: modelOptions,
     };
-    // 表单负责的键；深度扫描规则 / 提示词 / AI 命名缓存不在此列（它们各自即时保存）
+    // 本弹窗负责的键；不在这个类型里的都归别的入口写：
+    //   深度扫描规则 / 提示词 / AI 命名缓存 → 各自即时保存
+    //   主题 / 语言 / 无字模式 → 顶栏快捷开关即时保存（已从表单移除）
     const formPart: Omit<
       Settings,
-      "deepScanRules" | "customPrompts" | "aiNames" | "recentGameDirs"
+      "deepScanRules" | "customPrompts" | "aiNames" | "recentGameDirs" | "theme" | "language" | "iconOnly"
     > = {
       provider: {
         provider: v.provider,
@@ -525,8 +585,8 @@ export function SettingsModal({
       },
       packParallelEnabled: v.packParallelEnabled ?? false,
       packParallelCount: Math.max(v.packParallelCount ?? 2, 0),
-      theme: v.theme === "dark" ? "dark" : "light",
-      language: v.language === "en" ? "en" : "zh",
+      // theme / language / iconOnly 刻意不写：它们由顶栏快捷开关即时写盘，
+      // 本弹窗只保存自己持有的字段（增量保存原则，见下方注释）
       closeBehavior: v.closeBehavior === "minimize" ? "minimize" : "exit",
       exportNaming:
         v.exportNaming === "raw" || v.exportNaming === "ai" ? v.exportNaming : "suffix",
@@ -549,22 +609,20 @@ export function SettingsModal({
       open={open}
       onCancel={onClose}
       onOk={() => void handleSave()}
-      width={760}
+      width={880}
+      className="settings-modal"
       destroyOnClose
     >
       <div style={{ display: "flex", gap: 16 }}>
-        {/* 左侧分组导航 */}
-        <div
-          style={{
-            width: 148,
-            flexShrink: 0,
-            borderRight: "1px solid var(--border-color, #F0F2F5)",
-            paddingTop: 4,
-          }}
-        >
+        {/* 左侧分组导航：做成真正的侧边栏——整栏铺满内容高度、条目抬高，
+            不再是一列挤在顶部的窄按钮。宽度与主界面侧栏(200)对齐，
+            两处导航的"手"才一致。 */}
+        <div className="settings-nav">
           <SlideNav
             items={SECTIONS.map((s) => ({ key: s.key, label: t(s.labelKey), icon: s.icon }))}
             activeKey={activeSection}
+            iconOnly={iconOnly}
+            size="lg"
             onSelect={setActiveSection}
           />
         </div>
@@ -573,6 +631,7 @@ export function SettingsModal({
             分组切换即时渲染；字段值/校验状态不丢失 */}
         <div
           ref={panelScrollRef}
+          className="settings-panel"
           style={{
             flex: 1,
             minWidth: 0,
@@ -589,8 +648,11 @@ export function SettingsModal({
             <div>
               <PanelBlock index={0}>
                 <Typography.Text strong>{t("settings.provider.groupTitle")}</Typography.Text>
+                {/* 分组介绍：无字模式下收起 —— 它只是"介绍这个软件的行为"，
+                    用户不会因为它而改变任何操作（判定报告 ①#7） */}
                 <Typography.Paragraph
                   type="secondary"
+                  className="io-hide"
                   style={{ fontSize: 12, marginBottom: 12 }}
                 >
                   {t("settings.provider.groupDesc")}
@@ -599,13 +661,8 @@ export function SettingsModal({
 
               <PanelBlock index={1}>
                 <Form.Item name="provider" label={t("settings.provider.label")}>
-                  <ProviderGrid />
+                  <ProviderGrid iconOnly={iconOnly} />
                 </Form.Item>
-                {provider && PROVIDER_HINTS[provider] && (
-                  <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: -8, marginBottom: 12 }}>
-                    {t(PROVIDER_HINTS[provider])}
-                  </Typography.Paragraph>
-                )}
               </PanelBlock>
 
               {/* 隐藏字段：各服务商保存的 key / 模型 / 模型列表 */}
@@ -619,10 +676,32 @@ export function SettingsModal({
                 <Input />
               </Form.Item>
 
-              <PanelBlock index={3}>
+              {/* 服务商联动内容：provider 一变就整块重挂载 → 入场错峰重播。
+                  字段值存于 form 实例（apiKey/model 按服务商分别保存在 providerApiKeys /
+                  providerModels），重挂载不会丢；上面的隐藏字段留在外层，不参与重挂载。 */}
+              <div key={provider ?? "none"} className={providerAnim ? "panel-anim-root" : undefined}>
+              <PanelBlock index={0}>
+                {provider && PROVIDER_HINTS[provider] && (
+                  <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: -8, marginBottom: 12 }}>
+                    {t(PROVIDER_HINTS[provider])}
+                  </Typography.Paragraph>
+                )}
+              </PanelBlock>
+
+              <PanelBlock index={1}>
               <Form.Item
                 name="apiKey"
-                label="API Key"
+                label={
+                  /* 无字模式：标签换成钥匙图标（名字仍可悬停看全）；
+                     常规模式回退成原来的文字标签 —— 这一处改动只服务无字模式 */
+                  iconOnly ? (
+                    <Tooltip title="API Key">
+                      <span><KeyGlyph /></span>
+                    </Tooltip>
+                  ) : (
+                    "API Key"
+                  )
+                }
                 rules={[{ required: true, message: t("settings.provider.apiKeyRequired") }]}
               >
                 <Input.Password
@@ -647,14 +726,27 @@ export function SettingsModal({
               </Form.Item>
               </PanelBlock>
 
-              <PanelBlock index={4}>
+              <PanelBlock index={2}>
               <Form.Item
                 name="model"
-                label="模型"
+                label={
+                  /* 同上：无字模式用立方体图标，常规模式回退文字「模型」 */
+                  iconOnly ? (
+                    <Tooltip title={t("settings.provider.modelLabel")}>
+                      <span><ModelGlyph /></span>
+                    </Tooltip>
+                  ) : (
+                    "模型"
+                  )
+                }
                 extra={
-                  provider === "zhipu"
-                    ? t("settings.provider.modelExtraZhipu")
-                    : t("settings.provider.modelExtra")
+                  /* 无字模式收起：右侧按钮本身就写着「获取模型列表」，是重复表述（判定报告 ①#8）。
+                     用条件渲染而不是 CSS 隐藏 —— antd 的 Form.Item extra 没有稳定的外部类名可挂钩。 */
+                  iconOnly
+                    ? undefined
+                    : provider === "zhipu"
+                      ? t("settings.provider.modelExtraZhipu")
+                      : t("settings.provider.modelExtra")
                 }
               >
                 {modelOptions.length === 0 ? (
@@ -733,7 +825,7 @@ export function SettingsModal({
               </Form.Item>
               </PanelBlock>
 
-              <PanelBlock index={5}>
+              <PanelBlock index={3}>
               {/* 连接验证（链接样式小按钮）+ 选中模型为免费时标注 */}
               <div
                 style={{
@@ -757,7 +849,7 @@ export function SettingsModal({
               </div>
               </PanelBlock>
 
-              <PanelBlock index={6}>
+              <PanelBlock index={4}>
               {/* Base URL 展示：自定义可编辑；预设只读灰色 + 官网跳转 */}
               {provider === "custom" ? (
                 <Form.Item name="baseUrl" label={t("settings.provider.baseUrl")}>
@@ -786,6 +878,7 @@ export function SettingsModal({
                 )
               )}
               </PanelBlock>
+              </div>
             </div>
             )}
 
@@ -794,8 +887,10 @@ export function SettingsModal({
             <div>
               <PanelBlock index={0}>
                 <Typography.Text strong>{t("settings.params.groupTitle")}</Typography.Text>
+                {/* 无字模式收起：两个字段各自已有 tooltip 在讲同一件事（判定报告 ①#9） */}
                 <Typography.Paragraph
                   type="secondary"
+                  className="io-hide"
                   style={{ fontSize: 12, marginBottom: 12 }}
                 >
                   {t("settings.params.groupDesc")}
@@ -832,9 +927,15 @@ export function SettingsModal({
             {activeSection === "glossary" && (
             <div>
               <PanelBlock index={0}>
-                <Typography.Text strong>{t("settings.glossary.groupTitle")}</Typography.Text>
+                {/* 分组标题：无字模式下格式约定改挂这里（判定报告 ②#4）。
+                    常规档不加 Tooltip —— 下方灰字原件还在，重复提示没有意义。 */}
+                <Tooltip title={iconOnly ? t("settings.glossary.customDescTip") : undefined}>
+                  <Typography.Text strong>{t("settings.glossary.groupTitle")}</Typography.Text>
+                </Tooltip>
+                {/* 无字模式收起：纯介绍（判定报告 ①#10） */}
                 <Typography.Paragraph
                   type="secondary"
+                  className="io-hide"
                   style={{ fontSize: 12, marginBottom: 12 }}
                 >
                   {t("settings.glossary.groupDesc")}
@@ -854,30 +955,55 @@ export function SettingsModal({
               </PanelBlock>
 
               <PanelBlock index={2}>
-              <Typography.Text type="secondary">
+              <Typography.Text type="secondary" className="io-hide">
                 {t("settings.glossary.customDesc")}
               </Typography.Text>
               </PanelBlock>
-              <PanelBlock index={3}>
+              {/* 行外壳负责入场 + 高度收拢，行内容负责横向滑出（见 App.css 的
+                  .anim-list-item / .anim-collapse / .anim-item-slide-out）。
+                  这里刻意不再套 PanelBlock —— 否则容器与行会叠两层同向动画。
+                  删除走"先播离场、动画结束再 remove"，空态文案与离场行不会叠在一起。 */}
+              <div>
               <Form.List name="userGlossary">
                 {(fields, { add, remove }) => (
                   <div style={{ marginTop: 8 }}>
                     {fields.length === 0 && (
-                      <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
+                      /* 无字模式收起：空列表 + 下面一个大虚线「+」按钮本身已经说明一切（判定报告 ①#11） */
+                      <Typography.Paragraph type="secondary" className="io-hide" style={{ marginBottom: 8 }}>
                         {t("settings.glossary.empty")}
                       </Typography.Paragraph>
                     )}
-                    {fields.map(({ key, name }) => (
-                      <Space key={key} align="baseline" style={{ display: "flex" }}>
-                        <Form.Item name={[name, 0]} rules={[{ required: true, message: t("settings.glossary.enRequired") }]}>
-                          <Input placeholder={t("settings.glossary.enPlaceholder")} style={{ width: 200 }} />
-                        </Form.Item>
-                        <Form.Item name={[name, 1]} rules={[{ required: true, message: t("settings.glossary.zhRequired") }]}>
-                          <Input placeholder={t("settings.glossary.zhPlaceholder")} style={{ width: 200 }} />
-                        </Form.Item>
-                        <MinusCircleOutlined onClick={() => remove(name)} />
-                      </Space>
-                    ))}
+                    {fields.map(({ key, name }) => {
+                      const leaving = leavingGlossary.includes(key);
+                      return (
+                      <div
+                        key={key}
+                        className={`anim-list-item anim-collapse${leaving ? " is-leaving" : ""}`}
+                      >
+                        <Space
+                          align="baseline"
+                          className={leaving ? "anim-item-slide-out" : undefined}
+                          style={{ display: "flex" }}
+                          onAnimationEnd={(e) => {
+                            // 入场动画同样会冒泡 animationend：只认离场关键帧
+                            if (e.target !== e.currentTarget || e.animationName !== "motion-slide-out") return;
+                            setLeavingGlossary((s) => s.filter((k) => k !== key));
+                            remove(name);
+                          }}
+                        >
+                          <Form.Item name={[name, 0]} rules={[{ required: true, message: t("settings.glossary.enRequired") }]}>
+                            <Input placeholder={t("settings.glossary.enPlaceholder")} style={{ width: 200 }} />
+                          </Form.Item>
+                          <Form.Item name={[name, 1]} rules={[{ required: true, message: t("settings.glossary.zhRequired") }]}>
+                            <Input placeholder={t("settings.glossary.zhPlaceholder")} style={{ width: 200 }} />
+                          </Form.Item>
+                          <MinusCircleOutlined
+                            onClick={() => setLeavingGlossary((s) => (s.includes(key) ? s : [...s, key]))}
+                          />
+                        </Space>
+                      </div>
+                      );
+                    })}
                     <Button
                       type="dashed"
                       onClick={() => add(["", ""])}
@@ -889,10 +1015,10 @@ export function SettingsModal({
                   </div>
                 )}
               </Form.List>
-              </PanelBlock>
+              </div>
 
               {/* 自定义提示词入口（并入术语表分组：统一译名与翻译风格） */}
-              <PanelBlock index={4}>
+              <PanelBlock index={3}>
               <Divider style={{ margin: "12px 0 8px" }} />
               <Button
                 block
@@ -910,8 +1036,12 @@ export function SettingsModal({
             {activeSection === "deepscan" && (
             <div>
               <PanelBlock index={0}>
-                <Typography.Text strong>{t("settings.deepScan.groupTitle")}</Typography.Text>
-                <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 12 }}>
+                {/* 分组标题：无字模式下模板说明改挂这里（判定报告 ②#5） */}
+                <Tooltip title={iconOnly ? t("settings.deepScan.groupHintTip") : undefined}>
+                  <Typography.Text strong>{t("settings.deepScan.groupTitle")}</Typography.Text>
+                </Tooltip>
+                {/* 无字模式收起：纯介绍，真正的规则说明在规则弹窗里逐条写着（判定报告 ①#12） */}
+                <Typography.Paragraph type="secondary" className="io-hide" style={{ fontSize: 12, marginBottom: 12 }}>
                   {t("settings.deepScan.groupDesc")}
                 </Typography.Paragraph>
               </PanelBlock>
@@ -949,7 +1079,10 @@ export function SettingsModal({
                 })}
               </PanelBlock>
               <PanelBlock index={2}>
-                <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 0 }}>
+                {/* 无字模式收起：整段都是"怎么用"的说明（模板约定 + 改完要重扫的提醒），
+                    没有可保留的图标；规则本身在点开的规则弹窗里逐条写着。
+                    本轮按用户点名隐藏 —— 常规模式照旧显示。 */}
+                <Typography.Paragraph type="secondary" className="io-hide" style={{ fontSize: 12, marginBottom: 0 }}>
                   {t("settings.deepScan.groupHint")}
                 </Typography.Paragraph>
               </PanelBlock>
@@ -961,9 +1094,13 @@ export function SettingsModal({
             <div>
               <PanelBlock index={0}>
                 <Typography.Text strong>{t("settings.threading.groupTitle")}</Typography.Text>
+                {/* 无字模式收起整条橙色警告（用户点名）。信息没有丢：
+                    「请求间隔」这一项自己挂着 tooltip，写着"间隔越大越不容易触发限流"，
+                    429 的现实含义也由占位/默认值（4 秒）承担；整块 Alert 留成空盒子更难看。 */}
                 <Alert
                   type="warning"
                   showIcon
+                  className="io-hide"
                   style={{ margin: "8px 0 12px" }}
                   message={
                     <div style={{ fontSize: 12, lineHeight: 1.7 }}>
@@ -1046,6 +1183,7 @@ export function SettingsModal({
               <Alert
                 type="warning"
                 showIcon
+                className="io-hide"
                 style={{ marginBottom: 12 }}
                 message={
                   <div style={{ fontSize: 12, lineHeight: 1.7 }}>
@@ -1058,40 +1196,35 @@ export function SettingsModal({
             </div>
             )}
 
-            {/* ===== 分组：个性化设置（主题 / 语言 / 导出命名 / 关闭行为 / 深度扫描） ===== */}
+            {/* ===== 分组：个性化设置（导出命名 / 关闭行为） =====
+                主题 / 语言 / 无字模式已搬到顶栏右上角的快捷开关（点一下即改、无需保存），
+                这里只留"需要想一下、且适合一并保存"的两项。 */}
             {activeSection === "appearance" && (
             <div>
               <PanelBlock index={0}>
                 <Typography.Text strong>{t("settings.appearance.groupTitle")}</Typography.Text>
+                {/* 无字模式收起：分组标题已把内容列全（判定报告 ①#14） */}
                 <Typography.Paragraph
                   type="secondary"
+                  className="io-hide"
                   style={{ fontSize: 12, marginBottom: 16 }}
                 >
                   {t("settings.appearance.groupDesc")}
                 </Typography.Paragraph>
               </PanelBlock>
               <PanelBlock index={1}>
-              <Space size="large" wrap align="start">
-                <Form.Item name="theme" label={t("settings.appearance.theme")} style={{ marginBottom: 8 }}>
-                  <Radio.Group optionType="button" buttonStyle="solid">
-                    <Radio.Button value="light"><SunGlyph /> {t("settings.appearance.light")}</Radio.Button>
-                    <Radio.Button value="dark"><MoonGlyph /> {t("settings.appearance.dark")}</Radio.Button>
-                  </Radio.Group>
-                </Form.Item>
 
-                <Form.Item name="language" label="语言 / Language" style={{ marginBottom: 8 }}>
-                  <Radio.Group optionType="button" buttonStyle="solid">
-                    <Radio.Button value="zh">中文</Radio.Button>
-                    <Radio.Button value="en">English</Radio.Button>
-                  </Radio.Group>
-                </Form.Item>
-              </Space>
-
-              {/* 两列并排：导出命名偏好 | 关闭行为；模组深度扫描 | 插件深度扫描 */}
+              {/* 两列并排：导出命名偏好 | 关闭行为
+                  第一列必须用 **max-content**（而不是 1fr）：命名偏好有三个按钮
+                  （原名 / 原名_zh_cn / AI 汉化名称），等分列宽时放不下就会把第三个
+                  挤到第二行 —— 而 antd 的 Radio.Button 靠 `:not(:first-child) { margin-left: -1px }`
+                  共享边框，单独一行的那颗会缺左边框、圆角也对不上，看起来就是"错位"。
+                  改成按内容定宽后第一列拿到完整空间，永不折行；第二列仍可伸缩，
+                  极窄窗口下优先牺牲它，而不是去拆命名那一组。 */}
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+                  gridTemplateColumns: "max-content minmax(0, 1fr)",
                   gap: "4px 32px",
                   marginTop: 4,
                 }}
@@ -1135,10 +1268,13 @@ export function SettingsModal({
                 <Typography.Title level={5} style={{ marginBottom: 4 }}>
                   <img src="/app-icon.svg" alt="" style={{ height: 22, marginRight: 8, verticalAlign: "middle" }} /> {t("settings.about.title")} v{appVersion}
                 </Typography.Title>
-                <Typography.Paragraph type="secondary" style={{ marginBottom: 4 }}>
+                {/* 软件简介 + 作者署名：无字模式下收起（用户点名）。
+                    标题行（图标 + 版本号）与下方 GitHub 链接保留 —— 一个"关于"页
+                    在无字模式下面仍要有身份与入口，这两行是身份，不是说明。 */}
+                <Typography.Paragraph type="secondary" className="io-hide" style={{ marginBottom: 4 }}>
                   {t("settings.about.desc")}
                 </Typography.Paragraph>
-                <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
+                <Typography.Paragraph type="secondary" className="io-hide" style={{ marginBottom: 8 }}>
                   {t("settings.about.author")}
                 </Typography.Paragraph>
                 <Typography.Link
@@ -1156,7 +1292,9 @@ export function SettingsModal({
               {/* about:storage：本地数据统计与清理（只动软件自己的数据目录） */}
               <div style={{ textAlign: "center" }}>
                 <Typography.Text strong>{t("settings.storage.title")}</Typography.Text>
-                <Typography.Paragraph type="secondary" style={{ fontSize: 12, margin: "4px 0 8px" }}>
+                {/* 无字模式收起：范围说明（用户点名）。下方两组数字 Tag 与两个按钮
+                    自己就把"这里管什么"表达清楚了；数据目录那行是**读数**，照旧保留。 */}
+                <Typography.Paragraph type="secondary" className="io-hide" style={{ fontSize: 12, margin: "4px 0 8px" }}>
                   {t("settings.storage.desc")}
                 </Typography.Paragraph>
                 <Space size={6} wrap style={{ justifyContent: "center", width: "100%" }}>
@@ -1185,23 +1323,34 @@ export function SettingsModal({
                     justifyContent: "center",
                   }}
                 >
-                  <Button
-                    size="small"
-                    loading={storageBusy === "cache"}
-                    disabled={storageBusy === "data"}
-                    onClick={handleClearCache}
-                  >
-                    {t("settings.storage.clearCache")}
-                  </Button>
-                  <Button
-                    size="small"
-                    danger
-                    loading={storageBusy === "data"}
-                    disabled={storageBusy === "cache"}
-                    onClick={handleClearData}
-                  >
-                    {t("settings.storage.clearData")}
-                  </Button>
+                  {/* 这两个按钮在无字模式下文字收起、只留图标（用户点名）。
+                      文字包 .ui-label 折叠，尺寸由 App.css 的 .settings-modal 规则兜住 ——
+                      折叠后只剩图标，若不兜 min-width 会缩成比图标还窄的小方块。
+                      图标本身（垃圾桶 / 清除）不足以区分"清缓存"和"清用户数据"，
+                      所以补 Tooltip 给名字。 */}
+                  <Tooltip title={iconOnly ? t("settings.storage.clearCache") : undefined}>
+                    <Button
+                      size="small"
+                      icon={<ClearOutlined />}
+                      loading={storageBusy === "cache"}
+                      disabled={storageBusy === "data"}
+                      onClick={handleClearCache}
+                    >
+                      <span className="ui-label">{t("settings.storage.clearCache")}</span>
+                    </Button>
+                  </Tooltip>
+                  <Tooltip title={iconOnly ? t("settings.storage.clearData") : undefined}>
+                    <Button
+                      size="small"
+                      danger
+                      icon={<DeleteOutlined />}
+                      loading={storageBusy === "data"}
+                      disabled={storageBusy === "cache"}
+                      onClick={handleClearData}
+                    >
+                      <span className="ui-label">{t("settings.storage.clearData")}</span>
+                    </Button>
+                  </Tooltip>
                 </div>
                 <Typography.Paragraph
                   type="secondary"

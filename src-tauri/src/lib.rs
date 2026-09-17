@@ -148,6 +148,8 @@ pub fn run() {
             commands::save_session_cache,
             commands::load_session_cache,
             commands::clear_session_cache,
+            commands::save_scan_cache,
+            commands::load_scan_cache,
             commands::session_v2_write_shard,
             commands::session_v2_write_index,
             commands::session_v2_load,

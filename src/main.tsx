@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import DevToolsRoot from "./devtools/DevToolsRoot";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { hydrateScanCache } from "./gameDirScanCache";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
 
@@ -22,10 +23,18 @@ function isDevtoolsWindow(): boolean {
   }
 }
 
+const devtoolsWin = __DEVTOOLS__ && isDevtoolsWindow();
+
+// 游戏目录扫描缓存是**落盘**的：先把磁盘那一份读进内存，之后 getScanCache 才能
+// 同步命中（否则重启后的第一次点击仍然会重扫）。不 await —— 读盘是异步的，
+// 但用户点目录之前它早就绪了；万一没赶上，最坏也就是这次重扫，不会出错。
+// 开发者工具窗口不碰游戏目录，省掉这次读盘与 IPC。
+if (!devtoolsWin) void hydrateScanCache();
+
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <ErrorBoundary>
-      {__DEVTOOLS__ && isDevtoolsWindow() ? <DevToolsRoot /> : <App />}
+      {devtoolsWin ? <DevToolsRoot /> : <App />}
     </ErrorBoundary>
   </React.StrictMode>,
 );

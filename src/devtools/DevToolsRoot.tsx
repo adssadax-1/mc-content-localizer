@@ -17,6 +17,7 @@ import { DEV_SETTINGS_SYNC } from "./bus";
 export default function DevToolsRoot() {
   const [themeMode, setThemeMode] = useState<"light" | "dark">("light");
   const [language, setLanguage] = useState<Language>("zh");
+  const [iconOnly, setIconOnly] = useState(false);
 
   // 初始：读一次设置
   useEffect(() => {
@@ -25,17 +26,19 @@ export default function DevToolsRoot() {
       .then((s) => {
         setThemeMode(s.theme === "dark" ? "dark" : "light");
         setLanguage(s.language === "en" ? "en" : "zh");
+        setIconOnly(s.iconOnly ?? false);
       })
       .catch(() => {});
   }, []);
 
-  // 实时联动：主窗口在主题/语言变化时广播 dev-settings-sync
+  // 实时联动：主窗口在主题/语言/无字模式变化时广播 dev-settings-sync
   useEffect(() => {
-    const un = listen<{ theme: "light" | "dark"; language: "zh" | "en" }>(
+    const un = listen<{ theme: "light" | "dark"; language: "zh" | "en"; iconOnly?: boolean }>(
       DEV_SETTINGS_SYNC,
       (e) => {
         setThemeMode(e.payload.theme === "dark" ? "dark" : "light");
         setLanguage(e.payload.language === "en" ? "en" : "zh");
+        setIconOnly(e.payload.iconOnly ?? false);
       },
     );
     return () => {
@@ -47,6 +50,11 @@ export default function DevToolsRoot() {
   useEffect(() => {
     document.documentElement.dataset.theme = themeMode;
   }, [themeMode]);
+
+  // 无字模式同理：两个窗口共用 App.css 的 [data-icon-only="true"] 规则
+  useEffect(() => {
+    document.documentElement.dataset.iconOnly = iconOnly ? "true" : "false";
+  }, [iconOnly]);
 
   return (
     <ConfigProvider theme={themeMode === "dark" ? darkTheme : lightTheme} locale={language === "zh" ? zhCN : enUS}>

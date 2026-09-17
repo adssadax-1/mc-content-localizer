@@ -178,6 +178,58 @@ body {
   font-size: 14px;
 }
 
+/* 侧边栏档位（设置页分组导航）：条目更高更宽，让"按钮"真正撑起一栏。
+   默认档留给主界面侧栏与游戏目录版本列表——那两处的行内还有计数等次级信息，
+   拉高反而松散。 */
+.slide-nav-lg {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.slide-nav-lg .slide-nav-item {
+  margin-top: 0;
+  padding: 9px 14px;
+  gap: 10px;
+  font-size: 14px;
+  border-radius: 8px;
+}
+
+.slide-nav-lg .slide-nav-item .anticon {
+  font-size: 16px;
+}
+
+/* ===== 设置弹窗：左侧分组导航做成侧边栏 =====
+   原来是 148px 的一列窄按钮贴在顶部，7 项只占内容区高度的三分之一，
+   读起来像"一排按钮"而不是"一栏导航"。
+   这里把整栏铺满内容高度并加底色，与右侧内容区形成明确两栏；
+   条目高度由 .slide-nav-lg 提供。宽度与主界面侧栏(200)对齐，两处导航手感一致。 */
+.settings-nav {
+  width: 200px;
+  flex-shrink: 0;
+  align-self: stretch;
+  /* 与右侧内容区 maxHeight:480 对齐：各分组的内容长短不一，
+     给侧栏一个固定下限，弹窗高度就不会在各分组之间跳来跳去 */
+  min-height: 456px;
+  padding: 6px 8px;
+  border-right: 1px solid var(--border-color, #F0F2F5);
+  /* 底色**与弹窗页面同色**（原来是 fill-quaternary，比页面稍深一点）。
+     深浅那一点点在浅色下像"没对齐的色块"、在深色下又像一块浮起的灰，
+     两栏的分界交给右分隔线就够，不必再加底色。 */
+  background: transparent;
+  border-radius: 8px 0 0 8px;
+}
+
+.settings-panel {
+  padding-right: 4px;
+}
+
+/* 无字模式下侧栏反而要更窄——无字模式的收益本来就是横向空间 */
+[data-icon-only="true"] .settings-nav {
+  width: 64px;
+  padding: 6px;
+}
+
 /* 设置面板 / 中央空态：分层错峰淡入（仅 opacity + transform） */
 @keyframes motion-rise {
   from {
@@ -255,7 +307,19 @@ body {
   .pack-card,
   .pack-card-expanded-content,
   .alert-slide,
-  .provider-grid-card {
+  .provider-grid-card,
+  .anim-list-item,
+  .anim-item-slide-out,
+  .anim-collapse,
+  .gd-ver-list .slide-nav-indicator,
+  /* 工作模式切换 */
+  .mode-pane,
+  /* 无字模式切换 */
+  .ui-label,
+  .ui-shrink,
+  .ui-label-block,
+  .ui-chrome .ant-btn > span:not(.ant-btn-icon):not(.anticon),
+  .ant-layout-sider.ui-chrome {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
@@ -366,4 +430,477 @@ body {
 }
 .gd-main-anim > * + * {
   animation-delay: 55ms;
+}
+
+/* ===== 列表项入场 / 离场（术语表 / 自定义规则 / 最近游戏目录 共用） =====
+   入场：元素挂载即播 motion-rise，新增行天然生效，不需要 JS。
+
+   离场：横向滑出 + 高度收拢，两件事必须同时做——
+     · 只滑不收 → 下方行仍会"啪"地跳上来补位，还是抖；
+     · 只收不滑 → 就是原方案的"原地缩掉"，观感发闷。
+   高度收拢用 grid-template-rows: 1fr → 0fr，纯 CSS，不用测像素高度。
+   离场动画结束时由 onAnimationEnd 真正 remove。 */
+@keyframes motion-slide-out {
+  from { opacity: 1; transform: translateX(0); }
+  to   { opacity: 0; transform: translateX(56px); }
+}
+
+/* 行外壳：负责入场 + 高度收拢。
+   入场动画放在外壳上（而不是行内容上），否则会被外壳的 overflow 裁掉一角。 */
+.anim-list-item {
+  animation: motion-rise var(--motion-dur-panel) var(--motion-ease-enter) both;
+}
+
+.anim-collapse {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows var(--motion-dur-base) var(--motion-ease-exit);
+}
+
+.anim-collapse > * {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.anim-collapse.is-leaving {
+  grid-template-rows: 0fr;
+}
+
+/* 行内容：只在离场时挂上，向右滑出并被外壳裁切 */
+.anim-item-slide-out {
+  animation: motion-slide-out var(--motion-dur-base) var(--motion-ease-exit) both;
+  pointer-events: none;
+}
+
+/* ===== 游戏目录：版本列表共享滑动指示器（与 .slide-nav 同源手感） ===== */
+.gd-ver-list {
+  position: relative;
+}
+
+/* 相对 .slide-nav 内收 6px：版本行有 12px 内边距，整幅贴边会显得块面过重 */
+.gd-ver-list .slide-nav-indicator {
+  left: 6px;
+  right: 6px;
+}
+
+.gd-ver-row {
+  position: relative;
+  z-index: 1;
+}
+
+.gd-ver-row.active {
+  color: #fff;
+}
+
+/* ===== 工作模式切换入场（自由导入 ↔ 游戏目录）=====
+   两块面板都挂 .mode-pane，谁「当前激活」谁就带 .is-active。
+   动画写在类上而不是靠重挂载，是因为两侧的挂载时机本来就不对称：
+     · 游戏目录面板是**常挂载**的（只切 display，靠它保住扫描结果与勾选状态），
+       要播动画只能靠「类被新加上」触发一次 animation；
+     · 自由导入面板是条件渲染、切回来必然是新挂载，类在挂载时就在，动画照播。
+   于是两个方向播同一段入场，不再有「一个方向有、反向是硬切」。
+   只动 transform / opacity，不触发 layout。 */
+@keyframes mode-pane-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.mode-pane.is-active {
+  /* 用 backwards 而不是 both：动画结束后不残留 transform —— 否则这个"零位移"
+     的 transform 会持续给后代建立包含块（fixed 定位的参照系），
+     属于埋一颗日后很难查的雷。from/to 与本态一致，观感没有区别。 */
+  animation: mode-pane-in var(--motion-dur-panel) var(--motion-ease-enter) backwards;
+}
+
+/* ===== 「开始 AI 翻译」主按钮 =====
+   强调方式走**横向占位**，不走"整体变大"：
+   · 高度保持默认 32，与同行其余按钮齐平 —— 曾经用过 size="large"（40px），
+     那是"在高度上把它抬出来"，会顶高整条工具栏，观感是"这个按钮肿了"，
+     换行时还会把行高带乱。用户要的是**变宽**，不是变大。
+   · 宽度靠 min-width 撑成明显的长方形：一是无字模式下文字收起后
+     不至于塌成 32×32 的小方块，二是跨语言（en 的 "Translate" 更短）
+     宽度保持一致，切换语言时按钮不会缩水。
+   工具栏里其余都是次要动作，只有它是推进流程的那一个，视觉权重靠"体量占位"表达。 */
+.app-translate-btn {
+  font-weight: 600;
+  min-width: 116px;
+  padding-inline: 20px;
+}
+
+.app-translate-btn .anticon {
+  font-size: 16px;
+}
+
+/* ===== 顶栏快捷开关：主题 / 语言 / 无字模式 =====
+   原先在设置弹窗的「个性化设置」里（要点「确定」才落盘）。它们都是"看一眼就想换"的
+   外观项，挪到常驻位置后改成**点一下即生效**，于是这里的样式要能独立表达"现在是哪一档"：
+
+   · 主题、无字模式：圆形描边按钮，图标即当前状态（太阳=亮色；无字模式开启时整颗按钮
+     换成强调态）。**不覆盖 color / border-color** —— 那是 antd 的按钮令牌，亮暗主题
+     各自适配，硬写一个灰值会在暗色下变成看不见的深灰。
+   · 语言：药丸形，直接写着当前语言码 + ▾ —— 语言没有天然图标，写 "ZH / EN"
+     反而最省事，也和设置里「语言 / Language」的措辞对得上。
+   强调色沿用应用既有的一支 #4A90D9（与服务商卡片的选中态、滑块的 --slide-indicator-bg 同色）。 */
+.app-quick-btn.is-on {
+  border-color: #4A90D9;
+  background: rgba(74, 144, 217, 0.08);
+  color: #4A90D9;
+}
+
+.app-lang-btn {
+  gap: 4px;
+  padding-inline: 12px;
+  border-radius: 999px;
+  border-color: #4A90D9;
+  background: rgba(74, 144, 217, 0.08);
+  color: #4A90D9;
+  font-weight: 600;
+}
+
+/* 暗色下同一档透明度会显得太淡，描边与文字才是主要识别手段，底色补一点 */
+[data-theme="dark"] .app-quick-btn.is-on,
+[data-theme="dark"] .app-lang-btn {
+  background: rgba(74, 144, 217, 0.18);
+}
+
+/* 「ZH / EN」是**状态读数**而不是按钮标签，无字模式下必须留着：
+   它是"我现在用的是哪门语言"的唯一指示，而且只有两个字母、占不了地方。
+   通用折叠规则会把无字模式下外壳按钮里的文字 span 归零宽度，这里补一条例外。
+   特异性 (0,6,1) > 通用规则 (0,5,1)，所以不依赖书写顺序。 */
+[data-icon-only="true"] .ui-chrome .ant-btn.app-lang-btn > span:not(.ant-btn-icon):not(.anticon) {
+  max-width: 40px;
+  opacity: 1;
+}
+
+/* ============================================================================
+   无字模式（icon-only）
+   ----------------------------------------------------------------------------
+   由 <html data-icon-only="true"> 驱动，与 [data-theme] 完全同构：
+   React 只管写这一个属性，其余全是 CSS —— 组件不必逐层传"我是不是无字模式"。
+   唯一的 JS 分支是「要不要挂 Tooltip」（见 SlideNav），因为那是组件结构问题。
+
+   作用范围**只有外壳**：顶栏 / 侧栏 / 主工具栏 / 页脚。
+   内容区（EntryTable 的原文译文、术语表、日志、内容包列表、结果 Alert）
+   一律不隐藏文字 ——「译文」本身就是文字，属于软件本体。
+
+   文字退场用「原地折叠」而不是 sr-only：
+   sr-only 会把元素瞬间裁成 1×1，opacity 过渡根本看不见（观感是"啪地消失"）；
+   display:none / visibility:hidden 则会把文字移出无障碍树、读屏只剩"按钮"。
+   折叠 + 淡出既留得住过渡，也留得住 DOM 与无障碍名。
+   ============================================================================ */
+
+/* --- 双向时序：进/出顺序相反 ---
+   CSS transition 取的是「变化后」命中的那条声明，于是天然能表达两个方向：
+   · 常规 → 无字：命中 [data-icon-only] 那条 → 文字无延迟先走（0–180ms），
+     侧栏宽度延迟 40ms 跟上（40–300ms），总 300ms。
+   · 无字 → 常规：命中基础那条 → 宽度先拉开，文字延迟 200ms 浮现，
+     像"在拉出来的空间里浮上来"，而不是"在 64px 里挤着淡入"。 */
+
+.ui-label {
+  display: inline-block;
+  max-width: 200px;
+  opacity: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  /* 刻意不写 vertical-align：单行 inline-block 的基线就是它自己文字的基线，
+     与改前"纯 inline"的排版完全一致；写成 middle 反而会让顶栏标题
+     相对左侧图标整体上浮几像素，改动到正常模式的观感。 */
+  transition:
+    max-width var(--motion-dur-panel) var(--motion-ease-slide) 0ms,
+    opacity var(--motion-dur-fast) var(--motion-ease-enter) 200ms;
+}
+
+[data-icon-only="true"] .ui-label {
+  max-width: 0;
+  opacity: 0;
+  transition:
+    max-width var(--motion-dur-fast) var(--motion-ease-exit) 0ms,
+    opacity var(--motion-dur-fast) var(--motion-ease-exit) 0ms;
+}
+
+/* 已是 block / inline-flex 的元素（按钮里的 ▾ 就是 .anticon，本身是 inline-flex）：
+   只收缩尺寸，**不动 display** —— 改 display 会踩掉 .anticon 的
+   inline-flex + line-height:0，SVG 会顺着零高行盒被 overflow:hidden 裁掉。 */
+.ui-shrink {
+  max-width: 32px;
+  overflow: hidden;
+  transition:
+    max-width var(--motion-dur-panel) var(--motion-ease-slide) 0ms,
+    opacity var(--motion-dur-fast) var(--motion-ease-enter) 200ms;
+}
+
+[data-icon-only="true"] .ui-shrink {
+  max-width: 0;
+  opacity: 0;
+  transition:
+    max-width var(--motion-dur-fast) var(--motion-ease-exit) 0ms,
+    opacity var(--motion-dur-fast) var(--motion-ease-exit) 0ms;
+}
+
+/* 块级小标题（侧栏「内容包类型」）：inline 折叠压不掉行高，得整行收起，
+   否则会在原处留一条空白行 */
+.ui-label-block {
+  max-height: 40px;
+  opacity: 1;
+  overflow: hidden;
+  transition:
+    max-height var(--motion-dur-panel) var(--motion-ease-slide) 0ms,
+    opacity var(--motion-dur-fast) var(--motion-ease-enter) 200ms;
+}
+
+[data-icon-only="true"] .ui-label-block {
+  /* ⚠️ display: block 不是可选项 —— 没有它这整条规则基本是白写的。
+     原因是「块级折叠」这件事本身：**max-height 对非替换的 inline 元素完全不生效**
+     （CSS 2.1 §10.7 的适用性限制），而 `Typography.Text` 渲染出来的
+     `<span class="ant-typography">` 正是 `display: inline`（见 antd typography 样式）。
+     于是 max-height: 0 被忽略、只剩 opacity: 0 把字藏了，**它占的那几行空间一直留着** ——
+     用户看到的就是侧栏顶部一条莫名其妙的空白（实测 35px），
+     而这段代码的注释还写着"整行收掉，不留一条空行"。
+
+     这里只在无字档显式转成块级：常规档它仍是 inline，排版一字不动。 */
+  display: block;
+  max-height: 0;
+  opacity: 0;
+  transition:
+    max-height var(--motion-dur-fast) var(--motion-ease-exit) 0ms,
+    opacity var(--motion-dur-fast) var(--motion-ease-exit) 0ms;
+}
+
+/* --- ① 侧栏：200 → 64 ---
+   64 = 左右各留 12px（与常规模式同一节奏，不破坏既有栅格）+ 中间正好 40px 条目。
+   不用 antd 的 collapsedWidth(80)：40px 条目塞在 80 里会显得空。 */
+.ant-layout-sider.ui-chrome {
+  transition:
+    width var(--motion-dur-panel) var(--motion-ease-slide) 40ms,
+    flex-basis var(--motion-dur-panel) var(--motion-ease-slide) 40ms,
+    max-width var(--motion-dur-panel) var(--motion-ease-slide) 40ms,
+    min-width var(--motion-dur-panel) var(--motion-ease-slide) 40ms;
+}
+
+/* width / flex / max-width / min-width 都是 antd 写在元素上的内联样式，
+   只有 !important 压得住 */
+[data-icon-only="true"] .ant-layout-sider.ui-chrome {
+  width: 64px !important;
+  flex: 0 0 64px !important;
+  max-width: 64px !important;
+  min-width: 64px !important;
+}
+
+/* 计数是数字不是文字，无字模式下保留（侧栏里信息密度最高的一项），只改为居中 */
+[data-icon-only="true"] .ui-sider-count {
+  padding-left: 0 !important;
+  text-align: center;
+}
+
+/* --- ② 导航条目（侧栏 + 设置弹窗共用同一处 CSS）---
+   高度在无字档写死 40px，指示器才有个确定值可对 */
+[data-icon-only="true"] {
+  --slide-item-h: 40px;
+}
+
+[data-icon-only="true"] .slide-nav-item {
+  justify-content: center;
+  gap: 0;
+  height: var(--slide-item-h);
+  padding: 0;
+}
+
+[data-icon-only="true"] .slide-nav-item .anticon {
+  font-size: 18px;
+}
+
+/* 指示器高度：JS 每次切换都会写一行内联 height（常规档的实测值），
+   无字档直接用 !important 接管。比"让 JS 重测一遍"少一整类时序问题——
+   属性是在 effect 里写的，晚于子组件 useLayoutEffect 读 offsetHeight 的那一刻，
+   靠 JS 重测必然先量到旧高度。 */
+[data-icon-only="true"] .slide-nav-indicator {
+  height: var(--slide-item-h) !important;
+}
+
+/* --- ③ 按钮方形化 ---
+   antd 只在「完全没有 children」时才加 .ant-btn-icon-only（自动变方形）。
+   本方案是"保留 children、靠 CSS 收起"，所以 antd 不会加这个类，得自己补宽度。
+
+   两个必须精确的点（antd 6 的真实结构，踩过）：
+   · 图标外面还包了一层 <span class="ant-btn-icon">，所以判断"有没有图标"
+     要用 :has(> .ant-btn-icon)，不是 :has(> .anticon)。
+   · 文字 span 是"直接子 span 且不是 .ant-btn-icon / .anticon"；
+     写成 > span:not(.anticon) 会把图标那层也当成文字收掉（只剩文字、图标消失）。
+
+   只作用于 .ui-chrome 内部：内容区的按钮（解析并加入列表、全选本面板…）
+   一个都不动 —— 那些按钮脱离了文字就无法理解。
+
+   padding 必须跟着一起过渡，不能瞬时归零：按钮宽度是"内容撑开"的，
+   若 padding 一下子变 0 而文字还要 180ms 才收完，按钮会比内容窄，
+   文字就顶出按钮外了。两者同速收缩则恒有 按钮宽 ≥ 内容宽，永远不溢出。 */
+.ui-chrome .ant-btn > span:not(.ant-btn-icon):not(.anticon) {
+  max-width: 200px;
+  overflow: hidden;
+  white-space: nowrap;
+  transition:
+    max-width var(--motion-dur-panel) var(--motion-ease-slide) 0ms,
+    opacity var(--motion-dur-fast) var(--motion-ease-enter) 200ms;
+}
+
+[data-icon-only="true"] .ui-chrome .ant-btn > span:not(.ant-btn-icon):not(.anticon) {
+  max-width: 0;
+  opacity: 0;
+  transition:
+    max-width var(--motion-dur-fast) var(--motion-ease-exit) 0ms,
+    opacity var(--motion-dur-fast) var(--motion-ease-exit) 0ms;
+}
+
+/* 文字 span 归零后，antd 的 gap 仍会把它算作一个 flex item → 多出几像素偏移。
+   这是最容易漏、也最容易被误判成"没对齐"的一处。 */
+[data-icon-only="true"] .ui-chrome .ant-btn:has(> .ant-btn-icon) {
+  gap: 0;
+  padding-inline: 0;
+  min-width: 32px;
+}
+
+/* 主 CTA 在无字模式下**不参与方形化**：
+   其余按钮收成 32×32 的方块，它把宽度留住、保持长方形，于是工具栏里
+   第一眼就能看出"该点哪个"。只改 min-width，**不碰 height** —— 与常规档同高，
+   不会出现"整条工具栏里只有它高出一截"。 */
+[data-icon-only="true"] .ui-chrome .ant-btn.app-translate-btn {
+  min-width: 96px;
+  padding-inline: 0;
+}
+
+/* 与上面那条成对：常规档也要有一段 padding 过渡，否则"无字 → 常规"时
+   宽度会先弹回来、文字 200ms 后才浮现，中间空一块。
+
+   注意这里必须把 antd 原本的 `transition: all …`（hover 变色/阴影）一起写回来：
+   本规则特异性(30)高于 antd 的 `.ant-btn`(10)，只写 padding 会把 all 整条顶掉，
+   表现为无字模式下这几个按钮的 hover 过渡"没了"。padding 写在 all 之后，
+   同属性按后者生效。变量取不到时用 antd 的默认值兜底。 */
+.ui-chrome .ant-btn:has(> .ant-btn-icon) {
+  transition:
+    all var(--ant-motion-duration-mid, 0.2s) var(--ant-motion-ease-in-out, cubic-bezier(0.645, 0.045, 0.355, 1)),
+    padding var(--motion-dur-panel) var(--motion-ease-slide) 0ms,
+    gap var(--motion-dur-fast) var(--motion-ease-exit) 0ms,
+    min-width var(--motion-dur-panel) var(--motion-ease-slide) 0ms,
+    height var(--motion-dur-panel) var(--motion-ease-slide) 0ms;
+}
+
+/* 顶栏是视觉权重最高的一行，命中区放宽到 36（仍落在 antd 既有尺寸上） */
+[data-icon-only="true"] .ui-chrome.ant-layout-header .ant-btn:has(> .ant-btn-icon) {
+  min-width: 36px;
+  height: 36px;
+}
+
+/* 全选那个复选框：文字收起后，antd 包文字的那层 span 也会占住 gap */
+[data-icon-only="true"] .ui-chrome .ant-checkbox-wrapper {
+  gap: 0;
+}
+
+/* --- ④ 顶栏 Segmented：两个 option 都补了 icon，文字收起后每段 40×32 --- */
+[data-icon-only="true"] .ui-chrome .ant-segmented-item {
+  min-width: 40px;
+  padding-inline: 0;
+}
+
+[data-icon-only="true"] .ui-chrome .ant-segmented-item-label {
+  padding-inline: 0;
+  text-align: center;
+}
+
+/* --- ⑤ 页脚：纯说明文案（支持的格式 + 开源声明），整块收起不留空边。
+   GitHub 入口顶栏还有一个，不会丢。 --- */
+[data-icon-only="true"] .ui-footer {
+  display: none;
+}
+
+/* ============================================================================
+   ⑥ 灰字精简（仅在无字模式下生效）
+   ----------------------------------------------------------------------------
+   无字模式的目的是"把横向空间还给内容"。除了折叠按钮文字，还有一类占地方的东西：
+   成段的灰色小字说明（分组介绍、格式约定、操作顺序）。它们在常规模式下是有用的
+   首次引导，但在无字模式下就只是纯噪声 —— 用户已经主动选了"只要图标"。
+
+   判定与逐条明细见《灰字精简-判定报告.md》，三条出路：
+     · .io-hide   → 直接删掉（信息在按钮/placeholder 里已重复，或纯"介绍这个软件"）
+     · hover      → 删掉并把内容挪到相邻黑字标题/图标的 Tooltip 上（JSX 侧条件渲染）
+     · 保留       → 不加类（数据读数、不可逆操作的安全告知、空态引导）
+
+   **常规模式一个字都不动** —— 这里所有规则都挂在 [data-icon-only="true"] 下，
+   与"非无字模式保留原样"是同一条约束。
+   ============================================================================ */
+[data-icon-only="true"] .io-hide {
+  display: none !important;
+}
+
+/* --- ⑦ 游戏目录页（内容区，不在 .ui-chrome 内）
+   这一页是"选目录 → 勾包"的操作区，无字模式下按钮与分类行同样只留图标。
+   单独成组、而不是放开 .ui-chrome 的作用域，原因有二：
+     · .ui-chrome 的规则里有 36px 的命中区放大，那是给顶栏尺寸定的，
+       套到这一页 size="small" 的小按钮上会把排版撑破；
+     · 内容区默认不动是大原则，这里是"按用户明确要求"开的一个小口子，
+       用独立且语义清楚的选择器标记出来，日后好审计。
+
+   判定用 :has(> .ui-label) 而**不是** :has(> .ant-btn-icon) —— 这一页里还有
+   一批带图标但不该收文字的按钮（面板里的"全选本面板"等）。按"有没有图标"判定会把
+   它们一起卷进来：padding 归零、min-width 压到 32，文字就会顶到边框上。
+   按"文字是否可折叠"判定，就等于"只收我明确标了 .ui-label 的那些"。 --- */
+[data-icon-only="true"] .gd-io .ant-btn:has(> .ui-label) {
+  gap: 0;
+  padding-inline: 0;
+  min-width: 32px;
+}
+
+/* 「按钮变大了」这件事，人眼其实是**靠图标**认的，不是靠那圈边框 ——
+   只把边框撑大、图标还是 14px，观感上等于没改（已被退回过一次）。
+   所以凡是"文字被收掉"的按钮，图标同步放大到 18px：与侧栏条目的 18px 同一个口径。 */
+[data-icon-only="true"] .gd-io .ant-btn:has(> .ui-label) .anticon {
+  font-size: 18px;
+}
+
+/* 「重新扫描」是同排的纯图标按钮（本来就没有文字），主入口的图标一放大，
+   它那个 14px 会明显偏小、整行失重 —— 一起抬到 18px。 */
+[data-icon-only="true"] .gd-io .gd-rescan-btn .anticon {
+  font-size: 18px;
+}
+
+/* size="small" 的按钮（"全选 / 模组 / 资源包 / 光影包 / 插件"那一排）常规档高 24、
+   收完文字后只剩 26px 宽，比同一行的搜索框、重扫按钮都小一圈，显得零星。
+   抬到 44×32：32 与同一行搜索框的高度**对齐**（原来 24 比输入框矮一截，
+   基线本来就不齐），44 保证图标两侧有足够留白、不再像"挤在一起的四个小方块"。 */
+[data-icon-only="true"] .gd-io .ant-btn-sm:has(> .ui-label) {
+  min-width: 44px;
+  height: 32px;
+}
+
+/* 「打开游戏目录」常规档是 flex:1 铺满左栏。无字档要**保持这个长度**：
+   它这一页的主入口，缩成小方块就跟右边的「重新扫描」分不清主次了。
+
+   ⚠️ 上一版这里写的是 `flex: 0 0 auto` + 不带 !important 的 min-width，
+   结果按钮反而**更短**了，两个原因叠在一起：
+     · `flex: 0 0 auto` 让它"按内容宽" —— 文字一收，内容只剩一个 14px 图标；
+     · Button 上有一层**行内** style={{ flex: 1, minWidth: 0 }}，行内样式优先于
+       任何非 !important 的 CSS，所以 min-width:96 根本没生效（不报错、静默失效）。
+   现在两处都带 !important：flex 改成 1 1 auto（把左栏剩余宽度全吃掉，
+   长度与常规档完全一致），min-width 作为窄栏时的下限兜底。 */
+[data-icon-only="true"] .gd-io .ant-btn.gd-open-btn:has(> .ui-label) {
+  flex: 1 1 auto !important;
+  min-width: 96px !important;
+}
+
+/* 主入口的图标再大一档：它是这一行里唯一的"实心"按钮，图标太小会显得里面是空的 */
+[data-icon-only="true"] .gd-io .gd-open-btn:has(> .ui-label) .anticon {
+  font-size: 20px;
+}
+
+/* --- ⑧ 设置弹窗里"文字可折叠"的按钮
+   弹窗不在 .ui-chrome 作用域内，所以要单独一条；判定条件沿用"文字是否可折叠"
+   （显式标了 .ui-label），因为弹窗里绝大多数按钮必须保留文字
+   （获取模型列表 / 编辑提示词 / 重新统计 / 检查更新…），一律收会全废掉。
+
+   无字模式下这些按钮只剩一个图标，若不管尺寸，size="small" 会把它们缩到
+   比图标还窄的小方块 —— 所以这里显式兜住下限，保证"文字可隐藏但按钮不过小"。 */
+[data-icon-only="true"] .settings-modal .ant-btn:has(> .ui-label) {
+  gap: 0;
+  padding-inline: 12px;
+  min-width: 48px;
+  /* size="small" 是 24；抬到 28 —— 文字收掉后 24 会显得"塌"下去 */
+  height: 28px;
 }

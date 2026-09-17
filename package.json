@@ -1,7 +1,7 @@
 {
   "name": "mod-translator",
   "private": true,
-  "version": "3.1.0",
+  "version": "3.1.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev:devtools": "cross-env DEVTOOLS=1 tauri dev -- --features devtools",
-    "tauri:build:devtools": "cross-env DEVTOOLS=1 tauri build -- --features devtools"
+    "tauri:build:devtools": "cross-env DEVTOOLS=1 tauri build --config src-tauri/tauri.devtools.conf.json --features devtools"
   },
   "dependencies": {
     "@air/react-drag-to-select": "^5.0.11",

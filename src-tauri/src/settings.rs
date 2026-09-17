@@ -97,6 +97,9 @@ pub struct Settings {
   /// 界面语言：zh（中文）/ en（英文）
   #[serde(default = "default_language")]
   pub language: String,
+  /// 无字模式：隐藏外壳（顶栏/侧栏/工具栏/页脚）的文字，只保留图标
+  #[serde(default)]
+  pub icon_only: bool,
   /// 主窗口关闭行为：exit（直接退出，默认）/ minimize（最小化到托盘）
   #[serde(default = "default_close_behavior")]
   pub close_behavior: String,
@@ -137,6 +140,7 @@ impl Default for Settings {
             custom_prompts: HashMap::new(),
             theme: default_theme(),
             language: default_language(),
+            icon_only: false,
             close_behavior: default_close_behavior(),
             recent_game_dirs: Vec::new(),
             export_naming: default_export_naming(),

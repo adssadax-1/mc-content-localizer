@@ -1,4 +1,4 @@
-import { memo, startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { memo, startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Alert,
   Button,
@@ -29,10 +29,9 @@ import {
   DeleteOutlined,
   DownOutlined,
   ExportOutlined,
-  AppstoreOutlined,
   GithubOutlined,
+  MoonOutlined,
   PauseOutlined,
-  PictureOutlined,
   PlayCircleOutlined,
   RightOutlined,
   SaveOutlined,
@@ -40,7 +39,7 @@ import {
   StopOutlined,
   SunOutlined,
   ThunderboltOutlined,
-  ToolOutlined, CloudServerOutlined } from "@ant-design/icons";
+  ToolOutlined } from "@ant-design/icons";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import zhCN from "antd/locale/zh_CN";
@@ -55,11 +54,13 @@ import { ContextPanel } from "./components/ContextPanel";
 import { SettingsModal } from "./components/SettingsModal";
 import { DeepScanRulesModal } from "./components/DeepScanRulesModal";
 import { DeepScanIcon } from "./components/DeepScanIcon";
+import { IconOnlyIcon } from "./components/IconOnlyIcon";
 import { pushInvoke } from "./components/DevToolsPanel";
 import { type DevResultKind, DEV_SHOW_RESULT_ALERT, DEV_SHOW_EXPORT_ERROR, DEV_SETTINGS_SYNC, DEV_FAULT_CHANGED, type DevFaultNotice } from "./devtools/bus";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, emit, type UnlistenFn } from "@tauri-apps/api/event";
 import { TranslationProvider, useTranslation, useTranslationContext } from "./i18n";
+import { KIND_META, KIND_ORDER, MODE_ICON, type PackKind } from "./kindMeta";
 import { LOADER_LABEL, packFormatForMc } from "./types";
 
 // devApi 代理：__DEVTOOLS__ 时包装 api，每次 invoke 记录到 ring buffer；生产构建直接用原 api。
@@ -164,6 +165,25 @@ function asDir(dir: string | string[] | null): string | null {
   return Array.isArray(dir) ? dir[0] : dir;
 }
 
+/**
+ * 无字模式下给图标按钮补 hover 名称。
+ *
+ * 按钮文字被收起后只剩一个图标，用户只能靠认图标猜功能 —— 必须给名字。
+ * 常规模式**原样返回不加任何包裹**：多一层 span 会在 antd Space 的间距与
+ * 对齐上引入无谓的变化，而那时按钮本来就有文字，Tooltip 纯属重复。
+ *
+ * 里面那层 span 是为禁用态准备的：`<button disabled>` 在 Chromium 下不派发
+ * mouse 事件，Tooltip 直接挂在按钮上永远不触发，得由一层未禁用的元素承接悬停。
+ */
+function withIconOnlyTip(iconOnly: boolean, name: string, node: ReactNode): ReactNode {
+  if (!iconOnly) return node;
+  return (
+    <Tooltip title={name}>
+      <span style={{ display: "inline-flex" }}>{node}</span>
+    </Tooltip>
+  );
+}
+
 /** 插件导出条目：把条目键（file_path#key_path）拆成导出所需的两段 */
 function pluginItems(entries: LangEntry[]): { filePath: string; keyPath: string; translation: string }[] {
   return entries.map((e) => ({
@@ -244,9 +264,6 @@ function effectiveDeepRules(item: PackItem, settings: Settings | null): DeepScan
   }
   return merged;
 }
-
-/** 内容包类型 */
-type PackKind = "mod" | "shader" | "resourcepack" | "plugin";
 
 /** 自由导入：单次导入超过该数量时，卡片默认收缩（展开会为每包挂载表格，数量大时卡顿） */
 const AUTO_EXPAND_MAX = 10;
@@ -351,13 +368,6 @@ function buildResultAlert(
     desc: <div>{lines.map((l, i) => <div key={i} style={{ marginBottom: 4 }}>{l}</div>)}</div>,
   };
 }
-
-const KIND_META: Record<PackKind, { labelKey: string; icon: React.ReactNode; color: string }> = {
-  mod: { labelKey: "app.mod", icon: <AppstoreOutlined />, color: "#4A90D9" },
-  shader: { labelKey: "app.shader", icon: <SunOutlined />, color: "#D97706" },
-  resourcepack: { labelKey: "app.resourcepack", icon: <PictureOutlined />, color: "#16A34A" },
-  plugin: { labelKey: "app.plugin", icon: <CloudServerOutlined />, color: "#7C3AED" },
-};
 
 /** 右上角全局结果卡片：底部 2s 读条后自动收起，右上角 × 可手动关闭 */
 function showResultCard(
@@ -689,7 +699,35 @@ function AppInner({
   /** 从磁盘重新读取设置（清除用户数据后磁盘上已是默认值） */
   reloadSettings: () => Promise<void>;
 }) {
-  const { t } = useTranslationContext();
+  const { t, currentLanguage } = useTranslationContext();
+  /** 无字模式：外壳文字隐藏（真正的隐藏逻辑全在 App.css 的 [data-icon-only="true"]，
+      这里只用于「要不要挂 Tooltip / 换图标」这类必须走 JS 的分支） */
+  const iconOnly = settings?.iconOnly ?? false;
+  /** 主题：顶栏快捷开关要按当前档位换图标（亮色=太阳 / 暗色=月亮） */
+  const themeMode = settings?.theme ?? "light";
+
+  /**
+   * 顶栏快捷开关的写盘动作（主题 / 语言 / 无字模式）。
+   *
+   * 这三项原先在设置弹窗里，要按「确定」才落盘 —— 但它们都是"看一眼就想换"的外观项，
+   * 挪到常驻位置后就该点一下即生效：**不弹确认、不弹成功提示**（外观变化本身就是反馈）。
+   *
+   * 顺序上先更新本地 settings、再写盘：过渡动画立刻开跑，不必等 IPC 往返；
+   * 写盘失败则回读磁盘把界面拉回真实状态，避免"看着变了、重启又变回去"的悬空态。
+   */
+  const quickPatch = useCallback(
+    async (patch: Partial<Settings>) => {
+      if (!settings) return;
+      setSettings({ ...settings, ...patch });
+      try {
+        await api.patchSettings(patch as Record<string, unknown>);
+      } catch (e) {
+        message.error(String(e));
+        await reloadSettings();
+      }
+    },
+    [settings, setSettings, reloadSettings],
+  );
   const [queue, setQueue] = useState<PackItem[]>([]);
   const [activeTab, setActiveTab] = useState<PackKind>("mod");
   const [dragOver, setDragOver] = useState(false);
@@ -2651,6 +2689,7 @@ function AppInner({
   return (
     <Layout style={{ height: "100vh" }}>
       <Header
+        className="ui-chrome"
         style={{
           display: "flex",
           alignItems: "center",
@@ -2662,25 +2701,94 @@ function AppInner({
         <Space size="middle">
           <Typography.Title level={4} style={{ margin: 0 }} className="app-title-text">
             <img src="/app-icon.svg" alt="" style={{ height: 26, verticalAlign: "middle" }} />
-            <span style={{ marginLeft: 8 }}>{t("app.title")}</span>
+            <span className="ui-label" style={{ marginLeft: 8 }}>{t("app.title")}</span>
           </Typography.Title>
-          {queue.length > 0 && <Tag color="blue">{queue.length} {t("app.tag")}</Tag>}
+          {/* 队列计数拆成「数字 + 文字」两段：无字模式只隐藏文字部分，
+              数字是数据读数、又不与任何图标重复，留着信息量最大 */}
+          {queue.length > 0 && (
+            <Tag color="blue" style={{ marginRight: 0 }}>
+              {queue.length}
+              <span className="ui-label" style={{ marginLeft: 4 }}>{t("app.tag")}</span>
+            </Tag>
+          )}
         </Space>
+        {/* 无字模式下两个选项只剩图标，所以两个 option 都必须有 icon
+            （原来纯文字，不补图标会变成两个空段）。
+            label 直接条件渲染掉而不是靠 CSS 收起：antd Segmented 的高亮滑块
+            是按项宽算位置并带动画的，项宽若在 260ms 里连续变化，滑块会跟不上；
+            这里瞬时换宽反而更稳（整个无字模式切换本身就是一次布局变化）。 */}
         <Segmented
           value={workMode}
           onChange={(v) => setWorkMode((v as string) === "gamedir" ? "gamedir" : "free")}
           options={[
-            { label: "自由导入", value: "free" },
-            { label: "游戏目录", value: "gamedir" },
+            { label: iconOnly ? undefined : "自由导入", icon: MODE_ICON.free, value: "free", tooltip: "自由导入" },
+            { label: iconOnly ? undefined : "游戏目录", icon: MODE_ICON.gamedir, value: "gamedir", tooltip: "游戏目录" },
           ]}
         />
         <Space>
-          <Button type="text" icon={<GithubOutlined />} onClick={openGithub} className="app-github-btn">
-            {t("app.github")}
-          </Button>
-          <Button icon={<SettingOutlined />} onClick={() => setSettingsOpen(true)} className="app-settings-btn">
-            {t("app.settings")}
-          </Button>
+          {/* ==== 顶栏快捷开关：主题 / 语言 / 无字模式 ====
+              原先在设置弹窗的「个性化设置」里（要点「确定」才落盘）。这三项都是
+              "看一眼就想换"的外观项，放在常驻位置、点一下即改更顺手；留在弹窗里的
+              只有「导出命名偏好 / 关闭行为」这类需要想一下、且适合一并保存的项。
+
+              语言用 Dropdown（要选具体哪一门），主题与无字模式是二值开关，直接点。
+              三者的图标都表达**当前状态**：亮色=太阳 / 暗色=月亮，无字模式开启时
+              按钮带强调色描边，状态一眼可见，不必点开才知道现在是哪档。 */}
+          <Tooltip title={t("app.themeTip")}>
+            <Button
+              className="app-quick-btn"
+              shape="circle"
+              icon={themeMode === "dark" ? <MoonOutlined /> : <SunOutlined />}
+              onClick={() => void quickPatch({ theme: themeMode === "dark" ? "light" : "dark" })}
+            />
+          </Tooltip>
+          {/* 语言：沿用原来的下拉样式（当前语言码 + ▾，点开选）。
+              试过做成"点一下双面翻转"的二值开关，实际在 WebView 里两个面会叠在一起
+              （翻转的 3D 被压平，正面「中」和背面镜像的「En」同时可见），
+              所以退回下拉这一版。 */}
+          {/* Tooltip 套在 Dropdown **外面**：Dropdown 的展开靠 clone 自己的子元素挂事件，
+              中间夹一层就不认了（同「清除 ▾」那处）。 */}
+          <Tooltip title={t("app.langTip")}>
+            <Dropdown
+              trigger={["click"]}
+              menu={{
+                items: [
+                  { key: "zh", label: "中文" },
+                  { key: "en", label: "English" },
+                ],
+                selectable: true,
+                selectedKeys: [currentLanguage],
+                onClick: ({ key }) => {
+                  if (key !== currentLanguage) void quickPatch({ language: key as "zh" | "en" });
+                },
+              }}
+            >
+              <Button className="app-lang-btn">
+                {currentLanguage === "zh" ? "ZH" : "EN"}
+                <DownOutlined />
+              </Button>
+            </Dropdown>
+          </Tooltip>
+          {/* 这一项没有"看一眼就知道"的图标，所以 Tooltip 就是它的名字 ——
+              只说"无字模式"四个字，档位可以从按钮本身的强调态看出来，不必写进悬停文案。 */}
+          <Tooltip title={t("settings.appearance.iconOnly")}>
+            <Button
+              className={`app-quick-btn${iconOnly ? " is-on" : ""}`}
+              shape="circle"
+              icon={<IconOnlyIcon />}
+              onClick={() => void quickPatch({ iconOnly: !iconOnly })}
+            />
+          </Tooltip>
+          <Tooltip title={iconOnly ? t("app.github") : undefined}>
+            <Button type="text" icon={<GithubOutlined />} onClick={openGithub} className="app-github-btn">
+              {t("app.github")}
+            </Button>
+          </Tooltip>
+          <Tooltip title={iconOnly ? t("app.settings") : undefined}>
+            <Button icon={<SettingOutlined />} onClick={() => setSettingsOpen(true)} className="app-settings-btn">
+              {t("app.settings")}
+            </Button>
+          </Tooltip>
           {__DEVTOOLS__ && devFaultSummary && (
             <Tag color="warning" style={{ marginRight: 0 }}>
               ⚠ {t("devtools.injection.faultTag", { summary: devFaultSummary })}
@@ -2702,27 +2810,34 @@ function AppInner({
       <Layout>
         {/* 左侧导航：自由导入 = 内容包类型；游戏目录 = 版本列表（GameDirView 内置） */}
         {workMode === "free" && (
-        <Sider width={200} style={{ borderRight: "1px solid var(--border-color, #E6E8EB)", paddingTop: 12 }}>
+        <Sider className="ui-chrome" width={200} style={{ borderRight: "1px solid var(--border-color, #E6E8EB)", paddingTop: 12 }}>
           <div style={{ padding: "0 12px" }}>
-            <Typography.Text type="secondary" style={{ fontSize: 12, paddingLeft: 8 }} className="sider-label-text">
+            {/* 小标题用块级折叠类：整行收掉，无字模式下不留一条空行 */}
+            <Typography.Text
+              type="secondary"
+              style={{ fontSize: 12, paddingLeft: 8 }}
+              className="sider-label-text ui-label-block"
+            >
               {t("app.contentKind")}
             </Typography.Text>
             <SlideNav
-              items={(Object.keys(KIND_META) as PackKind[]).map((k) => ({
+              items={KIND_ORDER.map((k) => ({
                 key: k,
                 label: t(KIND_META[k].labelKey),
                 icon: KIND_META[k].icon,
               }))}
               activeKey={activeTab}
+              iconOnly={iconOnly}
               onSelect={(k) => {
                 // 切换类型页会挂载/卸载整页卡片，放进 transition 让点击反馈保持跟手
                 startTransition(() => setActiveTab(k as PackKind));
               }}
             />
+            {/* 计数是数字不是文字：无字模式下保留（这是侧栏里信息密度最高的一项），只改为居中 */}
             <Typography.Text
               type="secondary"
               style={{ fontSize: 12, display: "block", marginTop: 16, paddingLeft: 8 }}
-              className="sider-label-text"
+              className="sider-label-text ui-sider-count"
             >
               {visibleQueue.length}
             </Typography.Text>
@@ -2731,7 +2846,18 @@ function AppInner({
         )}
 
         <Content style={{ padding: 12, overflow: "auto" }}>
-          <div style={{ display: workMode === "gamedir" ? "block" : "none" }}>
+          {/* ── 工作模式切换的入场动效 ──────────────────────────────────────
+              两块面板都挂 .mode-pane，谁"当前激活"谁就拿 .is-active。
+              动画写在 .is-active 上而不是靠重挂载，是因为两者的挂载时机并不对称：
+                · 游戏目录面板**常挂载**（只切 display），重挂载才能播动画会丢掉
+                  扫描结果与勾选状态，所以只能靠"类被新加上"来触发一次 animation；
+                · 自由导入面板是条件渲染、每次切回来都是新挂载，类在挂载时就位，
+                  动画同样会播。
+              于是两个方向都播同一段入场，不会再出现"一个方向有、反向没有"。 */}
+          <div
+            className={"mode-pane" + (workMode === "gamedir" ? " is-active" : "")}
+            style={{ display: workMode === "gamedir" ? "block" : "none" }}
+          >
           {settings && (
           <GameDirView
               settings={settings}
@@ -2904,67 +3030,118 @@ function AppInner({
           )}
           </div>
           {workMode === "free" && (
-          <>
+          <div className="mode-pane is-active" style={{ height: "100%" }}>
           {visibleQueue.length === 0 ? (
             <div style={{ height: "100%" }}>
               <DropZone
                 dragOver={dragOver}
                 parsing={parsing}
                 kind={activeTab}
+                iconOnly={iconOnly}
                 onPick={() => void pickFiles()}
               />
             </div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-              <Space style={{ marginBottom: 8 }} wrap>
+              <Space className="ui-chrome" style={{ marginBottom: 8 }} wrap>
                 {translating ? (
                   <>
-                    <Button icon={paused ? <PlayCircleOutlined /> : <PauseOutlined />} onClick={paused ? handleResume : handlePause}>
-                      {paused ? t("app.resume") : t("app.pause")}
-                    </Button>
-                    <Button danger icon={<StopOutlined />} onClick={handleCancel}>
-                      {t("app.cancelTranslate")}
-                    </Button>
+                    {withIconOnlyTip(
+                      iconOnly,
+                      paused ? t("app.resume") : t("app.pause"),
+                      <Button icon={paused ? <PlayCircleOutlined /> : <PauseOutlined />} onClick={paused ? handleResume : handlePause}>
+                        {paused ? t("app.resume") : t("app.pause")}
+                      </Button>,
+                    )}
+                    {withIconOnlyTip(
+                      iconOnly,
+                      t("app.cancelTranslate"),
+                      <Button danger icon={<StopOutlined />} onClick={handleCancel}>
+                        {t("app.cancelTranslate")}
+                      </Button>,
+                    )}
                   </>
                 ) : (
-                  <Button type="primary" icon={<ThunderboltOutlined />} disabled={parsing} onClick={() => void runTranslation()}>
-                    {t("app.translate")}
-                  </Button>
+                  /* 主 CTA：整条工具栏里只有它是"推进流程"的动作。
+                     强调方式走**横向占位**（见 .app-translate-btn 的 min-width），
+                     不是抬高尺寸 —— 高度保持默认 32，与同行其余按钮齐平，
+                     换行时也不会把行高带乱。 */
+                  withIconOnlyTip(
+                    iconOnly,
+                    t("app.translate"),
+                    <Button
+                      type="primary"
+                      className="app-translate-btn"
+                      icon={<ThunderboltOutlined />}
+                      disabled={parsing}
+                      onClick={() => void runTranslation()}
+                    >
+                      {t("app.translate")}
+                    </Button>,
+                  )
                 )}
-                <Button icon={<ExportOutlined />} disabled={translating} onClick={() => void handleExport()}>
-                  {t("app.export")}
-                </Button>
-                <Button danger icon={<ClearOutlined />} disabled={translating} onClick={handleClear}>
-                  {t("app.clearTranslations")}
-                </Button>
-                <Dropdown
-                  disabled={translating}
-                  menu={{
-                    items: [
-                      { key: "clearTab", label: `清空${t(KIND_META[activeTab].labelKey)}页列表` },
-                      { key: "removeChecked", label: `清除勾选的内容包（${checkedInTab}）` },
-                    ],
-                    onClick: ({ key }) => {
-                      if (key === "clearTab") handleClearCurrentTab();
-                      else handleRemoveChecked();
-                    },
-                  }}
-                >
-                  <Button danger icon={<DeleteOutlined />}>
-                    清除 <DownOutlined />
-                  </Button>
-                </Dropdown>
-                <Button icon={<CloudUploadOutlined />} disabled={translating} onClick={() => void pickFiles()}>
-                  {t("app.import")}
-                </Button>
-                <Checkbox
-                  checked={allChecked}
-                  indeterminate={visibleQueue.some((it) => it.checked) && !allChecked}
-                  onChange={(e) => toggleAll(e.target.checked)}
-                  disabled={translating}
-                >
-                  {t("app.checkAll")}
-                </Checkbox>
+                {/* 无字模式下工具栏按钮只剩图标，鼠标悬停给出名称 */}
+                {withIconOnlyTip(
+                  iconOnly,
+                  t("app.export"),
+                  <Button icon={<ExportOutlined />} disabled={translating} onClick={() => void handleExport()}>
+                    {t("app.export")}
+                  </Button>,
+                )}
+                {withIconOnlyTip(
+                  iconOnly,
+                  t("app.clearTranslations"),
+                  <Button danger icon={<ClearOutlined />} disabled={translating} onClick={handleClear}>
+                    {t("app.clearTranslations")}
+                  </Button>,
+                )}
+                {/* 「清除 ▾」这个下拉触发器同样是"文字收掉只剩一个图标"，
+                    而它的 DeleteOutlined 与旁边「清除译文」的 ClearOutlined 长得太像 ——
+                    不补名字就成了"两个都认不出"，所以一并走后者的悬停名机制。
+
+                    注意包裹的是 **Dropdown 外面**：Dropdown 的展开行为靠 clone 自己的子元素
+                    （那个 Button）挂事件，天生不认识夹在中间的其它组件。
+                    把 span 套在 Dropdown 外层则完全不动它内部这套机制，只是给外框加一层 hover 承接。 */}
+                {withIconOnlyTip(
+                  iconOnly,
+                  t("app.clearMenu"),
+                  <Dropdown
+                    disabled={translating}
+                    menu={{
+                      items: [
+                        { key: "clearTab", label: `清空${t(KIND_META[activeTab].labelKey)}页列表` },
+                        { key: "removeChecked", label: `清除勾选的内容包（${checkedInTab}）` },
+                      ],
+                      onClick: ({ key }) => {
+                        if (key === "clearTab") handleClearCurrentTab();
+                        else handleRemoveChecked();
+                      },
+                    }}
+                  >
+                    <Button danger icon={<DeleteOutlined />}>
+                      清除 <DownOutlined className="ui-shrink" />
+                    </Button>
+                  </Dropdown>,
+                )}
+                {withIconOnlyTip(
+                  iconOnly,
+                  t("app.import"),
+                  <Button icon={<CloudUploadOutlined />} disabled={translating} onClick={() => void pickFiles()}>
+                    {t("app.import")}
+                  </Button>,
+                )}
+                {/* 全选：无字模式下只剩勾选框，必须补 Tooltip——
+                    一个孤零零的复选框不说明自己是"全选"（状态仍靠勾选/半选表达） */}
+                <Tooltip title={iconOnly ? t("app.checkAll") : undefined}>
+                  <Checkbox
+                    checked={allChecked}
+                    indeterminate={visibleQueue.some((it) => it.checked) && !allChecked}
+                    onChange={(e) => toggleAll(e.target.checked)}
+                    disabled={translating}
+                  >
+                    <span className="ui-label">{t("app.checkAll")}</span>
+                  </Checkbox>
+                </Tooltip>
           </Space>
 
               {translating && progress && (
@@ -3041,12 +3218,14 @@ function AppInner({
               </div>
             </div>
           )}
-          </>
+          </div>
           )}
         </Content>
       </Layout>
 
-      <Footer style={{ padding: "6px 12px", textAlign: "center", borderTop: "1px solid #E6E8EB" }}>
+      {/* 页脚是纯说明文案（格式支持 + 开源说明），无字模式下整块收起，
+          不留一条空边；GitHub 入口在顶栏还有一个，不会丢 */}
+      <Footer className="ui-chrome ui-footer" style={{ padding: "6px 12px", textAlign: "center", borderTop: "1px solid #E6E8EB" }}>
         <Space size="middle" wrap>
           <Typography.Text type="secondary">
             支持模组 jar · 服务器插件 · 光影包 · 资源包 · 勾选要翻译/导出的内容包
@@ -3588,6 +3767,7 @@ function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const themeMode = settings?.theme ?? "light";
   const language: "zh" | "en" = settings?.language === "en" ? "en" : "zh";
+  const iconOnly = settings?.iconOnly ?? false;
   // 外层组件在 TranslationProvider 之外，用不依赖 context 的 useTranslation
   const { t } = useTranslation(language);
 
@@ -3612,6 +3792,7 @@ function App() {
         deepScanRules: s.deepScanRules,
         theme: s.theme === "dark" ? "dark" : "light",
         language: s.language === "en" ? "en" : "zh",
+        iconOnly: s.iconOnly ?? false,
       });
     } catch {
       message.warning(t("app.msgSettingsLoadFailed"));
@@ -3629,11 +3810,17 @@ function App() {
     document.documentElement.dataset.theme = themeMode;
   }, [themeMode]);
 
-  // devtools：主题/语言变化时广播给开发者工具第二窗口，实现实时联动
+  // 无字模式同样挂在 html 根元素（App.css 的 [data-icon-only="true"]），
+  // 与主题链路同构：一处属性、纯 CSS 反应，组件不必逐层传递
+  useEffect(() => {
+    document.documentElement.dataset.iconOnly = iconOnly ? "true" : "false";
+  }, [iconOnly]);
+
+  // devtools：主题/语言/无字模式变化时广播给开发者工具第二窗口，实现实时联动
   useEffect(() => {
     if (!__DEVTOOLS__) return;
-    void emit(DEV_SETTINGS_SYNC, { theme: themeMode, language }).catch(() => {});
-  }, [themeMode, language]);
+    void emit(DEV_SETTINGS_SYNC, { theme: themeMode, language, iconOnly }).catch(() => {});
+  }, [themeMode, language, iconOnly]);
 
   return (
     <ConfigProvider

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { LoadingOutlined, SunOutlined, PictureOutlined, AppstoreOutlined, CloudServerOutlined } from "@ant-design/icons";
-import { Spin, Typography } from "antd";
+import { Spin, Tooltip, Typography } from "antd";
 import { useTranslationContext } from "../i18n";
 
 export type DropKind = "mod" | "shader" | "resourcepack" | "plugin";
@@ -11,6 +11,8 @@ interface Props {
   kind: DropKind;
   /** 点击选择文件 */
   onPick: () => void;
+  /** 无字模式：两段灰字说明收起，内容改为悬停中央大图标查看 */
+  iconOnly?: boolean;
 }
 
 const KIND_TEXT: Record<
@@ -44,7 +46,7 @@ const KIND_TEXT: Record<
 };
 
 /** 空态导入区：按内容包类型显示对应文案；无字模式下仅保留大图标 */
-export function DropZone({ dragOver, parsing, kind, onPick }: Props) {
+export function DropZone({ dragOver, parsing, kind, onPick, iconOnly }: Props) {
   const { t } = useTranslationContext();
   const k = KIND_TEXT[kind];
   // 错峰动画：渲染期同步带类（同帧提交不闪烁）；开关粘性保持，重播靠 key 重挂载
@@ -86,18 +88,31 @@ export function DropZone({ dragOver, parsing, kind, onPick }: Props) {
             marginRight: "auto",
           }}
         >
-          <span className="dz-layer" style={{ fontSize: 64, color: dragOver ? "#4A90D9" : "#bfbfbf" }}>
-            {k.icon}
-          </span>
+          {/* 中央大图标：无字模式下两段灰字说明都收起了，能力说明改由它的 hover 承担。
+              mouseEnterDelay 给足 0.25s —— 64px 的图标命中区很大，鼠标一进页面就弹会刷屏。 */}
+          {(() => {
+            const bigIcon = (
+              <span className="dz-layer" style={{ fontSize: 64, color: dragOver ? "#4A90D9" : "#bfbfbf" }}>
+                {k.icon}
+              </span>
+            );
+            return iconOnly ? (
+              <Tooltip title={t(k.desc)} placement="top" mouseEnterDelay={0.25}>
+                {bigIcon}
+              </Tooltip>
+            ) : (
+              bigIcon
+            );
+          })()}
           <Typography.Title level={4} style={{ marginTop: 16 }} className="dropzone-text dz-layer dz-delay-1">
             {t(dragOver ? k.dragTitle : k.title)}
           </Typography.Title>
           <div className="dz-layer dz-delay-2">
-            <Typography.Text type="secondary" className="dropzone-text">
+            <Typography.Text type="secondary" className="dropzone-text io-hide">
               {t(k.desc)}
             </Typography.Text>
             <div style={{ marginTop: 8 }}>
-              <Typography.Text type="secondary" style={{ fontSize: 12 }} className="dropzone-text">
+              <Typography.Text type="secondary" style={{ fontSize: 12 }} className="dropzone-text io-hide">
                 {t("app.tipSettings")}
               </Typography.Text>
             </div>

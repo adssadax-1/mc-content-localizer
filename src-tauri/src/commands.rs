@@ -52,6 +52,36 @@ pub fn clear_session_cache(app: AppHandle, name: String) {
     let _ = std::fs::remove_file(session_cache_path(&app, &name));
 }
 
+// ── 游戏目录扫描结果缓存（**落盘**）────────────────────────────────────────
+// 与上面的会话缓存是两回事，刻意分开存：
+//   · 会话缓存 = "上次打开的那批内容包"，丢了只影响恢复；
+//   · 扫描缓存 = 一次昂贵的目录遍历结果（极端整合包上千条），
+//     用户明确要求**重启后不用重扫**，所以必须跨进程存活。
+// Rust 侧保持"哑"：只负责整份读写一个 JSON 字符串，schema、LRU、key 归一
+// 全在前端 gameDirScanCache.ts 里 —— 否则同一套缓存规则要在两种语言里各写一遍。
+// 文件名以 scan-cache- 开头，storage.rs 会把它归入「缓存」组，
+// 「清除缓存」能一并清掉（它确实是缓存），但「清除用户数据」也覆盖它。
+fn scan_cache_path(app: &AppHandle) -> PathBuf {
+    app.path()
+        .app_config_dir()
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join("scan-cache-gamedir.json")
+}
+
+/// 写入游戏目录扫描缓存（前端整体序列化后传入）
+#[tauri::command]
+pub fn save_scan_cache(app: AppHandle, content: String) -> Result<(), String> {
+    std::fs::write(scan_cache_path(&app), content).map_err(|e| e.to_string())
+}
+
+/// 读取游戏目录扫描缓存（无缓存或为空返回 None）
+#[tauri::command]
+pub fn load_scan_cache(app: AppHandle) -> Option<String> {
+    std::fs::read_to_string(scan_cache_path(&app))
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+}
+
 // ── 会话缓存 v2：按包分片 ────────────────────────────────────────────────────
 // 目的：整份快照会在上千个内容包时产生几十 MB 的字符串与 IPC 拷贝（主线程被按死、
 // 进程瞬时内存暴涨导致白屏）。改为「一个包一个分片」，只需重写发生变化的分片，
