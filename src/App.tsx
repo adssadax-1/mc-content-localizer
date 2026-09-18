@@ -61,7 +61,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, emit, type UnlistenFn } from "@tauri-apps/api/event";
 import { TranslationProvider, useTranslation, useTranslationContext } from "./i18n";
 import { KIND_META, KIND_ORDER, MODE_ICON, type PackKind } from "./kindMeta";
-import { LOADER_LABEL, packFormatForMc } from "./types";
+import { LOADER_LABEL, packFormatForMc, isLocalProvider, LOCAL_AUTO_BATCH_CAP } from "./types";
 
 // devApi 代理：__DEVTOOLS__ 时包装 api，每次 invoke 记录到 ring buffer；生产构建直接用原 api。
 const api = __DEVTOOLS__ ? createDevApi(rawApi, pushInvoke) : rawApi;
@@ -1748,7 +1748,8 @@ function AppInner({
       message.info("请先勾选要翻译的内容包");
       return;
     }
-    if (!settings.provider.apiKey) {
+    // 本地推理档不要求 API Key（Ollama 服务端忽略 Key、llama.cpp 默认免鉴权）
+    if (!settings.provider.apiKey && !isLocalProvider(settings.provider.provider, settings.provider.baseUrl)) {
       message.warning(t("app.msgApiKeyRequired"));
       setSettingsOpen(true);
       return;
@@ -1853,9 +1854,16 @@ function AppInner({
       setPackProgress((prev) => ({ ...prev, [item.key]: { done: 0, total: items.length } }));
       // 批次大小：跟随线程数取最优（条目数 ÷ 线程数，向上取整），否则用设置值
       const threads = settings.threading?.enabled ? settings.threading.threadCount : 1;
+      // 自动档在线程为 1 时等于「整包一批」：云端模型吃得下，本地推理服务
+      // （单并发 + 默认 2K/4K 上下文）会直接崩，所以本地档要封顶。
+      // 只作用于自动档 —— 用户手填的 batchSize 一字不动。
+      const localNow = isLocalProvider(provider.provider, provider.baseUrl);
       const effectiveBatch =
         settings.batchSizeAuto ?? true
-          ? Math.max(1, Math.ceil(untranslated.length / threads))
+          ? Math.min(
+              Math.max(1, Math.ceil(untranslated.length / threads)),
+              localNow ? LOCAL_AUTO_BATCH_CAP : Number.MAX_SAFE_INTEGER,
+            )
           : settings.batchSize;
       try {
         const packLabel = item.gameVersion
@@ -2211,7 +2219,12 @@ function AppInner({
     intervalMs: number,
     onProgress?: (done: number, total: number) => void,
   ): Promise<void> {
-    const BATCH = 20;
+    // 本地推理服务上下文小、单并发，一批 20 个包名容易漏项，缩到 5
+    const localProvider = isLocalProvider(
+      settingsRef.current?.provider.provider,
+      settingsRef.current?.provider.baseUrl,
+    );
+    const BATCH = localProvider ? 5 : 20;
     let done = 0;
     let lastSaveAt = 0;
     for (let i = 0; i < list.length; i += BATCH) {
@@ -2313,7 +2326,10 @@ function AppInner({
     const names = { ...(settingsRef.current?.aiNames ?? {}), ...aiNamesRef.current };
     const missing = packs.filter((it) => !names[aiKeyOf(it)]);
     if (missing.length === 0) return { naming, names };
-    if (!settingsRef.current?.provider.apiKey || !settingsRef.current.provider.model) {
+    const cur = settingsRef.current;
+    // 本地推理档不需要 API Key，只看模型是否已选
+    const localProvider = isLocalProvider(cur?.provider.provider, cur?.provider.baseUrl);
+    if ((!cur?.provider.apiKey && !localProvider) || !cur?.provider.model) {
       message.warning(t("app.aiNameNoKey", { n: missing.length }));
       return { naming, names };
     }

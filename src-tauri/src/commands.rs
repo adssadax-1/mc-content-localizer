@@ -303,7 +303,11 @@ pub async fn run_translation(
 
     // 第一轮：提取术语表
     if extract_glossary.unwrap_or(true) {
-        let samples = pipeline::pick_glossary_samples(&items, 120);
+        // 本地推理服务的上下文通常只有 2K/4K，120 条样本会直接超长；
+        // 而这一步失败是被静默吞掉的（见下面的 Err(_) 分支）—— 表现为
+        // "术语表莫名其妙没提取到"，所以本地档必须缩样本。
+        let sample_limit = if provider.config.is_local() { 40 } else { 120 };
+        let samples = pipeline::pick_glossary_samples(&items, sample_limit);
         if !samples.is_empty() {
             match pipeline::extract_glossary(&provider, &samples).await {
                 Ok(g) => {
@@ -529,11 +533,19 @@ async fn process_chunk(
     match result {
         Ok(res) => {
             let mut out = res.translated;
+            // 备注里带上"为什么没拿到"：响应其实有内容、只是不可用时要说清楚，
+            // 否则用户无从区分"模型什么都没返回"和"返回了但解析不了"。
+            let base = "AI 未返回该条目";
+            let note = match (&res.parse_issue, out.is_empty()) {
+                (Some(why), true) => format!("{base}（{why}）"),
+                (Some(why), false) => format!("{base}（本批输出不完整：{why}）"),
+                (None, _) => base.to_string(),
+            };
             for key in res.missing {
                 out.push(TranslatedItem {
                     key,
                     translation: String::new(),
-                    notes: vec!["AI 未返回该条目".to_string()],
+                    notes: vec![note.clone()],
                 });
             }
             out

@@ -14,6 +14,10 @@ const BRAND: Record<string, string | [string, string]> = {
   gemini: ["#4285F4", "#9B72CB"],
   openai: "#10A37F",
   openrouter: "#5E6AD2",
+  // 本地推理：取中性偏低饱和的底色 —— 亮色下不刺眼、暗色下不糊成一团
+  // （Ollama 官方主色是纯黑，直接照搬会在暗色主题里变成看不见的黑块）
+  ollama: "#4E5A65",
+  llamacpp: "#8A6A4B",
   custom: "#8C8C8C",
 };
 
@@ -90,6 +94,8 @@ export function ProviderIcon({ id, size = 30 }: { id: string; size?: number }) {
           doubao: "豆",
           hunyuan: "混",
           siliconflow: "硅",
+          ollama: "O",
+          llamacpp: "L",
         };
         const ch = letters[id] ?? "?";
         return (
@@ -240,5 +246,7 @@ export const PROVIDER_HINTS: Record<string, string> = {
   moonshot: "settings.provider.hintMoonshot",
   openai: "settings.provider.hintOpenai",
   openrouter: "settings.provider.hintOpenrouter",
+  ollama: "settings.provider.hintOllama",
+  llamacpp: "settings.provider.hintLlamacpp",
   custom: "settings.provider.hintCustom",
 };

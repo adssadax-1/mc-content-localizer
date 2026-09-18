@@ -45,7 +45,7 @@ import type {
   Settings,
   StorageUsage,
 } from "../types";
-import { PROVIDER_PRESETS } from "../types";
+import { PROVIDER_PRESETS, isLocalProvider, LOCAL_PROVIDERS } from "../types";
 import { ProviderGrid, PROVIDER_HINTS } from "./ProviderIcon";
 import { PromptEditorModal } from "./PromptEditorModal";
 import { DeepScanRulesModal } from "./DeepScanRulesModal";
@@ -179,6 +179,12 @@ const SECTIONS: { key: string; labelKey: string; icon: React.ReactNode }[] = [
   { key: "about", labelKey: "settings.section.about", icon: <InfoCircleOutlined /> },
 ];
 
+/** 上次**关闭设置弹窗时**停留的分组。刻意只存在内存里（模块级变量，进程退出即重置）：
+ *  · 不落盘 —— 它只决定"再打开时停在哪一页"，不是用户数据，没必要写进 settings.json；
+ *  · **不参与保存** —— 记录它不会触发任何写盘动作，设置依旧只有点「确定」才会保存。
+ *    这两件事（记住页面 / 保存设置）在需求里被明确区分过，别把它们合并。 */
+let lastSectionInMemory: string | null = null;
+
 export function SettingsModal({
   open,
   settings,
@@ -198,6 +204,15 @@ export function SettingsModal({
   const threadingEnabled = Form.useWatch("threadingEnabled", form);
   const batchSizeAuto = Form.useWatch("batchSizeAuto", form) ?? true;
   const packParallelEnabled = Form.useWatch("packParallelEnabled", form) ?? false;
+  /* 本地推理档（Ollama / llama.cpp）：API Key 非必填、不发 Authorization 头、
+     Base URL 可改端口。判据与 Rust 侧 is_local 一致 —— provider 标识命中，
+     或 Base URL 落在本机（自定义端点指回 localhost 也算本地）。 */
+  const baseUrlValue = Form.useWatch("baseUrl", form);
+  const isLocal = isLocalProvider(provider, baseUrlValue);
+  /* 该服务商的 preset 是不是本地档（与"当前 Base URL 是否本地"分开：
+     用户把本地档的地址改成局域网地址后，isLocal 会变 false，
+     但 Base URL 仍然必须可编辑 —— 否则改完就再也改不回来）。 */
+  const isLocalPreset = !!provider && (LOCAL_PROVIDERS as readonly string[]).includes(provider);
   const [modelOptions, setModelOptions] = useState<ModelInfo[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
   const [testingModel, setTestingModel] = useState(false);
@@ -358,9 +373,18 @@ export function SettingsModal({
       动画结束后才真正 remove，避免空态文案与离场行叠在一起。 */
   const [leavingGlossary, setLeavingGlossary] = useState<number[]>([]);
   const panelScrollRef = useRef<HTMLDivElement>(null);
+  /* 打开时定位到：外部显式指定的分组 > 上次关闭时停留的分组 > 默认页。
+     **只在 open 翻转时执行**（依赖里刻意没有 activeSection）—— 否则用户在弹窗里
+     点别的分组会被这条 effect 拉回原处。 */
   useEffect(() => {
-    if (open) setActiveSection(initialSection ?? "appearance");
+    if (open) setActiveSection(initialSection ?? lastSectionInMemory ?? "appearance");
   }, [open, initialSection]);
+
+  /* 关闭时记下停留的分组（只写内存变量，不落盘、不触发保存）。
+     注意这个是"只在 !open 时写"：开着的时候不写，所以它不会跟用户的点击打架。 */
+  useEffect(() => {
+    if (!open) lastSectionInMemory = activeSection;
+  }, [open, activeSection]);
 
   // 打开「关于」分组时统计一次本地数据占用
   useEffect(() => {
@@ -457,19 +481,23 @@ export function SettingsModal({
     const apiKey = form.getFieldValue("apiKey")?.trim() as string | undefined;
     const providerName = form.getFieldValue("provider") as string;
     const model = form.getFieldValue("model")?.trim() as string | undefined;
-    if (!apiKey) {
+    const baseUrlRaw = form.getFieldValue("baseUrl")?.trim() as string | undefined;
+    const localNow = isLocalProvider(providerName, baseUrlRaw);
+    // 本地档不要求 Key（后端同样放行），云端档缺 Key 直接提示
+    if (!apiKey && !localNow) {
       message.warning(t("settings.msg.needKey"));
       return;
     }
     if (!model) {
-      message.warning("请先选择或输入模型");
+      message.warning(t("settings.provider.modelRequired"));
       return;
     }
     const cfg: ProviderConfig = {
       provider: providerName,
-      apiKey,
+      apiKey: apiKey ?? "",
       model,
-      baseUrl: providerName === "custom" ? (form.getFieldValue("baseUrl")?.trim() || null) : null,
+      baseUrl:
+        providerName === "custom" || localNow ? baseUrlRaw || null : null,
       temperature: 0,
       maxRetries: 0,
     };
@@ -486,15 +514,19 @@ export function SettingsModal({
   async function handleFetchModels() {
     const apiKey = form.getFieldValue("apiKey")?.trim() as string | undefined;
     const providerName = form.getFieldValue("provider") as string;
-    if (!apiKey) {
+    const baseUrlRaw = form.getFieldValue("baseUrl")?.trim() as string | undefined;
+    const localNow = isLocalProvider(providerName, baseUrlRaw);
+    if (!apiKey && !localNow) {
       message.warning(t("settings.msg.needKey"));
       return;
     }
     const cfg: ProviderConfig = {
       provider: providerName,
-      apiKey,
+      apiKey: apiKey ?? "",
       model: null,
-      baseUrl: null,
+      // 本地档要带上用户填的地址（留空则后端回退到预设端口）
+      baseUrl:
+        providerName === "custom" || localNow ? baseUrlRaw || null : null,
       temperature: 0.7,
       maxRetries: 2,
     };
@@ -538,6 +570,9 @@ export function SettingsModal({
       return;
     }
     const custom = v.provider === "custom";
+    // Base URL 只对「自定义」与「本地档」有意义：本地档需要它来换端口 /
+    // 指向局域网里的另一台机器。云端预设仍不接受（防历史遗留值把请求打歪）。
+    const keepBaseUrl = custom || isLocalProvider(v.provider, v.baseUrl);
     // 温度强制 2 位小数（智谱要求），防多位小数入库
     const temperature = Math.round((v.temperature ?? 0.7) * 100) / 100;
     // 该服务商的 key / 模型单独保存，切换服务商不串
@@ -565,7 +600,7 @@ export function SettingsModal({
         provider: v.provider,
         apiKey: v.apiKey.trim(),
         model: v.model?.trim() || null,
-        baseUrl: custom ? v.baseUrl?.trim() || null : null,
+        baseUrl: keepBaseUrl ? v.baseUrl?.trim() || null : null,
         temperature,
         maxRetries: 2,
       },
@@ -681,8 +716,16 @@ export function SettingsModal({
                   providerModels），重挂载不会丢；上面的隐藏字段留在外层，不参与重挂载。 */}
               <div key={provider ?? "none"} className={providerAnim ? "panel-anim-root" : undefined}>
               <PanelBlock index={0}>
+                {/* 服务商补充说明：无字模式下整段收起（与 .io-hide 其余 14 处同一处置）。
+                    这些段落是"第一次配置时的引导"，逐条都在讲怎么把服务跑起来；
+                    无字模式下用户要的就是省地方，成段说明只会把表单往下推。
+                    句句仍是**常规模式**的首屏引导，一个字没删。 */}
                 {provider && PROVIDER_HINTS[provider] && (
-                  <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: -8, marginBottom: 12 }}>
+                  <Typography.Paragraph
+                    type="secondary"
+                    className="io-hide"
+                    style={{ fontSize: 12, marginTop: -8, marginBottom: 12 }}
+                  >
                     {t(PROVIDER_HINTS[provider])}
                   </Typography.Paragraph>
                 )}
@@ -695,20 +738,28 @@ export function SettingsModal({
                   /* 无字模式：标签换成钥匙图标（名字仍可悬停看全）；
                      常规模式回退成原来的文字标签 —— 这一处改动只服务无字模式 */
                   iconOnly ? (
-                    <Tooltip title="API Key">
+                    <Tooltip title={isLocal ? t("settings.provider.apiKeyOptionalTip") : "API Key"}>
                       <span><KeyGlyph /></span>
                     </Tooltip>
                   ) : (
                     "API Key"
                   )
                 }
-                rules={[{ required: true, message: t("settings.provider.apiKeyRequired") }]}
+                /* 本地档不校验必填：Ollama 的服务端会忽略 Key、llama.cpp 默认免鉴权，
+                   拦在这里只会让用户被迫随便填一串无用字符。 */
+                rules={
+                  isLocal
+                    ? []
+                    : [{ required: true, message: t("settings.provider.apiKeyRequired") }]
+                }
               >
                 <Input.Password
                   placeholder={
-                    provider === "zhipu"
-                      ? t("settings.provider.apiKeyPlaceholderZhipu")
-                      : t("settings.provider.apiKeyPlaceholder")
+                    isLocal
+                      ? t("settings.provider.apiKeyPlaceholderLocal")
+                      : provider === "zhipu"
+                        ? t("settings.provider.apiKeyPlaceholderZhipu")
+                        : t("settings.provider.apiKeyPlaceholder")
                   }
                   addonAfter={
                     <Button
@@ -753,9 +804,13 @@ export function SettingsModal({
                   // 未拉取列表：允许自由输入模型名
                   <Input
                     placeholder={
-                      provider
-                        ? PROVIDER_PRESETS[provider]?.model || t("settings.provider.modelPlaceholderCustom")
-                        : t("settings.provider.modelPlaceholderNeedKey")
+                      !provider
+                        ? t("settings.provider.modelPlaceholderNeedKey")
+                        : isLocal && !PROVIDER_PRESETS[provider]?.model
+                          ? /* 本地档刻意不预设模型名：本地有哪些模型只有用户自己知道，
+                               指个具体模型名只会在没拉取时报"模型不存在" */
+                            t("settings.provider.modelPlaceholderLocal")
+                          : PROVIDER_PRESETS[provider]?.model || t("settings.provider.modelPlaceholderCustom")
                     }
                   />
                 ) : (
@@ -850,10 +905,25 @@ export function SettingsModal({
               </PanelBlock>
 
               <PanelBlock index={4}>
-              {/* Base URL 展示：自定义可编辑；预设只读灰色 + 官网跳转 */}
-              {provider === "custom" ? (
-                <Form.Item name="baseUrl" label={t("settings.provider.baseUrl")}>
-                  <Input placeholder="https://..." />
+              {/* Base URL 展示：自定义与本地档可编辑；其余预设只读灰色 + 官网跳转。
+                  本地档必须可编辑 —— 换端口（11434→11500）或把服务跑在另一台机器上
+                  是常见用法，锁死就只能改用「自定义」重配一遍。 */}
+              {provider === "custom" || isLocalPreset ? (
+                <Form.Item
+                  name="baseUrl"
+                  label={t("settings.provider.baseUrl")}
+                  /* 无字模式收起：本地档（Ollama / llama.cpp）专属的灰字说明，
+                     与上面那条服务商说明同属"引导性灰字"。用条件渲染而不是 CSS ——
+                     antd 的 Form.Item extra 没有稳定的外部类名可挂钩（同 model 那条）。 */
+                  extra={
+                    isLocalPreset && !iconOnly
+                      ? t("settings.provider.baseUrlLocalExtra")
+                      : undefined
+                  }
+                >
+                  <Input
+                    placeholder={PROVIDER_PRESETS[provider]?.baseUrl || "https://..."}
+                  />
                 </Form.Item>
               ) : (
                 provider && PROVIDER_PRESETS[provider]?.baseUrl && (

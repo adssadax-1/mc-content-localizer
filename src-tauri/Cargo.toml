@@ -1,6 +1,6 @@
 [package]
 name = "mc-content-localizer"
-version = "3.1.1"
+version = "3.2.0"
 description = "MC 汉化工坊：Minecraft 模组/光影包/资源包 AI 汉化工具"
 authors = ["you"]
 edition = "2021"
@@ -36,3 +36,8 @@ regex = "1"
 yaml-rust2 = "0.10"
 tokio = { version = "1", features = ["time"] }
 zhconv = "0.3"
+
+[dev-dependencies]
+# 仅测试用：本地档「不发送 Authorization 头」这条约定必须用真实回环请求验证，
+# 而 chat 链路是 async 的（#[tokio::test] 需要 macros + rt 两个特性）。
+tokio = { version = "1", features = ["macros", "rt"] }

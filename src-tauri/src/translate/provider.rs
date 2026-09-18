@@ -6,12 +6,12 @@ use thiserror::Error;
 #[serde(rename_all = "camelCase")]
 pub struct ProviderConfig {
     /// provider 标识：zhipu | gemini | deepseek | qwen | doubao | moonshot | hunyuan
-    /// | siliconflow | openrouter | openai | custom
+    /// | siliconflow | openrouter | openai | ollama | llamacpp | custom
     pub provider: String,
     pub api_key: String,
     /// 自定义模型名（None 时用预设默认）
     pub model: Option<String>,
-    /// 自定义 base_url（provider=custom 时使用）
+    /// 自定义 base_url（provider=custom 或本地档时使用）
     pub base_url: Option<String>,
     /// 温度（None 用 0.7）
     pub temperature: Option<f32>,
@@ -54,7 +54,40 @@ pub const PRESETS: &[(&str, &str, &str)] = &[
     ("openrouter", "https://openrouter.ai/api/v1", "google/gemini-2.5-flash"),
     // OpenAI：国内访问不稳定
     ("openai", "https://api.openai.com/v1", "gpt-5-mini"),
+    // Ollama：本地推理，默认监听 11434，无需 API Key（模型名取自 `ollama list`）
+    ("ollama", "http://localhost:11434/v1", ""),
+    // llama.cpp llama-server：本地推理，默认监听 8080，默认免鉴权
+    ("llamacpp", "http://127.0.0.1:8080/v1", ""),
 ];
+
+/// 本地推理服务标识：不需要 API Key，也不应发送 Authorization 头
+pub const LOCAL_PROVIDERS: &[&str] = &["ollama", "llamacpp"];
+
+/// 是否按 provider 标识判定为本地推理服务
+pub fn is_local_provider_id(id: &str) -> bool {
+    LOCAL_PROVIDERS.contains(&id)
+}
+
+/// base_url 是否指向本机（localhost / 127.0.0.1 / [::1] / *.localhost）。
+/// 只认真实回环地址，`localhost.evil.com` 这类不匹配。
+pub fn is_local_url(url: &str) -> bool {
+    let u = url.trim().to_ascii_lowercase();
+    let after_scheme = u
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(u.as_str());
+    let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    // 去掉 userinfo（http://user:pass@host/…）
+    let host_port = authority.rsplit('@').next().unwrap_or("");
+    let host = if let Some(rest) = host_port.strip_prefix('[') {
+        // IPv6 字面量：[::1]:8080
+        rest.split(']').next().unwrap_or("")
+    } else {
+        host_port.split(':').next().unwrap_or("")
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "0.0.0.0" | "::1" | "::")
+        || host.ends_with(".localhost")
+}
 
 impl ProviderConfig {
     /// 解析出 (base_url, model)
@@ -67,11 +100,49 @@ impl ProviderConfig {
         }
         for (id, url, model) in PRESETS {
             if *id == self.provider {
-                return (url.to_string(), self.model.clone().unwrap_or_else(|| model.to_string()));
+                // 本地档允许覆盖 base_url（换端口、局域网部署）；云端档不接受，
+                // 避免历史遗留的 base_url 把请求打到意料之外的地址。
+                let base = if is_local_provider_id(id) {
+                    self.base_url
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|u| !u.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| url.to_string())
+                } else {
+                    url.to_string()
+                };
+                return (
+                    base,
+                    self.model.clone().unwrap_or_else(|| model.to_string()),
+                );
             }
         }
         // 未知 provider 回退到智谱
         ("https://open.bigmodel.cn/api/paas/v4".to_string(), self.model.clone().unwrap_or("glm-4-flash-250414".to_string()))
+    }
+
+    /// 是否指向本地推理服务：provider 标识命中，或**自定义**端点的地址落在本机。
+    ///
+    /// 注意这里刻意不看云端预设档的 base_url —— `resolve_endpoint` 会忽略它，
+    /// 真正发出去的请求仍指向云端。若按残留值判断，"先用自定义指过 localhost、
+    /// 再切回 DeepSeek"就会让空 Key 蒙混过关，变成一次注定 401 的请求。
+    pub fn is_local(&self) -> bool {
+        if is_local_provider_id(&self.provider) {
+            return true;
+        }
+        if self.provider == "custom" {
+            return self.base_url.as_deref().map(is_local_url).unwrap_or(false);
+        }
+        false
+    }
+
+    /// API Key 校验：本地档允许留空（服务端根本不校验），云端档必须填。
+    pub fn ensure_key(&self) -> Result<(), TranslateError> {
+        if self.api_key.trim().is_empty() && !self.is_local() {
+            return Err(TranslateError::MissingApiKey);
+        }
+        Ok(())
     }
 
     pub fn temperature(&self) -> f32 {
@@ -109,20 +180,60 @@ pub struct ModelInfo {
     pub free: bool,
 }
 
+/// 云端接口单请求超时（秒）
+const REQUEST_TIMEOUT_SECS: u64 = 180;
+/// 本地推理服务单请求超时（秒）：冷启动要加载权重，单并发下还要排队，
+/// 沿用 180s 会让"能跑但慢"的本地模型频繁超时。
+const LOCAL_REQUEST_TIMEOUT_SECS: u64 = 600;
+
 /// OpenAI 兼容 chat completions 客户端
 #[derive(Clone)]
 pub struct OpenAiProvider {
     pub config: ProviderConfig,
     client: reqwest::Client,
+    /// 本地推理服务专用：超时放宽（见 LOCAL_REQUEST_TIMEOUT_SECS）
+    local_client: reqwest::Client,
 }
 
 impl OpenAiProvider {
     pub fn new(config: ProviderConfig) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(180))
-            .build()
-            .expect("failed to build http client");
-        Self { config, client }
+        // bypass_proxy：本地推理服务**绝不走代理**。
+        // reqwest 默认会读 HTTP_PROXY / HTTPS_PROXY 环境变量（Clash、公司代理都会设），
+        // 于是连 `http://127.0.0.1:11434` 的请求也被代理接走 —— 本地模型莫名其妙连不上，
+        // 实测表现是 hyper 的 IncompleteMessage 或干脆超时。自建推理服务直连即可。
+        let build = |secs: u64, bypass_proxy: bool| {
+            let mut b = reqwest::Client::builder().timeout(std::time::Duration::from_secs(secs));
+            if bypass_proxy {
+                b = b.no_proxy();
+            }
+            b.build().expect("failed to build http client")
+        };
+        Self {
+            config,
+            client: build(REQUEST_TIMEOUT_SECS, false),
+            local_client: build(LOCAL_REQUEST_TIMEOUT_SECS, true),
+        }
+    }
+
+    /// 按目标选 client：本地推理放宽超时
+    fn base_client(&self) -> reqwest::Client {
+        if self.config.is_local() {
+            self.local_client.clone()
+        } else {
+            self.client.clone()
+        }
+    }
+
+    /// 附加鉴权头：**Key 非空才发**。
+    /// 本地服务默认免鉴权；Ollama 的 OpenAI 兼容层虽然"要求" api_key，
+    /// 但服务端会忽略它 —— 我们直接不发，比塞一个假串干净。
+    fn with_auth(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let key = self.config.api_key.trim();
+        if key.is_empty() {
+            rb
+        } else {
+            rb.bearer_auth(key)
+        }
     }
 
     /// devtools 故障注入（provider 全部 HTTP 请求共用）：
@@ -185,7 +296,7 @@ impl OpenAiProvider {
                 .build()
                 .unwrap_or_else(|_| self.client.clone())
         } else {
-            self.client.clone()
+            self.base_client()
         }
     }
 
@@ -226,10 +337,14 @@ impl OpenAiProvider {
     ) -> Result<String, TranslateError> {
         #[cfg(not(feature = "devtools"))]
         let _ = purpose;
-        if self.config.api_key.trim().is_empty() {
-            return Err(TranslateError::MissingApiKey);
-        }
+        // 本地推理服务允许空 Key；云端服务必须有 Key
+        self.config.ensure_key()?;
         let (base_url, model) = self.config.resolve_endpoint();
+        // 本地预设不带默认模型（模型由用户 `ollama list` / `--alias` 决定）：
+        // 这里给出明确提示，比发一个空 model 让服务端报 400 更好定位
+        if model.trim().is_empty() {
+            return Err(TranslateError::MissingModel);
+        }
         let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
 
         let mut body = serde_json::json!({
@@ -266,11 +381,10 @@ impl OpenAiProvider {
         #[cfg(feature = "devtools")]
         let send_client = self.dev_send_client();
         #[cfg(not(feature = "devtools"))]
-        let send_client = self.client.clone();
+        let send_client = self.base_client();
 
-        let resp = send_client
-            .post(&url)
-            .bearer_auth(self.config.api_key.trim())
+        let resp = self
+            .with_auth(send_client.post(&url))
             .json(&body)
             .send()
             .await?;
@@ -306,9 +420,7 @@ impl OpenAiProvider {
 
     /// 拉取可用模型列表（GET /models，OpenAI 兼容），过滤非对话模型
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>, TranslateError> {
-        if self.config.api_key.trim().is_empty() {
-            return Err(TranslateError::MissingApiKey);
-        }
+        self.config.ensure_key()?;
         let (base_url, _) = self.config.resolve_endpoint();
         let url = format!("{}/models", base_url.trim_end_matches('/'));
 
@@ -320,13 +432,9 @@ impl OpenAiProvider {
         #[cfg(feature = "devtools")]
         let send_client = self.dev_send_client();
         #[cfg(not(feature = "devtools"))]
-        let send_client = self.client.clone();
+        let send_client = self.base_client();
 
-        let resp = send_client
-            .get(&url)
-            .bearer_auth(self.config.api_key.trim())
-            .send()
-            .await?;
+        let resp = self.with_auth(send_client.get(&url)).send().await?;
         let status = resp.status();
         let text = resp.text().await?;
         if !status.is_success() {
@@ -417,9 +525,7 @@ impl OpenAiProvider {
     /// 仅用于设置页「验证连接」，不参与翻译流程。
     #[allow(dead_code)]
     pub async fn test_model(&self) -> Result<String, TranslateError> {
-        if self.config.api_key.trim().is_empty() {
-            return Err(TranslateError::MissingApiKey);
-        }
+        self.config.ensure_key()?;
         let (base_url, model) = self.config.resolve_endpoint();
         if model.trim().is_empty() {
             return Err(TranslateError::MissingModel);
@@ -452,11 +558,10 @@ impl OpenAiProvider {
         #[cfg(feature = "devtools")]
         let send_client = self.dev_send_client();
         #[cfg(not(feature = "devtools"))]
-        let send_client = self.client.clone();
+        let send_client = self.base_client();
 
-        let resp = send_client
-            .post(&url)
-            .bearer_auth(self.config.api_key.trim())
+        let resp = self
+            .with_auth(send_client.post(&url))
             .json(&body)
             .send()
             .await?;
@@ -652,6 +757,92 @@ mod tests {
         assert_eq!(model, "llama3");
     }
 
+    /// 本地档：预设地址正确、允许空 Key、允许改端口（改到非本机则不再算本地）
+    #[test]
+    fn local_providers_allow_empty_key_and_port_override() {
+        let ollama = ProviderConfig {
+            provider: "ollama".into(),
+            ..Default::default()
+        };
+        assert_eq!(ollama.resolve_endpoint().0, "http://localhost:11434/v1");
+        assert!(ollama.is_local());
+        assert!(
+            ollama.ensure_key().is_ok(),
+            "本地档空 Key 必须放行（服务端根本不校验）"
+        );
+
+        // 局域网部署：preset 档也要认用户填的 base_url，且**仍按本地处理** ——
+        // 自己家另一台机器上的 Ollama 同样不校验 Key
+        let lan = ProviderConfig {
+            provider: "ollama".into(),
+            base_url: Some("http://192.168.1.9:11435/v1".into()),
+            model: Some("qwen2.5:7b".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            lan.resolve_endpoint().0,
+            "http://192.168.1.9:11435/v1",
+            "本地档应允许覆盖 base_url"
+        );
+        assert!(lan.is_local(), "本地档指向局域网仍算本地");
+        assert!(lan.ensure_key().is_ok(), "本地档不应因空 Key 被拦");
+
+        // 自定义端点没有身份可依，只看地址：非本机就必须给 Key
+        let custom_lan = ProviderConfig {
+            provider: "custom".into(),
+            base_url: Some("http://192.168.1.9:11434/v1".into()),
+            model: Some("qwen2.5:7b".into()),
+            ..Default::default()
+        };
+        assert!(!custom_lan.is_local(), "自定义端点指向非本机时不算本地");
+        assert!(custom_lan.ensure_key().is_err(), "非本机端点仍需 Key");
+
+        let llama = ProviderConfig {
+            provider: "llamacpp".into(),
+            ..Default::default()
+        };
+        assert_eq!(llama.resolve_endpoint().0, "http://127.0.0.1:8080/v1");
+        assert!(llama.is_local());
+
+        // 云端档不受影响
+        let cloud = ProviderConfig {
+            provider: "deepseek".into(),
+            base_url: Some("http://localhost:11434/v1".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            cloud.resolve_endpoint().0,
+            "https://api.deepseek.com/v1",
+            "云端档不接受 base_url 覆盖"
+        );
+        assert!(!cloud.is_local());
+        assert!(cloud.ensure_key().is_err(), "云端档空 Key 必须报错");
+    }
+
+    /// 回环地址识别：只认真实回环，域名里带 localhost 的不算
+    #[test]
+    fn detects_loopback_base_url_only() {
+        for url in [
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:8080/v1",
+            "http://[::1]:8080/v1",
+            "localhost:1234/v1",
+            "http://127.0.0.1:11434/v1?x=1",
+            "http://user:pass@127.0.0.1:8080/v1",
+        ] {
+            assert!(is_local_url(url), "{url} 应识别为本地");
+        }
+        for url in [
+            "https://api.deepseek.com/v1",
+            "https://open.bigmodel.cn/api/paas/v4",
+            "http://localhost.evil.com/v1",
+            "http://127.0.0.1.evil.com/v1",
+            "",
+        ] {
+            assert!(!is_local_url(url), "{url} 不应识别为本地");
+        }
+    }
+
     #[test]
     fn cleans_model_generated_pack_name() {
         assert_eq!(clean_pack_name("机械动力"), "机械动力");
@@ -734,5 +925,93 @@ mod tests {
         assert_eq!(j.get(&2).map(|s| s.as_str()), Some("互补光影"));
         let k = parse_indexed_names(r#"[{"id":1,"zh":"机械动力"}]"#, 1);
         assert_eq!(k.get(&1).map(|s| s.as_str()), Some("机械动力"));
+    }
+
+    /// 起一个只接受一次连接、回固定 chat completions 响应的回环服务。
+    /// 返回 (端口, 线程句柄) —— 线程结束时 yield 出**收到的原始请求文本**，
+    /// 断言直接作用在真实的 HTTP 报文上，而不是我们自己的判据函数上。
+    fn one_shot_server() -> (u16, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑定回环端口");
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("接受连接");
+            let mut buf: Vec<u8> = Vec::new();
+            let mut chunk = [0u8; 2048];
+            // 读满请求头即可（断言只针对头部）
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                match sock.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                }
+            }
+            let body = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = sock.write_all(resp.as_bytes());
+            let _ = sock.flush();
+            String::from_utf8_lossy(&buf).to_string()
+        });
+        (port, handle)
+    }
+
+    /// 指向回环的 custom 配置（走 base_url 分支，等价于本地档）
+    fn loopback_cfg(port: u16, key: &str) -> ProviderConfig {
+        ProviderConfig {
+            provider: "custom".into(),
+            api_key: key.into(),
+            base_url: Some(format!("http://127.0.0.1:{port}/v1")),
+            model: Some("test-model".into()),
+            ..Default::default()
+        }
+    }
+
+    /// 本地档空 Key：请求必须发得出去，且**不带** Authorization 头。
+    ///
+    /// 为什么不只测 `is_local()`：判据对 ≠ 请求干净 —— Key 校验放行与请求头
+    /// 拼装是两处代码，任一处回退都会让本地服务收到一个多余的
+    /// `Authorization: Bearer`（llama.cpp 配了 --api-key 时直接 401，
+    /// 症状是"明明没填 Key 却鉴权失败"）。
+    #[tokio::test]
+    async fn local_request_carries_no_authorization_header() {
+        let (port, server) = one_shot_server();
+        let out = OpenAiProvider::new(loopback_cfg(port, ""))
+            .chat("system", "user", "translate")
+            .await
+            .expect("本地档空 Key 必须能正常发请求");
+        assert_eq!(out, "ok");
+
+        let req = server.join().expect("服务端线程");
+        assert!(
+            !req.to_lowercase().contains("authorization"),
+            "本地档不得发送 Authorization 头，实际请求：\n{req}"
+        );
+        assert!(
+            req.starts_with("POST /v1/chat/completions"),
+            "路径应指向 /v1/chat/completions，实际请求：\n{req}"
+        );
+    }
+
+    /// 反向确认：填了 Key 就一定带 Authorization —— 防「把鉴权整个拆掉」式回归
+    #[tokio::test]
+    async fn explicit_key_still_sends_authorization_header() {
+        let (port, server) = one_shot_server();
+        let out = OpenAiProvider::new(loopback_cfg(port, "sk-test-key"))
+            .chat("system", "user", "translate")
+            .await
+            .expect("带 Key 的请求应正常");
+        assert_eq!(out, "ok");
+
+        let req = server.join().expect("服务端线程");
+        assert!(
+            req.to_lowercase()
+                .contains("authorization: bearer sk-test-key"),
+            "填了 Key 就必须带 Authorization 头，实际请求：\n{req}"
+        );
     }
 }

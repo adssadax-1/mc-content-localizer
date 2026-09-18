@@ -441,6 +441,20 @@ export const PROVIDER_PRESETS: Record<string, { label: string; model: string; ba
     baseUrl: "https://openrouter.ai/api/v1",
     website: "https://openrouter.ai",
   },
+  // 本地推理服务：无需 API Key。model 留空是刻意的 —— 本地模型由用户自己
+  // pull / --alias 决定，预设一个名字只会在没拉取时报"模型不存在"。
+  ollama: {
+    label: "Ollama",
+    model: "",
+    baseUrl: "http://localhost:11434/v1",
+    website: "https://ollama.com",
+  },
+  llamacpp: {
+    label: "llama.cpp",
+    model: "",
+    baseUrl: "http://127.0.0.1:8080/v1",
+    website: "https://github.com/ggml-org/llama.cpp",
+  },
   custom: {
     label: "自定义",
     model: "",
@@ -448,6 +462,56 @@ export const PROVIDER_PRESETS: Record<string, { label: string; model: string; ba
     website: "",
   },
 };
+
+/** 本地推理服务标识（与 Rust 侧 LOCAL_PROVIDERS 一一对应） */
+export const LOCAL_PROVIDERS = ["ollama", "llamacpp"] as const;
+
+/**
+ * base_url 是否指向本机 —— 与 Rust 侧 `is_local_url` 保持同一套判据：
+ * 只认真实回环（localhost / 127.0.0.1 / 0.0.0.0 / [::1] / *.localhost），
+ * `localhost.evil.com` 这类不算。
+ */
+export function isLocalUrl(url: string | null | undefined): boolean {
+  if (!url) return false;
+  const u = url.trim().toLowerCase();
+  const afterScheme = u.includes("://") ? u.slice(u.indexOf("://") + 3) : u;
+  const authority = afterScheme.split(/[/?#]/)[0] ?? "";
+  const hostPort = authority.split("@").pop() ?? "";
+  const host = hostPort.startsWith("[")
+    ? hostPort.slice(1, hostPort.indexOf("]"))
+    : hostPort.split(":")[0];
+  return (
+    ["localhost", "127.0.0.1", "0.0.0.0", "::1", "::"].includes(host) ||
+    host.endsWith(".localhost")
+  );
+}
+
+/**
+ * 是否为本地推理服务 —— 与 Rust 侧 `ProviderConfig::is_local` 同一套判据：
+ * provider 标识命中，或**自定义**端点的地址落在本机。
+ *
+ * 刻意不看预设档的 Base URL：云端预设会忽略它（请求照样发往云端），
+ * 而表单里的 baseUrl 可能是上一任「自定义」留下的残留值 ——
+ * 拿它判断会让云端档误判成免 Key。
+ */
+export function isLocalProvider(
+  id: string | undefined | null,
+  baseUrl?: string | null,
+): boolean {
+  if (!id) return false;
+  if ((LOCAL_PROVIDERS as readonly string[]).includes(id)) return true;
+  if (id === "custom") return isLocalUrl(baseUrl);
+  return false;
+}
+
+/**
+ * 本地档自动批次的封顶值。
+ *
+ * 自动档原本按「待译条数 ÷ 线程数」算，线程为 1 时**等于整包一批** ——
+ * 云端模型吃得下，本地推理服务（默认单并发 + 默认 2K/4K 上下文）会直接崩。
+ * 只封顶自动档，用户手动设的 batchSize 一字不动。
+ */
+export const LOCAL_AUTO_BATCH_CAP = 8;
 
 /**
  * 按 Minecraft 版本匹配资源包 pack_format（依据 Minecraft Wiki 资源包格式历史）。

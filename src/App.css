@@ -531,6 +531,44 @@ body {
   font-size: 16px;
 }
 
+/* ===== 顶栏垂直对齐（常规 / 无字两档都要，不是无字模式专属）=====
+   antd 的 Layout.Header 自带 `line-height: 64px`（等于 header 高度），顶栏是唯一
+   带这条继承的外壳。后果：顶栏里每个 inline-block 子元素都落在一条 64px 高的行盒上，
+   并**按各自的基线**对齐 —— 而"基线"对按钮来说取决于内容：
+
+     · 含 .anticon 的按钮（主题 / GitHub / 设置）→ 基线 ≈ 按钮底边
+     · 含文字 span 的按钮（语言 / GitHub / 设置）→ 基线是文字的基线
+     · 含**自定义裸 <svg>** 的按钮（无字模式开关，没有 .anticon 那层）→ 基线是 svg
+       自身的基线，还叠了它 style 里的 vertical-align: -2px
+
+   三者基线不同，按钮就上下错开。headless 实测（中心 y，header 中心 31.5）：
+
+     主题 31.5 · 语言 31.0 · 无字 29.0 · GitHub 31.5 · 设置 31.5
+
+   把每一格改成 flex 居中后，"位置"只由盒子高度决定、与基线无关。
+   注意：只给按钮写 vertical-align: middle 修不了这个 —— 既治不了"盒子本身排歪"，
+   对 flex/绝对定位的那几种基线也不生效。 */
+.ui-chrome.ant-layout-header .ant-space-item {
+  display: flex;
+  align-items: center;
+}
+
+/* 左上角「图标 + 标题」：原来是 img 用 vertical-align: middle（对齐到"基线 + 半个
+   x-height"），旁边文字走正常行内基线，两者视觉中心差了 **8.5px**
+   （实测 img cy 35.75 / 文字 span cy 27.25）—— 比右侧那几像素明显得多。
+   改成 flex 居中后两者中心都是 31.5，与同行的 Segmented（31.5）也齐了。
+   注：img 上那句 vertical-align 在 flex 容器里不再生效，留着是历史痕迹，不必删。 */
+.app-title-text {
+  display: flex;
+  align-items: center;
+}
+
+/* 标题文字被收掉后，它那句 margin-left: 8 仍在 → 图标右侧多 8px 死白。
+   只在无字档归零（那是行内样式，必须 !important）。 */
+[data-icon-only="true"] .app-title-text .ui-label {
+  margin-left: 0 !important;
+}
+
 /* ===== 顶栏快捷开关：主题 / 语言 / 无字模式 =====
    原先在设置弹窗的「个性化设置」里（要点「确定」才落盘）。它们都是"看一眼就想换"的
    外观项，挪到常驻位置后改成**点一下即生效**，于是这里的样式要能独立表达"现在是哪一档"：
@@ -794,15 +832,45 @@ body {
   gap: 0;
 }
 
-/* --- ④ 顶栏 Segmented：两个 option 都补了 icon，文字收起后每段 40×32 --- */
+/* --- ④ 顶栏 Segmented：两个 option 都补了 icon，文字收起后每段（无字档再放大一档）
+   40×28 → 44×32：外框 32 → 36，与同一行那批「36px 命中区」的圆钮**等高**，
+   图标 13 → 15 同步跟上。
+   为什么图标必须跟着动：人眼认一个图标按钮的主体是**那个图形**，不是边框 ——
+   只撑外框、图形不变，观感上等于没改（这条在游戏目录页被退回过一次，见 §⑦）。
+   antd 的 .anticon 尺寸由 font-size 决定（内部 svg 是 1em），抬字号就是抬图标。
+   抬高度前已确认同行控件：那批圆钮在无字档就是 36 高，这里对齐它而不是另立一档。 */
 [data-icon-only="true"] .ui-chrome .ant-segmented-item {
-  min-width: 40px;
+  min-width: 44px;
   padding-inline: 0;
 }
 
 [data-icon-only="true"] .ui-chrome .ant-segmented-item-label {
+  /* antd 用 min-height + line-height 定条目高（见 segmented/style/index.js 的
+     size styles），沿用同一套属性，别的都不用碰；高亮滑块是 height:100% + 2px
+     内边距，会自动跟着变成 32 */
+  min-height: 32px;
+  line-height: 32px;
   padding-inline: 0;
   text-align: center;
+  /* 这一档 label 里只剩图标（文字是条件渲染掉的），所以直接 flex 居中：
+     .anticon 自带 vertical-align: -0.125em，靠行内基线对齐会在 32px 行盒里偏上
+     0.6px。注意**两层都要 flex** —— antd 的图标 DOM 是
+     label > span.ant-segmented-item-icon > span.anticon，
+     只把 label 变 flex 没用：外层那个 span 自己会被行高撑满整格，
+     居中它等于没居中。常规档不动。 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+[data-icon-only="true"] .ui-chrome .ant-segmented-item-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+[data-icon-only="true"] .ui-chrome .ant-segmented-item .anticon {
+  font-size: 15px;
 }
 
 /* --- ⑤ 页脚：纯说明文案（支持的格式 + 开源声明），整块收起不留空边。
