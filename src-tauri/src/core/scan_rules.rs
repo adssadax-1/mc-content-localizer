@@ -157,8 +157,9 @@ impl DeepScanRules {
         r
     }
 
-    /// 全量模板（等价改造前的旧行为）：含代码内嵌，关闭全部降噪过滤
-    pub fn full(is_plugin: bool) -> Self {
+    /// 全量模板（等价改造前的旧行为）：含代码内嵌，关闭全部降噪过滤。
+    /// 全量对模组/插件内容一致，参数仅为与其它模板保持同一签名（调用方按类型传入）。
+    pub fn full(_is_plugin: bool) -> Self {
         Self {
             auto: false,
             scope_json: true,
@@ -180,6 +181,8 @@ impl DeepScanRules {
         }
     }
 
+    /// 模板套用（仅测试使用；生产路径由前端取模板后整体替换）
+    #[cfg(test)]
     pub fn apply_template(&mut self, name: &str, is_plugin: bool) {
         let custom = std::mem::take(&mut self.custom);
         *self = match name {
@@ -190,7 +193,8 @@ impl DeepScanRules {
         self.custom = custom; // 模板只改内置规则，不丢自定义规则
     }
 
-    /// 当前规则对应哪个模板（都不同则 None，用于前端提示「已自定义」）
+    /// 当前规则对应哪个模板（都不同则 None，用于前端提示「已自定义」；仅测试使用）
+    #[cfg(test)]
     pub fn template_of(&self, is_plugin: bool) -> Option<&'static str> {
         for (name, tpl) in [
             (TEMPLATE_RECOMMENDED, Self::recommended(is_plugin)),
@@ -204,6 +208,7 @@ impl DeepScanRules {
         None
     }
 
+    #[cfg(test)]
     fn same_builtin(&self, other: &Self) -> bool {
         self.scope_json == other.scope_json
             && self.scope_lang == other.scope_lang
@@ -236,7 +241,8 @@ impl DeepScanRules {
         }
     }
 
-    /// 生效的内置规则条数（用于设置页摘要）
+    /// 生效的内置规则条数（仅测试断言使用；设置页摘要由前端自行计数）
+    #[cfg(test)]
     pub fn enabled_builtin_count(&self) -> usize {
         [
             self.scope_json,
@@ -311,7 +317,7 @@ fn is_dangerous_ext(ext: &str) -> bool {
         ext,
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" | "icns" | "ogg" | "mp3" | "wav" | "bin"
             | "dat" | "nbt" | "zip" | "jar" | "gz" | "class" | "so" | "dll" | "exe" | "ttf"
-            | "otf" | "woff" | "woff2" | "ogg"
+            | "otf" | "woff" | "woff2"
     )
 }
 
@@ -474,6 +480,8 @@ impl Globs {
         self.ext_includes.iter().any(|x| *x == e)
     }
 
+    /// 已生效的扩展名包含规则清单（仅测试断言使用）
+    #[cfg(test)]
     pub fn ext_includes_list(&self) -> &[String] {
         &self.ext_includes
     }

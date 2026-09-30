@@ -522,7 +522,7 @@ mod tests {
             w.write_all(br#"{"item.x.name":"Sword"}"#).unwrap();
             w.finish().unwrap();
         }
-        let mut e1 = sample_entry("item.x.name", "Sword", Some("剑"));
+        let e1 = sample_entry("item.x.name", "Sword", Some("剑"));
         let e2 = LangEntry {
             key: "config/demo.json#message".into(),
             source: "Welcome".into(),
@@ -555,7 +555,6 @@ mod tests {
 #[cfg(test)]
 mod serde_tests {
     use super::*;
-    use crate::core::model::{EntryStatus, LangEntry};
 
     #[test]
     fn deserializes_bundle_camel_case() {

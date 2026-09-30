@@ -41,6 +41,10 @@ fn default_batch_size_auto() -> bool {
     true
 }
 
+fn default_auto_log() -> bool {
+    true
+}
+
 fn default_close_behavior() -> String {
     "exit".to_string()
 }
@@ -118,6 +122,9 @@ pub struct Settings {
   /// 导出命名偏好：raw（原名）/ suffix（原名_zh_cn，默认）/ ai（AI 汉化名称）
   #[serde(default = "default_export_naming")]
   pub export_naming: String,
+  /// 自动记录日志（默认开启；关闭只停止记录，不删除已有日志）
+  #[serde(default = "default_auto_log")]
+  pub auto_log: bool,
   /// AI 汉化名称缓存（key = "文件名|大小"），仅在选择 AI 命名偏好时生成
   #[serde(default)]
   pub ai_names: HashMap<String, String>,
@@ -144,6 +151,7 @@ impl Default for Settings {
             close_behavior: default_close_behavior(),
             recent_game_dirs: Vec::new(),
             export_naming: default_export_naming(),
+            auto_log: true,
             deep_scan_rules: DeepScanSettings::default(),
             legacy_deep_scan: None,
             legacy_deep_scan_plugin: None,
@@ -210,6 +218,10 @@ impl Settings {
                     .unwrap_or(0);
                 let backup = path.with_file_name(format!("settings.corrupt-{stamp}.json"));
                 let _ = fs::rename(path, &backup);
+                crate::logging::warn(&format!(
+                    "设置文件解析失败，已留档为 {} 并使用默认值",
+                    backup.display()
+                ));
                 Self::default()
             }
             None => Self::default(),
@@ -236,6 +248,9 @@ impl Settings {
         self.deep_scan_rules.plugin.normalize();
     }
 
+    /// 整份序列化落盘（仅测试使用；生产路径走 patch_settings 的按需合并写，
+    /// 两者语义不同：save 会丢弃 Settings 之外的字段，patch 不会）
+    #[cfg(test)]
     pub fn save(&self, path: &Path) -> Result<(), String> {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).map_err(|e| e.to_string())?;

@@ -7,6 +7,7 @@ import type { SelectionBox } from "@air/react-drag-to-select";
 import { useTranslationContext } from "../i18n";
 import type { LangEntry } from "../types";
 import { STATUS_COLOR } from "../types";
+import { KeyRulePopover, type KeyRuleTools } from "./KeyRulePopover";
 
 interface Props {
   entries: LangEntry[];
@@ -22,6 +23,8 @@ interface Props {
   onToggleManySelected?: (keys: string[], selected: boolean) => void;
   /** 表格可视高度（启用虚拟滚动后内部滚动） */
   scrollY?: number;
+  /** Key 悬浮快捷规则（仅 mod/plugin 且已配置规则时传入；undefined = 不启用） */
+  ruleTools?: KeyRuleTools;
 }
 
 /** 超过该条目数启用 antd 虚拟滚动（只渲染可视行） */
@@ -208,6 +211,7 @@ export const EntryTable = memo(function EntryTable({
   onToggleAllSelected,
   onToggleManySelected,
   scrollY,
+  ruleTools,
 }: Props) {
   const { t: tr } = useTranslationContext();
   const [filter, setFilter] = useState("");
@@ -427,7 +431,16 @@ export const EntryTable = memo(function EntryTable({
       dataIndex: "key",
       width: 280,
       ellipsis: true,
-      render: (k: string) => <Typography.Text code>{k}</Typography.Text>,
+      render: (k: string, record: LangEntry) => {
+        const text = <Typography.Text code>{k}</Typography.Text>;
+        // Key 悬浮快捷规则：只包悬浮层，不拦截点击 —— 行 onClick（打开详情 Drawer）原样生效
+        if (!ruleTools) return text;
+        return (
+          <KeyRulePopover entry={record} tools={ruleTools}>
+            {text}
+          </KeyRulePopover>
+        );
+      },
       sorter: (a, b) => a.key.localeCompare(b.key),
     },
     {

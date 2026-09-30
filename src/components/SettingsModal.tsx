@@ -144,6 +144,8 @@ interface FormValues {
   packParallelCount?: number;
   /** 深度文本扫描 */
   deepScan?: boolean;
+  /** 自动记录日志（默认开启） */
+  autoLog?: boolean;
   /* theme / language / iconOnly 已移出表单：由顶栏快捷开关即时写盘，
      本弹窗不再读写这三项（字段留着会让人以为保存路径还在弹窗里）。 */
   /** 关闭行为：exit / minimize */
@@ -156,7 +158,7 @@ interface FormValues {
  *  只有它的 Promise 失败时才会显示这个值。
  *  **升版本时要跟 tauri.conf.json / package.json / Cargo.toml 一起改** ——
  *  它曾经长期停在旧版本号上，一旦 getVersion() 失败就会在「关于」里显示一个假版本。 */
-const FALLBACK_VERSION = "3.1.1";
+const FALLBACK_VERSION = "3.3.0";
 
 /** 字节数 → 可读体积 */
 function fmtBytes(n: number): string {
@@ -167,6 +169,11 @@ function fmtBytes(n: number): string {
 
 /** 项目 GitHub 地址 */
 const GITHUB_URL = "https://github.com/adssadax-1/mc-content-localizer";
+
+/* 注：**不要**往 Modal.confirm / message 的 content 里放"要用 React 上下文"的组件。
+   这类静态方法由 antd 另起一个 React 根渲染，不在 <TranslationProvider> 里，
+   组件里一调 useTranslationContext() 就抛错 —— 表现为"点了按钮什么都没发生"
+   （弹窗压根没渲染，错误也不经过应用的错误边界）。踩过一次，记在这里。 */
 
 /** 设置分组（NAV / section 结构）：个性化设置置顶为默认分组 */
 const SECTIONS: { key: string; labelKey: string; icon: React.ReactNode }[] = [
@@ -226,6 +233,8 @@ export function SettingsModal({
   /** 清除用户数据的第二步（危险确认）：0 = 未开始，2 = 等待勾选 */
   const [wipeStage, setWipeStage] = useState<0 | 2>(0);
   const [wipeAck, setWipeAck] = useState(false);
+  /** 同时清除日志（默认不勾选）：日志是排查依据，默认保留，避免清数据顺手丢掉现场 */
+  const [wipeLogs, setWipeLogs] = useState(false);
   /** 应用版本号：从 Tauri 运行时读取（= tauri.conf.json version） */
   const [appVersion, setAppVersion] = useState(FALLBACK_VERSION);
   useEffect(() => {
@@ -292,6 +301,7 @@ export function SettingsModal({
       cancelText: t("settings.storage.cancel"),
       onOk: () => {
         setWipeAck(false);
+        setWipeLogs(false);
         setWipeStage(2);
       },
     });
@@ -302,9 +312,10 @@ export function SettingsModal({
     if (!wipeAck) return;
     setStorageBusy("data");
     try {
-      const res: ClearResult = await api.clearAppData();
+      const res: ClearResult = await api.clearAppData(wipeLogs);
       setWipeStage(0);
       setWipeAck(false);
+      setWipeLogs(false);
       // 与「清除缓存」同理：扫描缓存是落盘 + 内存两层，磁盘那份由 Rust 侧一并删掉
       // （storage.rs 的 is_cache_file_name 同时匹配 session-* 与 scan-cache-*），
       // 内存这份必须自己清，否则会写穿回一个已经"被清除"的文件。
@@ -459,6 +470,7 @@ export function SettingsModal({
         // 表单不持有这三项，「确定」时就不会拿一份可能过期的快照把它们覆盖回去。
         closeBehavior: settings.closeBehavior === "minimize" ? "minimize" : "exit",
         exportNaming: settings.exportNaming ?? "suffix",
+        autoLog: settings.autoLog ?? true,
       });
       // 模型列表：用当前服务商缓存的列表（没拉取过则为空）
       const cur = settings.provider.provider;
@@ -625,6 +637,7 @@ export function SettingsModal({
       closeBehavior: v.closeBehavior === "minimize" ? "minimize" : "exit",
       exportNaming:
         v.exportNaming === "raw" || v.exportNaming === "ai" ? v.exportNaming : "suffix",
+      autoLog: v.autoLog ?? true,
     };
     try {
       // 增量保存：只写表单里的这些键。深度扫描规则、提示词、AI 命名缓存由各自的
@@ -1291,6 +1304,19 @@ export function SettingsModal({
                   共享边框，单独一行的那颗会缺左边框、圆角也对不上，看起来就是"错位"。
                   改成按内容定宽后第一列拿到完整空间，永不折行；第二列仍可伸缩，
                   极窄窗口下优先牺牲它，而不是去拆命名那一组。 */}
+              {/* 自动记录日志：默认开启。做成 Switch 而不是 Radio —— 它是单一布尔，
+                  且与上方两组"二选一"的语义不同，用控件形状把这点差异表达出来。
+                  关掉只停止记录（不删已有日志），下次打开软件仍是这个状态。 */}
+              <Form.Item
+                name="autoLog"
+                label={t("settings.appearance.autoLog")}
+                valuePropName="checked"
+                style={{ marginBottom: 8 }}
+                tooltip={t("settings.appearance.autoLogTip")}
+              >
+                <Switch />
+              </Form.Item>
+
               <div
                 style={{
                   display: "grid",
@@ -1373,6 +1399,13 @@ export function SettingsModal({
                   </Tag>
                   <Tag color="default">
                     {t("settings.storage.userTag", { size: fmtBytes(storage?.userBytes ?? 0) })}
+                  </Tag>
+                  {/* 日志单列一项：清除缓存不动它，清除数据也默认不动它，
+                      这里把占用写出来，用户才知道"还有个东西没被清掉"。
+                      刻意**不套 .ui-label** —— 那是"无字模式下收起"的标记，
+                      而这个 Tag 是读数（同上面两个），收起来就等于没有。 */}
+                  <Tag color="default">
+                    {t("settings.storage.logTag", { size: fmtBytes(storage?.logBytes ?? 0) })}
                   </Tag>
                   <Button
                     size="small"
@@ -1488,6 +1521,25 @@ ${storage?.profileDir ?? ""}` }}
         <Checkbox checked={wipeAck} onChange={(e) => setWipeAck(e.target.checked)}>
           {t("settings.storage.ack")}
         </Checkbox>
+        {/* 日志不在「用户数据」默认清除范围内：它是排查问题的现场，
+            单独给一个默认不勾选的选项，避免顺手一起清掉后无从追溯 */}
+        <div style={{ marginTop: 8 }}>
+          {/* 不套 .ui-label：无字模式收起的只是"外壳按钮的文字"，
+              这条是不可逆操作前的告知，任何模式下都必须看得见 */}
+          <Checkbox
+            checked={wipeLogs}
+            disabled={!wipeAck}
+            onChange={(e) => setWipeLogs(e.target.checked)}
+          >
+            {t("settings.storage.alsoLogs")}
+          </Checkbox>
+          <Typography.Paragraph
+            type="secondary"
+            style={{ fontSize: 11, margin: "2px 0 0 24px" }}
+          >
+            {t("settings.storage.alsoLogsTip", { size: fmtBytes(storage?.logBytes ?? 0) })}
+          </Typography.Paragraph>
+        </div>
       </Modal>
 
       <DeepScanRulesModal

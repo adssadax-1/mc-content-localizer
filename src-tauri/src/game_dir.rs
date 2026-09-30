@@ -6,7 +6,7 @@
 
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 
 static GAME_SCAN_CANCEL: AtomicBool = AtomicBool::new(false);
 
@@ -384,6 +384,14 @@ pub async fn scan_game_dir(app: AppHandle, root: String) -> Result<GameDirScan, 
         a.rel_path.to_lowercase().cmp(&b.rel_path.to_lowercase())
     });
 
+    let packs: usize = groups
+        .iter()
+        .map(|g| g.mods.len() + g.resourcepacks.len() + g.shaderpacks.len() + g.plugins.len())
+        .sum();
+    crate::logging::info(&format!(
+        "游戏目录扫描 {root}：{} 个版本分组 / {packs} 个内容包",
+        groups.len()
+    ));
     Ok(GameDirScan { root, groups })
 }
 

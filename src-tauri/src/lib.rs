@@ -1,5 +1,6 @@
 mod commands;
 mod core;
+mod logging;
 mod export;
 mod game_dir;
 mod settings;
@@ -16,9 +17,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            // 关闭行为：启动时从设置文件刷新
+            // 关闭行为与日志开关：启动时从设置文件刷新
             let settings = crate::settings::Settings::load(&commands::settings_path(app.handle()));
             crate::settings::set_close_behavior(&settings);
+            crate::logging::init(app.handle(), &settings);
 
             // 托盘：左键点击恢复窗口；菜单提供 显示/退出
             use tauri::{
@@ -95,7 +97,6 @@ pub fn run() {
             commands::export_resource_pack,
             commands::export_resource_pack_multi,
             commands::load_settings,
-            commands::save_settings,
             commands::patch_settings,
             commands::list_models,
             commands::test_model,
@@ -112,6 +113,12 @@ pub fn run() {
             storage::clear_app_cache,
             storage::clear_app_data,
             storage::restart_app,
+            logging::log_recent,
+            logging::log_export,
+            logging::log_open_dir,
+            logging::log_clear,
+            logging::log_event,
+            logging::log_set_tz_offset,
             commands::path_exists,
             commands::generate_ai_names_batch,
             commands::deep_scan_jar,
@@ -145,7 +152,6 @@ pub fn run() {
             commands::devtools::dev_encode_pairs,
             #[cfg(feature = "devtools")]
             commands::devtools::dev_write_text_file,
-            commands::save_session_cache,
             commands::load_session_cache,
             commands::clear_session_cache,
             commands::save_scan_cache,

@@ -187,14 +187,14 @@ export interface UpdateInfo {
 
 /** 软件自身数据的一项（「关于」页的存储明细） */
 export interface StorageItem {
-  group: "cache" | "user";
+  group: "cache" | "user" | "log";
   /** 文件名 / 目录名（相对软件数据目录） */
   name: string;
   path: string;
   bytes: number;
 }
 
-/** 软件自身数据占用（缓存与用户数据分开统计） */
+/** 软件自身数据占用（缓存 / 用户数据 / 日志分开统计） */
 export interface StorageUsage {
   configDir: string;
   localDir: string;
@@ -202,8 +202,19 @@ export interface StorageUsage {
   profileDir: string;
   cacheBytes: number;
   userBytes: number;
+  /** 会话日志占用（清除缓存不动它，清除数据可按需一并清除） */
+  logBytes: number;
   cacheItems: StorageItem[];
   userItems: StorageItem[];
+  logItems: StorageItem[];
+}
+
+/** 一条日志（会话日志，来自后端内存缓冲） */
+export interface LogEntry {
+  /** HH:MM:SS */
+  time: string;
+  level: "info" | "warn" | "error";
+  message: string;
 }
 
 /** 清理结果 */
@@ -296,6 +307,8 @@ export interface Settings {
   closeBehavior: 'exit' | 'minimize';
   /** 导出命名偏好：raw 原名 / suffix 原名_zh_cn（默认）/ ai AI 汉化名称 */
   exportNaming?: 'raw' | 'suffix' | 'ai';
+  /** 自动记录日志（默认开启；关闭只停止记录，不删除已有日志） */
+  autoLog?: boolean;
   /** AI 汉化名称缓存（key = "文件名|大小"） */
   aiNames?: Record<string, string>;
   /** 最近打开的游戏目录（游戏目录模式快速重选） */

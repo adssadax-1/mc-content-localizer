@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
+import { api } from "../api";
 
 interface Props {
   children: ReactNode;
@@ -22,6 +23,16 @@ export class ErrorBoundary extends Component<Props, State> {
   componentDidCatch(error: Error, info: ErrorInfo) {
     // 保留现场：控制台可见完整调用栈（开发者工具版可进一步排查）
     console.error("[ui-error]", error, info.componentStack);
+    /* 同时落到会话日志里：这类异常往往发生在"用户看不到控制台"的时候，
+       日志页是事后唯一能翻到的现场。写入失败不影响错误界面本身。 */
+    void api
+      .logEvent(
+        "error",
+        `界面异常：${String(error?.message ?? error)}${
+          info.componentStack ? `\n组件栈：${info.componentStack.trim()}` : ""
+        }`,
+      )
+      .catch(() => {});
   }
 
   render() {

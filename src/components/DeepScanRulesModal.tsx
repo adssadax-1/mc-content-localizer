@@ -587,8 +587,8 @@ export function DeepScanRulesModal({
   );
 }
 
-/** 自定义规则表单 */
-function RuleForm({
+/** 自定义规则表单（Key 悬浮快捷规则也复用此表单，保持同一套编辑/校验） */
+export function RuleForm({
   rule,
   maxLen,
   onChange,

@@ -67,8 +67,11 @@ pub struct StorageUsage {
     pub profile_dir: String,
     pub cache_bytes: u64,
     pub user_bytes: u64,
+    /// 会话日志（logs/）：清除缓存不清、清除数据默认不清（勾选才清）
+    pub log_bytes: u64,
     pub cache_items: Vec<StorageItem>,
     pub user_items: Vec<StorageItem>,
+    pub log_items: Vec<StorageItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -179,7 +182,15 @@ fn plan(config: Option<&Path>, local: Option<&Path>) -> Vec<Target> {
             for e in rd.flatten() {
                 let name = e.file_name().to_string_lossy().to_string();
                 let is_dir = e.file_type().map(|f| f.is_dir()).unwrap_or(false);
-                let group = if is_cache_file_name(&name) { "cache" } else { "user" };
+                // logs/ 是会话日志目录：独立分组。清除缓存永不触碰；
+                // 清除数据仅在用户勾选「同时清除日志」时进入删除计划。
+                let group = if is_dir && name == "logs" {
+                    "log"
+                } else if is_cache_file_name(&name) {
+                    "cache"
+                } else {
+                    "user"
+                };
                 out.push(Target {
                     path: e.path(),
                     group,
@@ -256,6 +267,9 @@ fn to_usage(config: Option<&Path>, local: Option<&Path>, targets: &[Target]) -> 
         if t.group == "cache" {
             usage.cache_bytes += bytes;
             usage.cache_items.push(item);
+        } else if t.group == "log" {
+            usage.log_bytes += bytes;
+            usage.log_items.push(item);
         } else {
             usage.user_bytes += bytes;
             usage.user_items.push(item);
@@ -325,7 +339,7 @@ fn run_clear(targets: Vec<Target>, roots_for_check: Vec<PathBuf>) -> ClearResult
 }
 
 /// 清除缓存：会话缓存（上次的内容包列表快照）与 WebView2 浏览器缓存。
-/// 不影响设置、API Key 与译文产物。
+/// 不影响设置、API Key、译文产物与**日志**（logs/ 独立分组，从不进入缓存清理）。
 #[tauri::command]
 pub fn clear_app_cache(app: AppHandle) -> Result<ClearResult, String> {
     let (cfg, local) = roots(&app);
@@ -334,17 +348,38 @@ pub fn clear_app_cache(app: AppHandle) -> Result<ClearResult, String> {
         .filter(|t| t.group == "cache")
         .collect();
     let check: Vec<PathBuf> = [cfg, local].into_iter().flatten().collect();
-    Ok(run_clear(targets, check))
+    let res = run_clear(targets, check);
+    crate::logging::info(&format!(
+        "清除缓存：释放 {} 字节（跳过 {} 项）",
+        res.freed_bytes,
+        res.skipped.len()
+    ));
+    Ok(res)
 }
 
 /// 清除用户数据：设置（含 API Key、术语表、AI 命名缓存）、会话缓存与 WebView2 配置。
-/// 软件目录之外的任何内容都不会被触碰。
+/// `include_logs`：是否连同会话日志一起清除（仅此入口、且用户在确认框勾选后才为 true；
+/// 清除后日志器仍可用，之后的新日志继续产生）。软件目录之外的任何内容都不会被触碰。
 #[tauri::command]
-pub fn clear_app_data(app: AppHandle) -> Result<ClearResult, String> {
+pub fn clear_app_data(app: AppHandle, include_logs: bool) -> Result<ClearResult, String> {
     let (cfg, local) = roots(&app);
-    let targets = plan(cfg.as_deref(), local.as_deref());
+    let targets: Vec<Target> = plan(cfg.as_deref(), local.as_deref())
+        .into_iter()
+        .filter(|t| t.group != "log" || include_logs)
+        .collect();
     let check: Vec<PathBuf> = [cfg, local].into_iter().flatten().collect();
-    Ok(run_clear(targets, check))
+    let res = run_clear(targets, check);
+    if include_logs {
+        // 内存缓冲一并清空；日志器保持可用，之后的新日志继续写入（文件按需重建）
+        crate::logging::clear_all();
+    }
+    crate::logging::info(&format!(
+        "清除用户数据：释放 {} 字节（{}日志，跳过 {} 项）",
+        res.freed_bytes,
+        if include_logs { "含" } else { "不含" },
+        res.skipped.len()
+    ));
+    Ok(res)
 }
 
 /// 重启软件（清除用户数据后让 WebView2 配置与设置回到全新状态）。
@@ -528,6 +563,49 @@ mod tests {
     }
 
     /// 根目录必须以应用标识符结尾：否则一律不清理（防「整个 AppData 被当成软件数据」）
+    /// 日志自成一档：`logs/` 既不是缓存也不是用户数据 ——
+    /// 清除缓存必须不动它；清除数据只有显式勾选「同时清除日志」才纳入删除计划。
+    /// 这里复刻 clear_app_cache / clear_app_data 各自的过滤条件（那两个函数要 AppHandle）。
+    #[test]
+    fn logs_are_separate_and_only_deleted_when_explicitly_included() {
+        let (base, cfg, local) = fixture("logs");
+        let logfile = cfg.join("logs/session-20260930-101500.log");
+        touch(&logfile, 400);
+
+        let planned = plan(Some(&cfg), Some(&local));
+        let logs: Vec<&Target> = planned.iter().filter(|t| t.group == "log").collect();
+        assert_eq!(logs.len(), 1, "logs/ 必须单列为日志组");
+        assert_eq!(logs[0].name, "logs");
+
+        // ① 清除缓存（group == "cache"）：日志不在计划里
+        let cache_only: Vec<Target> = plan(Some(&cfg), Some(&local))
+            .into_iter()
+            .filter(|t| t.group == "cache")
+            .collect();
+        assert!(cache_only.iter().all(|t| t.group != "log"));
+        run_clear(cache_only, vec![cfg.clone(), local.clone()]);
+        assert!(logfile.exists(), "清除缓存绝不能删日志");
+
+        // ② 清除用户数据但不勾选日志（group != "log"）：日志仍在
+        let without_logs: Vec<Target> = plan(Some(&cfg), Some(&local))
+            .into_iter()
+            .filter(|t| t.group != "log")
+            .collect();
+        run_clear(without_logs, vec![cfg.clone(), local.clone()]);
+        assert!(!cfg.join("settings.json").exists(), "设置应已清除");
+        assert!(logfile.exists(), "默认不勾选时必须保留日志");
+
+        // ③ 勾选「同时清除日志」：这次才进删除计划
+        let res = run_clear(plan(Some(&cfg), Some(&local)), vec![cfg.clone(), local.clone()]);
+        assert!(
+            res.removed.iter().any(|n| n == "logs"),
+            "勾选后日志应被删除：{:?}",
+            res.removed
+        );
+        assert!(!cfg.join("logs").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn roots_must_end_with_identifier() {
         let id = "com.administrator.mod-translator";

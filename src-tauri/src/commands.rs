@@ -30,14 +30,7 @@ fn session_cache_path(app: &AppHandle, name: &str) -> PathBuf {
         .join(format!("session-cache-{}.json", safe))
 }
 
-/// 保存会话缓存（前端防抖调用）
-#[tauri::command]
-pub fn save_session_cache(app: AppHandle, name: String, content: String) -> Result<(), String> {
-    let path = session_cache_path(&app, &name);
-    std::fs::write(&path, content).map_err(|e| e.to_string())
-}
-
-/// 读取会话缓存（无缓存或为空返回 None）
+/// 读取会话缓存（无缓存或为空返回 None；≤v2.3 旧版整份缓存的升级恢复路径）
 #[tauri::command]
 pub fn load_session_cache(app: AppHandle, name: String) -> Option<String> {
     let path = session_cache_path(&app, &name);
@@ -242,24 +235,29 @@ fn emit_batch(app: &AppHandle, pack_key: &str, results: &[TranslatedItem]) {
 #[tauri::command]
 pub fn cancel_translation() {
     CANCEL_TRANSLATION.store(true, Ordering::Relaxed);
+    crate::logging::info("用户取消翻译");
 }
 
 /// 暂停当前翻译（当前批次完成后暂停）
 #[tauri::command]
 pub fn pause_translation() {
     PAUSE_TRANSLATION.store(true, Ordering::Relaxed);
+    crate::logging::info("翻译已暂停");
 }
 
 /// 继续被暂停的翻译
 #[tauri::command]
 pub fn resume_translation() {
     PAUSE_TRANSLATION.store(false, Ordering::Relaxed);
+    crate::logging::info("翻译已恢复");
 }
 
 /// 解析模组 jar，返回模组信息与全部语言条目
 #[tauri::command]
 pub fn parse_jar(path: String) -> Result<ModFile, String> {
-    crate::core::jar::parse_jar(std::path::Path::new(&path)).map_err(|e| e.to_string())
+    let mf = crate::core::jar::parse_jar(std::path::Path::new(&path)).map_err(|e| e.to_string())?;
+    crate::logging::info(&format!("解析模组 {}：{} 条条目", mf.file_name, mf.entries.len()));
+    Ok(mf)
 }
 
 /// 执行 AI 翻译：提取术语表 → 分批翻译 → 占位符校验。
@@ -330,6 +328,9 @@ pub async fn run_translation(
     // 开始翻译前重置取消/暂停标志
     CANCEL_TRANSLATION.store(false, Ordering::Relaxed);
     PAUSE_TRANSLATION.store(false, Ordering::Relaxed);
+    crate::logging::info(&format!(
+        "开始翻译 {pack_label}：{total} 条 / {threads} 线程 / 每批 {batch_size} 条"
+    ));
 
     // 单线程：串行批处理（保持原有行为）
     if threads <= 1 {
@@ -380,6 +381,12 @@ pub async fn run_translation(
         }));
         #[cfg(feature = "devtools")]
         crate::dev::clear_emitter();
+        let done = results.iter().filter(|t| !t.translation.is_empty()).count();
+        if _cancelled {
+            crate::logging::warn(&format!("翻译已取消 {pack_label}：完成 {done}/{total}"));
+        } else {
+            crate::logging::info(&format!("翻译结束 {pack_label}：完成 {done}/{total}"));
+        }
         return Ok(results);
     }
 
@@ -476,6 +483,12 @@ pub async fn run_translation(
         .map_err(|_| "并发结果收集失败".to_string())?
         .into_inner()
         .map_err(|_| "并发结果锁失败".to_string())?;
+    let done = final_results.iter().filter(|t| !t.translation.is_empty()).count();
+    if _cancelled {
+        crate::logging::warn(&format!("翻译已取消 {pack_label}：完成 {done}/{total}"));
+    } else {
+        crate::logging::info(&format!("翻译结束 {pack_label}：完成 {done}/{total}"));
+    }
     Ok(final_results)
 }
 
@@ -571,29 +584,25 @@ pub fn export_resource_pack(
     lang_format: LangFormat,
     pack_format: u32,
 ) -> Result<String, String> {
-    crate::export::export_resource_pack(
+    let r = crate::export::export_resource_pack(
         std::path::Path::new(&dest_dir),
         &modid,
         &mod_name,
         &entries,
         lang_format,
         pack_format,
-    )
+    );
+    match &r {
+        Ok(p) => crate::logging::info(&format!("导出汉化资源包 → {p}")),
+        Err(e) => crate::logging::error(&format!("导出汉化资源包失败：{e}")),
+    }
+    r
 }
 
 #[tauri::command]
 pub fn load_settings(app: AppHandle) -> Settings {
     let path = settings_path(&app);
     Settings::load(&path)
-}
-
-#[tauri::command]
-pub fn save_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
-    let path = settings_path(&app);
-    settings.save(&path)?;
-    // 关闭行为可能变化：刷新进程级缓存
-    crate::settings::set_close_behavior(&settings);
-    Ok(())
 }
 
 /// 递归合并两个 JSON 对象：对象逐键递归，其余（数组/标量）整体替换；
@@ -640,9 +649,24 @@ pub fn patch_settings(app: AppHandle, patch: serde_json::Value) -> Result<(), St
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     std::fs::write(&path, text).map_err(|e| e.to_string())?;
-    // 关闭行为可能被 patch 改动：按合并后的内容刷新进程级缓存
+    // 关闭行为 / 日志开关可能被 patch 改动：按合并后的内容刷新进程级缓存
     if let Ok(merged) = serde_json::from_value::<Settings>(cur) {
         crate::settings::set_close_behavior(&merged);
+        /* 日志开关的切换本身也要留痕，注意顺序：
+           关闭时必须**先记再关** —— 关掉之后 write() 直接返回，那条「已关闭」就永远写不进去了。
+           反过来说，开关没变化时这两条都不会产生（关着时写不进，开着时 changed 为 false）。 */
+        if merged.auto_log {
+            if crate::logging::set_enabled(true) {
+                crate::logging::info("自动记录日志：开");
+            }
+        } else {
+            crate::logging::info("自动记录日志：关");
+            crate::logging::set_enabled(false);
+        }
+        crate::logging::set_secrets(
+            std::iter::once(merged.provider.api_key.clone())
+                .chain(merged.provider_api_keys.values().cloned()),
+        );
     }
     Ok(())
 }
@@ -668,11 +692,16 @@ pub fn export_resource_pack_multi(
     bundles: Vec<crate::export::ResourcePackBundle>,
     pack_format: u32,
 ) -> Result<String, String> {
-    crate::export::export_resource_pack_multi(
+    let r = crate::export::export_resource_pack_multi(
         std::path::Path::new(&dest_dir),
         &bundles,
         pack_format,
-    )
+    );
+    match &r {
+        Ok(p) => crate::logging::info(&format!("导出合并汉化资源包（{} 个模组）→ {p}", bundles.len())),
+        Err(e) => crate::logging::error(&format!("导出合并汉化资源包失败：{e}")),
+    }
+    r
 }
 
 /// 生成汉化后的模组 jar（复制原 jar + 写入 zh_cn，不覆盖原文件）
@@ -684,13 +713,18 @@ pub fn export_mod_jar(
     entries: Vec<LangEntry>,
     lang_format: LangFormat,
 ) -> Result<String, String> {
-    crate::export::export_mod_jar(
+    let r = crate::export::export_mod_jar(
         std::path::Path::new(&source),
         std::path::Path::new(&dest),
         &modid,
         &entries,
         lang_format,
-    )
+    );
+    match &r {
+        Ok(p) => crate::logging::info(&format!("导出汉化 jar → {p}")),
+        Err(e) => crate::logging::error(&format!("导出汉化 jar 失败：{e}")),
+    }
+    r
 }
 
 /// 更新信息（供前端检查更新提示）
@@ -772,8 +806,14 @@ pub fn deep_scan_jar(
         );
         crate::core::scan_rules::DeepScanRules::recommended(is_plugin)
     });
-    crate::core::deep_scan::deep_scan_jar(std::path::Path::new(&path), &modid, &rules)
-        .map_err(|e| e.to_string())
+    let res = crate::core::deep_scan::deep_scan_jar(std::path::Path::new(&path), &modid, &rules)
+        .map_err(|e| e.to_string())?;
+    crate::logging::info(&format!(
+        "深度扫描 {modid}：{} 条（{} 个分组）",
+        res.entries.len(),
+        res.groups.len()
+    ));
+    Ok(res)
 }
 
 /// 下发内置规则元数据（规则清单 / 模板 / 上限），前端据此渲染，避免规则名前后端漂移
@@ -861,13 +901,19 @@ pub fn detect_pack_type(path: String) -> Result<crate::core::pack::PackType, Str
 /// 解析光影包（shaders.properties / shaders/lang/en_US.lang + zh_CN.lang）
 #[tauri::command]
 pub fn parse_shader_pack(path: String) -> Result<crate::core::pack::ShaderPack, String> {
-    crate::core::pack::parse_shader_pack(std::path::Path::new(&path)).map_err(|e| e.to_string())
+    let sp = crate::core::pack::parse_shader_pack(std::path::Path::new(&path))
+        .map_err(|e| e.to_string())?;
+    crate::logging::info(&format!("解析光影包：{} 条条目", sp.entries.len()));
+    Ok(sp)
 }
 
 /// 解析资源包（pack.mcmeta description）
 #[tauri::command]
 pub fn parse_resource_pack(path: String) -> Result<crate::core::pack::ResourcePackInfo, String> {
-    crate::core::pack::parse_resource_pack(std::path::Path::new(&path)).map_err(|e| e.to_string())
+    let rp = crate::core::pack::parse_resource_pack(std::path::Path::new(&path))
+        .map_err(|e| e.to_string())?;
+    crate::logging::info(&format!("解析资源包：{} 条条目", rp.entries.len()));
+    Ok(rp)
 }
 
 /// 导出汉化光影包（复制原 zip + 写入 shaders/lang/zh_CN.lang）
@@ -877,11 +923,16 @@ pub fn export_shader_zh(
     dest: String,
     entries: Vec<LangEntry>,
 ) -> Result<String, String> {
-    crate::core::pack::export_shader_zh(
+    let r = crate::core::pack::export_shader_zh(
         std::path::Path::new(&source),
         std::path::Path::new(&dest),
         &entries,
-    )
+    );
+    match &r {
+        Ok(p) => crate::logging::info(&format!("导出汉化光影包 → {p}")),
+        Err(e) => crate::logging::error(&format!("导出汉化光影包失败：{e}")),
+    }
+    r
 }
 
 /// 导出改描述后的资源包（更新 pack.mcmeta description）
@@ -891,11 +942,16 @@ pub fn export_resource_pack_desc(
     dest: String,
     entries: Vec<LangEntry>,
 ) -> Result<String, String> {
-    crate::core::pack::export_resource_pack_desc(
+    let r = crate::core::pack::export_resource_pack_desc(
         std::path::Path::new(&source),
         std::path::Path::new(&dest),
         &entries,
-    )
+    );
+    match &r {
+        Ok(p) => crate::logging::info(&format!("导出描述资源包 → {p}")),
+        Err(e) => crate::logging::error(&format!("导出描述资源包失败：{e}")),
+    }
+    r
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1118,6 +1174,12 @@ pub mod devtools {
 pub fn parse_plugin_jar(path: String) -> Result<crate::core::model::PluginFile, String> {
     let info = crate::core::plugin::parse_plugin_jar(std::path::Path::new(&path))
         .map_err(|e| e.to_string())?;
+    crate::logging::info(&format!(
+        "解析插件 {}：{} 条（自带中文 {} 条）",
+        info.plugin_name,
+        info.entries.len(),
+        info.zh_count
+    ));
     Ok(crate::core::model::PluginFile {
         file_name: info.file_name,
         plugin_name: info.plugin_name,
@@ -1135,11 +1197,16 @@ pub fn export_plugin_jar(
     dest: String,
     items: Vec<crate::export::PluginExportItem>,
 ) -> Result<String, String> {
-    crate::export::export_plugin_jar(
+    let r = crate::export::export_plugin_jar(
         std::path::Path::new(&source),
         std::path::Path::new(&dest),
         &items,
-    )
+    );
+    match &r {
+        Ok(p) => crate::logging::info(&format!("导出汉化插件 jar → {p}")),
+        Err(e) => crate::logging::error(&format!("导出汉化插件 jar 失败：{e}")),
+    }
+    r
 }
 
 
@@ -1165,7 +1232,8 @@ pub struct AiNameItem {
 /// 返回 id → 中文名（未取到名的包不会出现在结果里，由前端回退为原名_zh_cn）。
 #[tauri::command]
 pub async fn generate_ai_names_batch(
-    app: tauri::AppHandle,
+    // 仅 devtools 构建使用（set_emitter）；生产构建下该参数保留以维持命令签名
+    #[cfg_attr(not(feature = "devtools"), allow(unused_variables))] app: tauri::AppHandle,
     provider: crate::translate::provider::ProviderConfig,
     items: Vec<AiNameItem>,
 ) -> Result<std::collections::HashMap<String, String>, String> {
@@ -1184,6 +1252,7 @@ pub async fn generate_ai_names_batch(
     crate::dev::clear_emitter();
 
     let (parsed, raw) = result.map_err(|e| e.to_string())?;
+    crate::logging::info(&format!("AI 批量命名：请求 {} 个，返回 {} 个", items.len(), parsed.len()));
     let mut out = std::collections::HashMap::new();
     for (it, name) in items.iter().zip(parsed.into_iter()) {
         if let Some(n) = name {

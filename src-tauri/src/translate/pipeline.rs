@@ -138,6 +138,11 @@ pub async fn translate_batch(
                             .unwrap_or_else(|| "大面积缺条目".to_string()),
                         "waitSecs": 1,
                     }));
+                    crate::logging::warn(&format!(
+                        "批次软失败（{}），补漏 {} 条",
+                        res.parse_issue.clone().unwrap_or_else(|| "大面积缺条目".to_string()),
+                        retry_items.len()
+                    ));
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     match provider.chat(&system, &retry_payload, "translate").await {
                         Ok(raw2) => {
@@ -176,8 +181,10 @@ pub async fn translate_batch(
                     "errorMsg": err_msg,
                     "waitSecs": wait.as_secs(),
                 }));
-                #[cfg(not(feature = "devtools"))]
-                let _ = err_msg;
+                crate::logging::warn(&format!(
+                    "AI 请求失败（第 {attempt}/{max_retries} 次重试，{}s 后）：{err_msg}",
+                    wait.as_secs()
+                ));
                 tokio::time::sleep(wait).await;
             }
         }

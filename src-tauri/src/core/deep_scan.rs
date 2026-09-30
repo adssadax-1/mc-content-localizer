@@ -34,7 +34,6 @@ struct ScanItem {
     source: String,
     file: String,
     json_path: String,
-    score: i32,
     /// 稳定分组 key（message/config/data/achievement/nested/class_text/lib_text/other_locale/plain）
     group: &'static str,
 }
@@ -417,13 +416,13 @@ fn looks_like_identifier(t: &str) -> bool {
 
 fn consider(text: &str, json_path: &str, file: &str, ctx: &ScanCtx, out: &mut Vec<ScanItem>) {
     let trimmed = text.trim();
-    if let Some(score) = score_text(trimmed, json_path, ctx) {
+    // score_text 的分值只用于「是否保留」门槛（>=2），本身不参与后续排序/分组
+    if score_text(trimmed, json_path, ctx).is_some() {
         let group = group_key(file, json_path, trimmed, ctx);
         out.push(ScanItem {
             source: trimmed.to_string(),
             file: file.to_string(),
             json_path: json_path.to_string(),
-            score,
             group,
         });
     }

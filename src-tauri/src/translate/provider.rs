@@ -608,7 +608,7 @@ fn parse_indexed_names(text: &str, count: usize) -> std::collections::HashMap<us
     use std::collections::HashMap;
     let mut out: HashMap<usize, String> = HashMap::new();
 
-    let mut put = |idx: usize, raw: &str, out: &mut HashMap<usize, String>| {
+    let put = |idx: usize, raw: &str, out: &mut HashMap<usize, String>| {
         if idx == 0 || idx > count || out.contains_key(&idx) {
             return;
         }

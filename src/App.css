@@ -873,10 +873,30 @@ body {
   font-size: 15px;
 }
 
-/* --- ⑤ 页脚：纯说明文案（支持的格式 + 开源声明），整块收起不留空边。
-   GitHub 入口顶栏还有一个，不会丢。 --- */
-[data-icon-only="true"] .ui-footer {
+/* --- ⑤ 页脚：左侧是日志入口（功能性，两种模式都留），
+   右侧是说明文案 + 开源声明（无字模式下整块收起，不留空边）。
+   GitHub 入口顶栏还有一个，不会丢。
+
+   注意：**页脚本身不能再整块 display:none** —— 日志入口住在这一行，
+   收掉整行等于把入口一起收没了。收起的是里面的说明块（.ui-footer-info）。 --- */
+[data-icon-only="true"] .ui-footer-info {
   display: none;
+}
+
+/* 日志入口：页脚里唯一的可点元素，默认是"灰字按钮"的观感，
+   hover 才浮出底色 —— 与顶栏那排快捷开关同一种语言，不抢正文注意力。
+   命中区放大到 28px（页脚高度足够，且它离内容区还有一段距离）。 */
+.ui-footer .app-log-entry {
+  color: var(--app-text-secondary, #6b7280);
+  height: 28px;
+  padding-inline: 8px;
+  transition:
+    color 0.2s ease,
+    background 0.2s ease;
+}
+
+.ui-footer .app-log-entry:hover {
+  color: var(--ant-color-primary, #4a90d9);
 }
 
 /* ============================================================================
@@ -971,4 +991,27 @@ body {
   min-width: 48px;
   /* size="small" 是 24；抬到 28 —— 文字收掉后 24 会显得"塌"下去 */
   height: 28px;
+}
+
+/* 可点击筛选标签：保持 Tag 体积不变，hover 提示可点，选中用主题色描边轻量高亮。
+   不用 CheckableTag —— 那会丢掉现有卡片标签的视觉风格（含 cyan/processing 语义色）。 */
+.tag-clickable {
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, box-shadow 0.15s;
+}
+.tag-clickable:hover {
+  border-color: #4a90d9;
+  color: #4a90d9;
+}
+.tag-clickable.tag-on {
+  border-color: #4a90d9;
+  box-shadow: inset 0 0 0 1px #4a90d9;
+}
+[data-theme="dark"] .tag-clickable:hover {
+  border-color: #6cb3ff;
+  color: #6cb3ff;
+}
+[data-theme="dark"] .tag-clickable.tag-on {
+  border-color: #6cb3ff;
+  box-shadow: inset 0 0 0 1px #6cb3ff;
 }

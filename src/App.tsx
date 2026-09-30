@@ -6,6 +6,7 @@ import {
   ConfigProvider,
   Drawer,
   Dropdown,
+  Input,
   InputNumber,
   Layout,
   Segmented,
@@ -35,6 +36,7 @@ import {
   PlayCircleOutlined,
   RightOutlined,
   SaveOutlined,
+  SearchOutlined,
   SettingOutlined,
   StopOutlined,
   SunOutlined,
@@ -53,20 +55,25 @@ import { EntryTable } from "./components/EntryTable";
 import { ContextPanel } from "./components/ContextPanel";
 import { SettingsModal } from "./components/SettingsModal";
 import { DeepScanRulesModal } from "./components/DeepScanRulesModal";
+import type { KeyRuleTools } from "./components/KeyRulePopover";
 import { DeepScanIcon } from "./components/DeepScanIcon";
 import { IconOnlyIcon } from "./components/IconOnlyIcon";
+import { LogIcon } from "./components/LogIcon";
+import { LogsModal } from "./components/LogsModal";
 import { pushInvoke } from "./components/DevToolsPanel";
 import { type DevResultKind, DEV_SHOW_RESULT_ALERT, DEV_SHOW_EXPORT_ERROR, DEV_SETTINGS_SYNC, DEV_FAULT_CHANGED, type DevFaultNotice } from "./devtools/bus";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, emit, type UnlistenFn } from "@tauri-apps/api/event";
 import { TranslationProvider, useTranslation, useTranslationContext } from "./i18n";
 import { KIND_META, KIND_ORDER, MODE_ICON, type PackKind } from "./kindMeta";
-import { LOADER_LABEL, packFormatForMc, isLocalProvider, LOCAL_AUTO_BATCH_CAP } from "./types";
+import { LOADER_LABEL, STATUS_LABEL, packFormatForMc, isLocalProvider, LOCAL_AUTO_BATCH_CAP } from "./types";
 
 // devApi 代理：__DEVTOOLS__ 时包装 api，每次 invoke 记录到 ring buffer；生产构建直接用原 api。
 const api = __DEVTOOLS__ ? createDevApi(rawApi, pushInvoke) : rawApi;
 import type {
   BatchItem,
+  CustomRule,
+  EntryStatus,
   LangEntry,
   LangFormat,
   ModFile,
@@ -236,6 +243,56 @@ async function uniqueDest(dir: string, base: string, suffix: string, ext: string
   return `${dir}/${name}`;
 }
 
+// ── 类型页搜索 + 状态快速筛选 ────────────────────────────────────────────────
+// 只复用既有数据：条目状态（EntryStatus / STATUS_LABEL）、运行期翻译标记、
+// mod/plugin 元数据与 gameVersion；不引入新的状态体系。
+type PackStatusKey = EntryStatus | "translating";
+
+/** 筛选面板的状态项顺序（翻译中是运行期标记而非 EntryStatus，放中间与卡片标签一致） */
+const PACK_STATUS_CHIPS: PackStatusKey[] = [
+  "untranslated", "existingZh", "aiTranslated", "userConfirmed",
+  "placeholderError", "translating", "aiEmpty", "aiFailed", "tmHit",
+];
+
+/** 每个包的可搜索文本与状态集合。按对象身份缓存：
+ *  patchPack 只替换被修改的包（其余保持引用），千包场景下每次按键只为变更过的包重算；
+ *  sig 额外覆盖 applyDeepScan 那类「同对象就地改 entries」的路径（长度/末位 key 变化）。 */
+const packFilterCache = new WeakMap<PackItem, { sig: string; haystack: string; statuses: Set<PackStatusKey> }>();
+
+function packFilterMeta(it: PackItem, translatingNow: boolean) {
+  const last = it.entries[it.entries.length - 1];
+  const sig = `${it.entries.length}|${last?.key ?? ""}|${translatingNow ? 1 : 0}`;
+  const hit = packFilterCache.get(it);
+  if (hit && hit.sig === sig) return hit;
+
+  const parts: string[] = [
+    it.name, it.fileName, it.sourcePath, it.gameVersion ?? "",
+    it.modFile?.modName ?? "", it.modFile?.modid ?? "", it.modFile?.version ?? "",
+    it.pluginFile?.pluginName ?? "", it.pluginFile?.version ?? "",
+  ];
+  if (it.modFile) parts.push(it.modFile.loader, LOADER_LABEL[it.modFile.loader]);
+  const statuses = new Set<PackStatusKey>();
+  for (const e of it.entries) {
+    statuses.add(e.status);
+    // 「简介/描述」类信息散落在条目里（plugin.yml#description、pack.mcmeta 描述等），
+    // 只取 key 命中 description 的条目参与搜索，避免整包条目文本进入索引
+    if (e.source && /description/i.test(e.key)) parts.push(e.source);
+  }
+  // 包级自带中文标记（shader/资源包的 zh 信息可能不在条目状态里）
+  if (it.hasZh) statuses.add("existingZh");
+  // 状态以「中文标签 + 原始 key」双形式进索引：中文 UI 搜「翻译失败」、任意 UI 搜「aifailed」都能命中
+  for (const s of statuses) {
+    if (s !== "translating") parts.push(STATUS_LABEL[s]);
+    parts.push(s);
+  }
+  if (translatingNow || it.entries.some((e) => e.translating)) statuses.add("translating");
+  if (statuses.has("translating")) parts.push("翻译中", "translating");
+
+  const meta = { sig, haystack: parts.join("\n").toLowerCase(), statuses };
+  packFilterCache.set(it, meta);
+  return meta;
+}
+
 /** 内置规则布尔字段清单（摘要与差异计算共用） */
 const DEEP_RULE_KEYS = [
   "scopeJson", "scopeLang", "scopeText", "scopeNested", "scopeClass",
@@ -395,6 +452,35 @@ function showResultCard(
   });
 }
 
+/** 可点击的筛选标签：未选中保持 Tag 原视觉，hover/选中用主题色描边轻量高亮（样式见 App.css）。
+ *  stopPropagation：卡片头部的 onClick 是展开/折叠，标签点击不能触发它。 */
+function FilterTag({
+  on,
+  onClick,
+  color,
+  className,
+  children,
+}: {
+  on: boolean;
+  onClick: () => void;
+  color?: string;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <Tag
+      color={color}
+      className={`tag-clickable${on ? " tag-on" : ""}${className ? ` ${className}` : ""}`}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+    >
+      {children}
+    </Tag>
+  );
+}
+
 interface PackCardProps {
   item: PackItem;
   translating: boolean;
@@ -421,6 +507,16 @@ interface PackCardProps {
   deepScanSummary?: string;
   /** 打开该包的深度扫描规则配置（齿轮） */
   onOpenDeepRules?: (key: string) => void;
+  /** Key 悬浮快捷规则（仅 mod/plugin 页传入；undefined = 不启用） */
+  ruleTools?: KeyRuleTools;
+  /** 卡片标签点击 → 增删一个搜索词（统一筛选状态：searchText 的 token） */
+  onToggleTagFilter: (token: string) => void;
+  /** 卡片「翻译中」标签点击 → 增删状态筛选（与筛选栏 chips 同一状态） */
+  onToggleStatusFilter: (s: PackStatusKey) => void;
+  /** 该搜索词当前是否在筛选中（标签选中态） */
+  isTagOn: (token: string) => boolean;
+  /** 该状态当前是否在筛选中（标签选中态） */
+  isStatusOn: (s: PackStatusKey) => boolean;
 }
 
 /** 单个内容包卡片（memo 化：只有自己的数据/回调变化才重渲染） */
@@ -443,6 +539,11 @@ const PackCard = memo(function PackCard({
   deepScanningKey,
   deepScanSummary,
   onOpenDeepRules,
+  ruleTools,
+  onToggleTagFilter,
+  onToggleStatusFilter,
+  isTagOn,
+  isStatusOn,
 }: PackCardProps) {
   const { t } = useTranslationContext();
   const total = item.entries.length;
@@ -503,19 +604,51 @@ const PackCard = memo(function PackCard({
         <span style={{ color: meta.color }}>{meta.icon}</span>
         <Typography.Text strong>{item.name}</Typography.Text>
         <Tag color={meta.color}>{t(meta.labelKey)}</Tag>
-        {item.modFile?.version && <Tag>{item.modFile.version}</Tag>}
-        {item.modFile && <Tag>{item.modFile.loader === "unknown" ? t("loader.unknown") : item.modFile.loader.toUpperCase()}</Tag>}
+        {/* 可筛选标签：点击 = 增删统一筛选状态里的一个条件（搜索词 token / 状态 chip），
+            stopPropagation 防止触发卡片的展开/折叠；选中态由 isFilterOn 反映 */}
+        {item.modFile?.version && (
+          <FilterTag
+            on={isTagOn(item.modFile.version)}
+            onClick={() => onToggleTagFilter?.(item.modFile!.version!)}
+          >
+            {item.modFile.version}
+          </FilterTag>
+        )}
+        {item.modFile && (
+          <FilterTag
+            on={isTagOn(item.modFile.loader)}
+            onClick={() => onToggleTagFilter?.(item.modFile!.loader)}
+          >
+            {item.modFile.loader === "unknown" ? t("loader.unknown") : item.modFile.loader.toUpperCase()}
+          </FilterTag>
+        )}
         {item.hasZh && (
-          <Tag color="cyan">{t("app.hasZh")} {item.zhCount ?? 0} {t("app.hasZhCount")}</Tag>
+          <FilterTag
+            color="cyan"
+            on={isStatusOn("existingZh")}
+            onClick={() => onToggleStatusFilter("existingZh")}
+          >
+            {t("app.hasZh")} {item.zhCount ?? 0} {t("app.hasZhCount")}
+          </FilterTag>
         )}
         {item.gameVersion && (
-          <Tag color="geekblue">§ {item.gameVersion}</Tag>
+          <FilterTag
+            on={isTagOn(item.gameVersion)}
+            onClick={() => onToggleTagFilter?.(item.gameVersion!)}
+          >
+            § {item.gameVersion}
+          </FilterTag>
         )}
         {thisTranslating && (
-          <Tag color="processing" className="dev-pulse-tag">
+          <FilterTag
+            color="processing"
+            className="dev-pulse-tag"
+            on={isStatusOn("translating")}
+            onClick={() => onToggleStatusFilter?.("translating")}
+          >
             {t("components.translating")}
             {packProgress ? ` ${packProgress.done}/${packProgress.total}` : ""}
-          </Tag>
+          </FilterTag>
         )}
         <Typography.Text type="secondary" style={{ marginLeft: "auto" }}>
           {translated}/{total} {t("app.translatedCount")}
@@ -604,6 +737,7 @@ const PackCard = memo(function PackCard({
               onToggleAllSelected={hSelAll}
               onToggleManySelected={hSelMany}
               scrollY={Math.max(item.height - 96, 120)}
+              ruleTools={ruleTools}
             />
           </div>
           <div
@@ -730,6 +864,9 @@ function AppInner({
   );
   const [queue, setQueue] = useState<PackItem[]>([]);
   const [activeTab, setActiveTab] = useState<PackKind>("mod");
+  // 类型页搜索 + 状态快速筛选（只作用于当前类型页；切页保留条件，天然按类型隔离）
+  const [searchText, setSearchText] = useState("");
+  const [statusFilter, setStatusFilter] = useState<PackStatusKey[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const [parsing, setParsing] = useState(false);
   const [translating, setTranslating] = useState(false);
@@ -775,6 +912,13 @@ function AppInner({
   const importReviewResolve = useRef<((v: { deepKeys: string[]; zhKeys: string[]; autoDeep: boolean }) => void) | null>(null);
   // 游戏目录「解析并加入列表」的解析进度（GameDirView 显示）
   const [gdAddProgress, setGdAddProgress] = useState<{ done: number; total: number; current: string } | null>(null);
+
+  /* 启动时把本地时区偏移告诉后端（JS 的 getTimezoneOffset 是权威值）：
+     Rust 侧不引 chrono/time，`std` 只有 UTC —— 不报这一次，日志文件里的时间
+     会比用户的墙上时钟差一个时区。只报一次，进程内有效。 */
+  useEffect(() => {
+    void api.logSetTzOffset(-new Date().getTimezoneOffset()).catch(() => {});
+  }, []);
 
   // 启动恢复询问：有会话缓存（上次未清空就退出/崩溃）时询问是否恢复内容包列表
   // 优先读 v2 分片缓存；没有则回退旧的整份缓存（旧缓存会在下次落盘时迁移为分片）
@@ -1015,6 +1159,8 @@ function AppInner({
   const [clearOpen, setClearOpen] = useState(false);
   // 单包深度扫描规则配置（点击卡片齿轮打开，只允许调整规则与自定义规则启用位）
   const [deepRulesFor, setDeepRulesFor] = useState<string | null>(null);
+  // 日志页（左下角入口打开；只读当前会话日志）
+  const [logsOpen, setLogsOpen] = useState(false);
 
   // devtools：监听开发者工具第二窗口广播的触发事件，在主窗口弹出真实提示
   useEffect(() => {
@@ -2261,7 +2407,7 @@ function AppInner({
     }
   }
 
-  /** 把已生成的名称合并进设置（一次 saveSettings） */
+  /** 把已生成的名称合并进设置（增量保存 aiNames，不整份写回） */
   async function persistAiNames(): Promise<void> {
     const cur = settingsRef.current;
     if (!cur) return;
@@ -2647,6 +2793,107 @@ function AppInner({
   );
 
   const visibleQueue = useMemo(() => queue.filter((it) => it.kind === activeTab), [queue, activeTab]);
+
+  // 搜索 + 状态筛选（与 visibleQueue 同源，天然限定在当前类型页内）：
+  // - 搜索词按空白拆分为多条件，条件之间 AND，单个条件命中任意可搜字段即可；
+  // - 状态多选取并集（包含该状态的包即命中）；
+  // - 两者同时存在时取交集。输入用 deferred 值，千包输入不阻塞按键。
+  const deferredSearch = useDeferredValue(searchText);
+  const searchTokens = useMemo(
+    () => deferredSearch.trim().toLowerCase().split(/\s+/).filter(Boolean),
+    [deferredSearch],
+  );
+  const filterActive = searchTokens.length > 0 || statusFilter.length > 0;
+  const filteredQueue = useMemo(() => {
+    if (!filterActive) return visibleQueue;
+    return visibleQueue.filter((it) => {
+      const meta = packFilterMeta(it, !!translatingKeys[it.key]);
+      if (statusFilter.length > 0 && !statusFilter.some((s) => meta.statuses.has(s))) return false;
+      return searchTokens.every((tok) => meta.haystack.includes(tok));
+    });
+  }, [visibleQueue, translatingKeys, searchTokens, statusFilter, filterActive]);
+  const clearFilters = useCallback(() => {
+    setSearchText("");
+    setStatusFilter([]);
+  }, []);
+
+  // ── 统一筛选状态的所有入口：搜索框输入、状态 chips、卡片标签点击，改的都是同一份状态 ──
+  /** 卡片标签点击：向搜索词增删一个 token（大小写不敏感比较，保留用户已输入的原文） */
+  const toggleSearchToken = useCallback((token: string) => {
+    setSearchText((prev) => {
+      const tokens = prev.trim().split(/\s+/).filter(Boolean);
+      const lower = token.toLowerCase();
+      const i = tokens.findIndex((x) => x.toLowerCase() === lower);
+      if (i >= 0) tokens.splice(i, 1);
+      else tokens.push(token);
+      return tokens.join(" ");
+    });
+  }, []);
+  /** 状态 chip / 卡片「翻译中」「自带中文」标签共用：增删一个状态筛选 */
+  const toggleStatusChip = useCallback((s: PackStatusKey) => {
+    setStatusFilter((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
+  }, []);
+  /** 标签选中态：基于 deferred 分词，输入过程中不触发全卡片重渲染 */
+  const isTagOn = useCallback(
+    (token: string) => searchTokens.includes(token.toLowerCase()),
+    [searchTokens],
+  );
+  const isStatusOn = useCallback((s: PackStatusKey) => statusFilter.includes(s), [statusFilter]);
+
+  // ── Key 悬浮快捷规则：与设置弹窗同一条 patchSettings 通道，只写对应类型一侧 ──
+  const upsertCustomRule = useCallback(
+    (kind: "mod" | "plugin", rule: CustomRule) => {
+      const cur = settingsRef.current;
+      const side = cur?.deepScanRules?.[kind];
+      if (!cur?.deepScanRules || !side) return;
+      const exists = side.custom.some((r) => r.id === rule.id);
+      const custom = exists
+        ? side.custom.map((r) => (r.id === rule.id ? rule : r))
+        : [...side.custom, rule];
+      const next = { ...cur, deepScanRules: { ...cur.deepScanRules, [kind]: { ...side, custom } } };
+      // 乐观同步：patch 异步返回前先把内存推到最新，连续快速操作不会互相覆盖
+      settingsRef.current = next;
+      setSettings(next);
+      api
+        .patchSettings({ deepScanRules: { [kind]: { ...side, custom } } })
+        .then(() => message.success(t("app.ruleSaved")))
+        .catch((e) => message.error(String(e)));
+    },
+    [t],
+  );
+  const removeCustomRule = useCallback((kind: "mod" | "plugin", id: string) => {
+    const cur = settingsRef.current;
+    const side = cur?.deepScanRules?.[kind];
+    if (!cur?.deepScanRules || !side) return;
+    const custom = side.custom.filter((r) => r.id !== id);
+    const next = { ...cur, deepScanRules: { ...cur.deepScanRules, [kind]: { ...side, custom } } };
+    settingsRef.current = next;
+    setSettings(next);
+    api
+      .patchSettings({ deepScanRules: { [kind]: { ...side, custom } } })
+      .catch((e) => message.error(String(e)));
+  }, []);
+
+  /** 仅 mod/plugin 页启用（shader/资源包没有深度扫描入口，规则对它们不可达） */
+  const keyRuleTools = useMemo<KeyRuleTools | undefined>(() => {
+    const kind: "mod" | "plugin" | null =
+      activeTab === "plugin" ? "plugin" : activeTab === "mod" ? "mod" : null;
+    const side = kind ? settings?.deepScanRules?.[kind] : undefined;
+    if (!kind || !side) return undefined;
+    return {
+      rules: side.custom,
+      maxPatternLen: 200, // 与后端 MAX_PATTERN_LEN 对齐
+      onCreate: (r) => upsertCustomRule(kind, r),
+      onUpdate: (r) => upsertCustomRule(kind, r),
+      onDelete: (id) => removeCustomRule(kind, id),
+      onViewAll: () => {
+        setSettingsSection("deepscan");
+        setSettingsOpen(true);
+      },
+    };
+  }, [activeTab, settings, upsertCustomRule, removeCustomRule]);
+
+
   const allChecked = useMemo(
     () => visibleQueue.length > 0 && visibleQueue.every((it) => it.checked),
     [visibleQueue],
@@ -2679,8 +2926,8 @@ function AppInner({
     });
   }, [activeTab]);
   const shownQueue = useMemo(
-    () => (visibleQueue.length > packRenderLimit ? visibleQueue.slice(0, packRenderLimit) : visibleQueue),
-    [visibleQueue, packRenderLimit],
+    () => (filteredQueue.length > packRenderLimit ? filteredQueue.slice(0, packRenderLimit) : filteredQueue),
+    [filteredQueue, packRenderLimit],
   );
 
   const selectedEntry = useMemo(() => {
@@ -2720,9 +2967,20 @@ function AppInner({
             <span className="ui-label" style={{ marginLeft: 8 }}>{t("app.title")}</span>
           </Typography.Title>
           {/* 队列计数拆成「数字 + 文字」两段：无字模式只隐藏文字部分，
-              数字是数据读数、又不与任何图标重复，留着信息量最大 */}
+              数字是数据读数、又不与任何图标重复，留着信息量最大。
+
+              ⚠️ Tag 必须是 **inline-flex + align-items: center**，不能是默认的 inline-block：
+              `.ui-label` 带 `overflow: hidden`，而按 CSS 规则，这种 inline-block 的基线
+              是**盒子下边缘**、不是内部文字的基线 —— 于是同一行里数字（裸文本，走真基线）
+              与标签文字（走盒底）会错开约 4px：实测「1143」落在 y34–40、「个内容包」落在
+              y27–36，数字看着像"沉下去、还小了一号"。同一字号与行高下，居中两个盒子
+              等价于对齐两者的基线，所以 flex 居中即可根治（无字模式的折叠不受影响：
+              收的是 .ui-label 的 max-width，它仍是 flex item）。 */}
           {queue.length > 0 && (
-            <Tag color="blue" style={{ marginRight: 0 }}>
+            <Tag
+              color="blue"
+              style={{ marginRight: 0, display: "inline-flex", alignItems: "center" }}
+            >
               {queue.length}
               <span className="ui-label" style={{ marginLeft: 4 }}>{t("app.tag")}</span>
             </Tag>
@@ -3160,6 +3418,41 @@ function AppInner({
                 </Tooltip>
           </Space>
 
+              {/* 搜索 + 状态快速筛选：visibleQueue 已按类型过滤，这里只做当前类型页内的筛选 */}
+              <div style={{ marginBottom: 8, display: "flex", flexWrap: "wrap", alignItems: "center", gap: "6px 10px" }}>
+                <Input
+                  allowClear
+                  value={searchText}
+                  onChange={(e) => setSearchText(e.target.value)}
+                  prefix={<SearchOutlined style={{ color: "var(--text-color-secondary, #999)", marginRight: 4 }} />}
+                  placeholder={t("app.searchPlaceholder")}
+                  style={{ width: 360, maxWidth: "100%" }}
+                />
+                <Tooltip title={t("app.filterHint")}>
+                  <span style={{ display: "inline-flex", flexWrap: "wrap", gap: 4 }}>
+                    {PACK_STATUS_CHIPS.map((s) => (
+                      <Tag.CheckableTag
+                        key={s}
+                        checked={statusFilter.includes(s)}
+                        onChange={() => toggleStatusChip(s)}
+                      >
+                        {s === "translating" ? t("components.translating") : t(`status.${s}`)}
+                      </Tag.CheckableTag>
+                    ))}
+                  </span>
+                </Tooltip>
+                <Typography.Text type="secondary" style={{ marginLeft: "auto", fontSize: 12, whiteSpace: "nowrap" }}>
+                  {filterActive
+                    ? t("app.filterCount", { n: filteredQueue.length, m: visibleQueue.length })
+                    : t("app.packCountAll", { m: visibleQueue.length })}
+                </Typography.Text>
+                {filterActive && (
+                  <Button size="small" type="text" icon={<ClearOutlined />} onClick={clearFilters}>
+                    <span className="ui-label">{t("app.clearFilters")}</span>
+                  </Button>
+                )}
+              </div>
+
               {translating && progress && (
                 <Space style={{ marginBottom: 8 }} align="center">
                   <Typography.Text type="secondary">{t("app.translating")}{currentPackName}</Typography.Text>
@@ -3194,13 +3487,23 @@ function AppInner({
                 onScroll={(e) => {
                   const el = e.currentTarget;
                   if (
-                    packRenderLimit < visibleQueue.length &&
+                    packRenderLimit < filteredQueue.length &&
                     el.scrollTop + el.clientHeight >= el.scrollHeight - 400
                   ) {
                     bumpRenderLimit();
                   }
                 }}
               >
+                {filteredQueue.length === 0 && filterActive ? (
+                  /* 筛选无命中：给出明确空态而不是空白，同时保留「清除」入口 */
+                  <div style={{ padding: "56px 0", textAlign: "center" }}>
+                    <Typography.Text type="secondary">{t("app.filterEmpty")}</Typography.Text>
+                    <div style={{ marginTop: 8 }}>
+                      <Button size="small" onClick={clearFilters}>{t("app.clearFilters")}</Button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
                 {shownQueue.map((it) => (
                   <PackCard
                     key={it.key}
@@ -3222,14 +3525,21 @@ function AppInner({
                     deepScanningKey={deepScanningKey}
                     deepScanSummary={deepScanSummaryOf(it)}
                     onOpenDeepRules={setDeepRulesFor}
+                    ruleTools={keyRuleTools}
+                    onToggleTagFilter={toggleSearchToken}
+                    onToggleStatusFilter={toggleStatusChip}
+                    isTagOn={isTagOn}
+                    isStatusOn={isStatusOn}
                   />
                 ))}
-                {visibleQueue.length > shownQueue.length && (
+                {filteredQueue.length > shownQueue.length && (
                   <div style={{ textAlign: "center", padding: "10px 0 16px" }}>
                     <Button size="small" onClick={bumpRenderLimit}>
-                      显示更多（已显示 {shownQueue.length} / {visibleQueue.length}）
+                      显示更多（已显示 {shownQueue.length} / {filteredQueue.length}）
                     </Button>
                   </div>
+                )}
+                  </>
                 )}
               </div>
             </div>
@@ -3239,17 +3549,44 @@ function AppInner({
         </Content>
       </Layout>
 
-      {/* 页脚是纯说明文案（格式支持 + 开源说明），无字模式下整块收起，
-          不留一条空边；GitHub 入口在顶栏还有一个，不会丢 */}
-      <Footer className="ui-chrome ui-footer" style={{ padding: "6px 12px", textAlign: "center", borderTop: "1px solid #E6E8EB" }}>
-        <Space size="middle" wrap>
-          <Typography.Text type="secondary">
-            支持模组 jar · 服务器插件 · 光影包 · 资源包 · 勾选要翻译/导出的内容包
-          </Typography.Text>
-          <Typography.Link onClick={openGithub} style={{ fontWeight: 600 }}>
-            <img src="/github.svg" alt="" style={{ height: 14, marginRight: 4, verticalAlign: "middle" }} /> 完全开源免费 · GitHub 项目地址
-          </Typography.Link>
-        </Space>
+      {/* 页脚：左侧是日志入口（常驻，无字模式下只留图标 + Tooltip），
+          中间是格式支持与开源说明。说明文案在无字模式下整块收起，不留空边；
+          GitHub 入口在顶栏还有一个，不会丢。 */}
+      <Footer
+        className="ui-chrome ui-footer"
+        style={{ padding: "6px 12px", borderTop: "1px solid var(--border-color, #E6E8EB)" }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 12,
+            position: "relative",
+            minHeight: 22,
+          }}
+        >
+          <Tooltip title={iconOnly ? t("app.logs.title") : undefined}>
+            <Button
+              type="text"
+              size="small"
+              className="app-log-entry"
+              onClick={() => setLogsOpen(true)}
+              icon={<LogIcon size={14} />}
+              style={{ position: "absolute", left: 0 }}
+            >
+              <span className="ui-label">{t("app.logs.title")}</span>
+            </Button>
+          </Tooltip>
+          <Space size="middle" wrap className="ui-footer-info" style={{ justifyContent: "center" }}>
+            <Typography.Text type="secondary">
+              支持模组 jar · 服务器插件 · 光影包 · 资源包 · 勾选要翻译/导出的内容包
+            </Typography.Text>
+            <Typography.Link onClick={openGithub} style={{ fontWeight: 600 }}>
+              <img src="/github.svg" alt="" style={{ height: 14, marginRight: 4, verticalAlign: "middle" }} /> 完全开源免费 · GitHub 项目地址
+            </Typography.Link>
+          </Space>
+        </div>
       </Footer>
 
       <Drawer
@@ -3368,6 +3705,13 @@ function AppInner({
         onClose={() => setSettingsOpen(false)}
         onSaved={setSettings}
         onUserDataCleared={handleUserDataCleared}
+      />
+
+      {/* 日志页（左下角入口）：只读当前会话日志，关闭即停止轮询 */}
+      <LogsModal
+        open={logsOpen}
+        autoLog={settings?.autoLog ?? true}
+        onClose={() => setLogsOpen(false)}
       />
 
       {/* 聚合导入检查弹窗：导入完成后一次呈现（自带中文 / 空文本深度扫描 / 批次提示 / 解析失败） */}

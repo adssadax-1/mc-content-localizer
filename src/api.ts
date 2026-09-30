@@ -27,6 +27,7 @@ import type {
   StorageUsage,
   ClearResult,
   GameDirScan,
+  LogEntry,
 } from "./types";
 
 export const api = {
@@ -84,7 +85,6 @@ export const api = {
     }),
 
   loadSettings: () => invoke<Settings>("load_settings"),
-  saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
   /** 增量保存：只覆盖 patch 里出现的键（对象递归合并），其余原样保留。
    *  各处保存自己那部分设置时必须用它——整份写回会把别处刚写入的内容覆盖掉。 */
   patchSettings: (patch: Record<string, unknown>) =>
@@ -179,31 +179,7 @@ export const api = {
     }),
 
   // ── devtools 专用命令（仅 __DEVTOOLS__ 时调用；生产构建后端无此命令） ──────
-  devParseText: (format: string, text: string) =>
-    invoke<{ pairs: [string, string][]; placeholders: string[]; error: string | null }>(
-      "dev_parse_text",
-      { format, text },
-    ),
-  devValidatePlaceholders: (source: string, translation: string) =>
-    invoke<string[]>("dev_validate_placeholders", { source, translation }),
-  devPreviewExport: (
-    modid: string,
-    modName: string,
-    entries: LangEntry[],
-    langFormat: string,
-    packFormat: number,
-  ) =>
-    invoke<{
-      file_name: string;
-      sanitized_modid: string;
-      original_modid: string;
-      uses_min_max_format: boolean;
-      mcmeta_json: string;
-      lang_path: string;
-      lang_content_preview: string;
-      zip_tree: string[];
-      entry_count: number;
-    }>("dev_preview_export", { modid, modName, entries, langFormat, packFormat }),
+  // dev_parse_text / dev_preview_export 由 DevToolsPanel 直接 invoke（带各自的局部返回类型）
   devSetFault: (config: {
     delayMs: number | null;
     forceTimeout: boolean;
@@ -220,10 +196,7 @@ export const api = {
       disconnect: config.disconnect,
     }),
   devClearFault: () => invoke<void>("dev_clear_fault"),
-  /** 会话缓存：崩溃/关闭后恢复内容包列表 */
   /** 会话缓存：崩溃/关闭后恢复内容包列表（name: free / gamedir 两种模式独立） */
-  saveSessionCache: (name: string, content: string) =>
-    invoke<void>("save_session_cache", { name, content }),
   loadSessionCache: (name: string) => invoke<string | null>("load_session_cache", { name }),
   clearSessionCache: (name: string) => invoke<void>("clear_session_cache", { name }),
   /** 游戏目录扫描缓存：**落盘**，重启后不必重扫同一目录（整份 JSON 由前端序列化） */
@@ -243,8 +216,22 @@ export const api = {
   storageUsage: () => invoke<StorageUsage>("storage_usage"),
   /** 清除缓存：会话快照 + 浏览器缓存（不动设置与 API Key） */
   clearAppCache: () => invoke<ClearResult>("clear_app_cache"),
-  /** 清除用户数据：设置（含 API Key）、会话缓存与浏览器配置 */
-  clearAppData: () => invoke<ClearResult>("clear_app_data"),
+  /** 清除用户数据：设置（含 API Key）、会话缓存与浏览器配置；`includeLogs` 为真时一并清除日志 */
+  clearAppData: (includeLogs: boolean) => invoke<ClearResult>("clear_app_data", { includeLogs }),
+
+  /** 日志：当前会话的内存缓冲（已脱敏） */
+  logRecent: () => invoke<LogEntry[]>("log_recent"),
+  /** 日志：把本次会话日志写到指定文件，返回写入条数 */
+  logExport: (path: string) => invoke<number>("log_export", { path }),
+  /** 日志：返回日志目录（供「打开文件夹」），并确保目录已创建 */
+  logOpenDir: () => invoke<string>("log_open_dir"),
+  /** 日志：清空当前会话缓冲并删除日志文件 */
+  logClear: () => invoke<void>("log_clear"),
+  /** 日志：记录一条界面侧事件（等级：info / warn / error） */
+  logEvent: (level: string, msg: string) => invoke<void>("log_event", { level, message: msg }),
+  /** 日志：把本地时区偏移（分钟）告知后端，让日志时间戳是本地时间 */
+  logSetTzOffset: (minutes: number) => invoke<void>("log_set_tz_offset", { minutes }),
+
   /** 重启软件（清除用户数据后让配置回到全新状态） */
   restartApp: () => invoke<void>("restart_app"),
   /** 游戏目录模式：扫描 .minecraft / versions（后台 + 进度事件，可取消） */
