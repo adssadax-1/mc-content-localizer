@@ -90,9 +90,16 @@ pub fn is_local_url(url: &str) -> bool {
 }
 
 impl ProviderConfig {
+    /// 是否为自定义服务商形态：遗留的 "custom"，或多自定义的 "custom:<id>"。
+    /// 这类 id 不在预设表里，端点 / Key 校验 / 本地判定都按自定义处理。
+    pub fn is_custom_id(&self) -> bool {
+        self.provider == "custom" || self.provider.starts_with("custom:")
+    }
+
     /// 解析出 (base_url, model)
     pub fn resolve_endpoint(&self) -> (String, String) {
-        if self.provider == "custom" {
+        // 自定义服务商：端点完全由用户填写的 base_url 决定，模型必填
+        if self.is_custom_id() {
             return (
                 self.base_url.clone().unwrap_or_default(),
                 self.model.clone().unwrap_or_default(),
@@ -118,7 +125,16 @@ impl ProviderConfig {
                 );
             }
         }
-        // 未知 provider 回退到智谱
+        // 未知 provider：带了自己的 base_url 就按自定义端点发（多自定义服务商的形态），
+        // 否则回退到智谱（与旧版行为一致）
+        if let Some(u) = self
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+        {
+            return (u.to_string(), self.model.clone().unwrap_or_default());
+        }
         ("https://open.bigmodel.cn/api/paas/v4".to_string(), self.model.clone().unwrap_or("glm-4-flash-250414".to_string()))
     }
 
@@ -131,7 +147,7 @@ impl ProviderConfig {
         if is_local_provider_id(&self.provider) {
             return true;
         }
-        if self.provider == "custom" {
+        if self.is_custom_id() {
             return self.base_url.as_deref().map(is_local_url).unwrap_or(false);
         }
         false

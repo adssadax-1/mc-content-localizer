@@ -1,4 +1,4 @@
-import { memo, startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { memo, startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   Alert,
   Button,
@@ -73,6 +73,8 @@ const api = __DEVTOOLS__ ? createDevApi(rawApi, pushInvoke) : rawApi;
 import type {
   BatchItem,
   CustomRule,
+  QuestBookParse,
+  QuestChapter,
   EntryStatus,
   LangEntry,
   LangFormat,
@@ -259,6 +261,73 @@ const PACK_STATUS_CHIPS: PackStatusKey[] = [
  *  sig 额外覆盖 applyDeepScan 那类「同对象就地改 entries」的路径（长度/末位 key 变化）。 */
 const packFilterCache = new WeakMap<PackItem, { sig: string; haystack: string; statuses: Set<PackStatusKey> }>();
 
+/**
+ * 从任务书 quests 根目录推出**整合包名** —— 任务书的最上层父级永远是整合包，
+ * 不是游戏版本号。目录形态 `<实例名>/config/ftbquests/quests` 时取实例名；
+ * 更浅的形态（直接指到 ftbquests / quests）退回上一级目录名。
+ */
+function packNameFromQuestRoot(root: string): string {
+  const parts = root.split(/[\\/]/).filter(Boolean);
+  const cfg = parts.lastIndexOf("config");
+  if (cfg > 0) return parts[cfg - 1];
+  const ftb = parts.lastIndexOf("ftbquests");
+  if (ftb > 1 && parts[ftb - 1].toLowerCase() === "config") return parts[ftb - 2];
+  if (ftb > 0) return parts[ftb - 1];
+  return parts[parts.length - 1] ?? root;
+}
+
+/** 目录名是不是"纯加载器+版本号"（PCL 默认的版本目录命名，如 `1.21.11-Fabric 0.19.2`）。
+ *  这种名字是启动器生成的、不是整合包名 —— 任务书父级遇到它就改用任务书标题。 */
+const LOADERISH_DIR_RE =
+  /^\s*\d+(\.\d+){0,3}\s*[-_ ]?\s*(fabric|forge|neoforge|quilt|optifine|vanilla|lite|legacy)?[\s\w.\-]*$/i;
+
+/** 某包「总条数 / 已译数」：按 entries 数组身份缓存。
+ *  翻译落盘时 patchPack 会为变化的包换成**新数组**（其余包保持引用），
+ *  因此缓存天然按包失效 —— 避免每次按键/进度事件都遍历几十万条目。 */
+const entryStatsCache = new WeakMap<LangEntry[], { total: number; done: number }>();
+function entryStats(entries: LangEntry[]): { total: number; done: number } {
+  let s = entryStatsCache.get(entries);
+  if (!s) {
+    let total = 0;
+    let done = 0;
+    for (const e of entries) {
+      total += 1;
+      if (e.translation) done += 1;
+    }
+    s = { total, done };
+    entryStatsCache.set(entries, s);
+  }
+  return s;
+}
+
+/** 去除 FTBQ 颜色码（&0-&f / &k-&o / &r / § 形式）—— 搜索与展示名都用去码后的文本 */
+function stripQuestColors(s: string): string {
+  const CODES = "0123456789abcdefklmor";
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if ((c === "&" || c === "\u00a7") && i + 1 < s.length && CODES.includes(s[i + 1].toLowerCase())) {
+      i++;
+    } else {
+      out += c;
+    }
+  }
+  return out;
+}
+
+/**
+ * 某服务商当前生效的 Base URL：优先读按服务商保存的 providerBaseUrls 映射，
+ * 映射里没有时回退到 provider.baseUrl（仅当查询的就是当前选中的服务商 —— 兼容旧设置）。
+ * 返回 null = 未保存过，由后端按预设默认处理。
+ */
+function providerBaseUrlOf(s: Settings | null, id: string | undefined): string | null {
+  if (!s || !id) return null;
+  const map = s.providerBaseUrls;
+  if (map && id in map) return map[id] ? map[id] : null;
+  if (s.provider.provider === id) return s.provider.baseUrl ?? null;
+  return null;
+}
+
 function packFilterMeta(it: PackItem, translatingNow: boolean) {
   const last = it.entries[it.entries.length - 1];
   const sig = `${it.entries.length}|${last?.key ?? ""}|${translatingNow ? 1 : 0}`;
@@ -270,7 +339,35 @@ function packFilterMeta(it: PackItem, translatingNow: boolean) {
     it.modFile?.modName ?? "", it.modFile?.modid ?? "", it.modFile?.version ?? "",
     it.pluginFile?.pluginName ?? "", it.pluginFile?.version ?? "",
   ];
-  if (it.modFile) parts.push(it.modFile.loader, LOADER_LABEL[it.modFile.loader]);
+  if (it.modFile) {
+    parts.push(it.modFile.loader, LOADER_LABEL[it.modFile.loader]);
+    // 模组：MC 版本（直接导入的包此前搜不到 1.20.1 这类词）与作者清单
+    if (it.modFile.mcVersion) parts.push(it.modFile.mcVersion);
+    for (const a of it.modFile.authors ?? []) parts.push(a);
+  }
+  if (it.kind === "quest") {
+    // 任务书：书名（原始 + 去色码两份）参与搜索；章节全文入索引 —— 玩家常用
+    // "剧情里那句原文" 来定位章节，这与模组包"只索引 description 类条目"的策略不同
+    if (it.questFile) {
+      parts.push(it.questFile.bookTitle, stripQuestColors(it.questFile.bookTitle));
+    }
+    for (const e of it.entries) {
+      if (e.source) parts.push(e.source, stripQuestColors(e.source));
+    }
+  } else if (it.kind === "shader") {
+    // 光影：全部选项/界面文本入索引（条目量小，且选项名是找光影包的主要线索）
+    for (const e of it.entries) {
+      if (e.source) parts.push(e.source);
+    }
+  } else if (it.kind === "plugin") {
+    // 插件：面向玩家的消息/描述类文本入索引（配置键、数据库等内部键不进索引）
+    for (const e of it.entries) {
+      if (e.source && /description|message|lang|locale|notify|announce/i.test(e.key)) {
+        parts.push(e.source);
+      }
+    }
+  }
+  // 资源包：pack.mcmeta 描述已由下方 key 命中 description 的通用规则覆盖
   const statuses = new Set<PackStatusKey>();
   for (const e of it.entries) {
     statuses.add(e.status);
@@ -459,18 +556,21 @@ function FilterTag({
   onClick,
   color,
   className,
+  style,
   children,
 }: {
   on: boolean;
   onClick: () => void;
   color?: string;
   className?: string;
+  style?: CSSProperties;
   children: ReactNode;
 }) {
   return (
     <Tag
       color={color}
       className={`tag-clickable${on ? " tag-on" : ""}${className ? ` ${className}` : ""}`}
+      style={style}
       onClick={(e) => {
         e.stopPropagation();
         onClick();
@@ -614,6 +714,14 @@ const PackCard = memo(function PackCard({
             {item.modFile.version}
           </FilterTag>
         )}
+        {item.pluginFile?.version && (
+          <FilterTag
+            on={isTagOn(item.pluginFile.version)}
+            onClick={() => onToggleTagFilter?.(item.pluginFile!.version!)}
+          >
+            {item.pluginFile.version}
+          </FilterTag>
+        )}
         {item.modFile && (
           <FilterTag
             on={isTagOn(item.modFile.loader)}
@@ -631,14 +739,20 @@ const PackCard = memo(function PackCard({
             {t("app.hasZh")} {item.zhCount ?? 0} {t("app.hasZhCount")}
           </FilterTag>
         )}
-        {item.gameVersion && (
+        {/* 任务书：所属书名作为可筛选标签（点击 = 只看这本书的章节）。
+            书名常带 &6 色码且可能较长：展示用去码文本并限宽省略，避免标签行被撑破 */}
+        {item.kind === "quest" && item.questFile && (
           <FilterTag
-            on={isTagOn(item.gameVersion)}
-            onClick={() => onToggleTagFilter?.(item.gameVersion!)}
+            on={isTagOn(item.questFile.bookTitle)}
+            onClick={() => onToggleTagFilter?.(item.questFile!.bookTitle)}
+            style={{ maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "inline-block", verticalAlign: "middle" }}
           >
-            § {item.gameVersion}
+            {stripQuestColors(item.questFile.bookTitle) || item.questFile.bookTitle}
           </FilterTag>
         )}
+        {/* 版本标签已移除：游戏目录导入的包现在都挂在"版本/整合包"父级节点下面，
+            版本名在父级行上写着，卡片再贴一遍就是把层级降级成标签（被指出过两次）。
+            要按版本筛选用父级节点本身。 */}
         {thisTranslating && (
           <FilterTag
             color="processing"
@@ -812,6 +926,8 @@ export interface PackItem {
   modFile?: ModFile;
   /** 服务器插件额外信息 */
   pluginFile?: PluginFile;
+  /** 任务书章节额外信息（quest 类型专用） */
+  questFile?: QuestFileMeta;
   /** 单包深度扫描覆盖（只存与全局规则的差异；跟随会话缓存，不跨重新导入） */
   deepScanOverride?: DeepScanOverride;
   langFormat?: LangFormat;
@@ -821,6 +937,19 @@ export interface PackItem {
   gameVersion?: string;
   /** 文件大小（跨包译文复用的指纹之一；自由导入已知路径时可填充） */
   size?: number;
+}
+
+/** 任务书章节的来源信息（写回导出需要 quests 根 + 相对路径）。
+ *  zip 来源（整合包直导）记录 zipPath：导出 = 复制原 zip 仅替换汉化章节成员。 */
+export interface QuestFileMeta {
+  bookTitle: string;
+  fileRel: string;
+  fileAbs: string;
+  questsRoot: string;
+  /** 整合包名（任务书三级树的最高父级） */
+  packName: string;
+  zipPath?: string;
+  prefix?: string;
 }
 
 function AppInner({
@@ -1446,12 +1575,101 @@ function AppInner({
 
   /** 打开文件选择（点击中央区域） */
   async function pickFiles() {
+    // 任务书页签：入口是文件夹（游戏目录 / 整合包 / ftbquests / quests），
+    // 选定后走游戏目录扫描逐级向下命中任务书 —— 与"拖入文件夹"同一条路。
+    if (activeTab === "quest") {
+      const dir = await open({ directory: true, title: "选择游戏目录 / 整合包 / ftbquests 文件夹" });
+      if (dir && typeof dir === "string") {
+        setWorkMode("gamedir");
+        setGamedirAutoScan(dir);
+      }
+      return;
+    }
     const paths = await open({
       multiple: true,
       title: "选择内容包文件（→ 自由导入）或游戏目录 / 版本文件夹（→ 自动扫描）",
     });
     if (paths && paths.length > 0) {
       await addFiles(paths);
+    }
+  }
+
+  /** 由一章解析结果构造任务书内容包。
+   *  磁盘来源：questsRoot = quests 目录；zip 来源：记录 zipPath，导出走"复制替换 zip"。 */
+  function makeQuestPackItem(
+    book: QuestBookParse,
+    ch: QuestChapter,
+    zipPath: string | null,
+    zipName: string | null,
+    packName?: string,
+  ): PackItem {
+    /* 任务书的最高父级 = 整合包名（不是 MC 版本号）：
+       · 游戏目录导入 → 实例目录名（gp.gameVersion）
+       · 整合包 zip → zip 文件名
+       · config / ftbquests / quests 直导 → 从路径回推实例名
+       统一写进 gameVersion 字段，于是三级树直接按整合包分组，与导入方式无关。 */
+    const raw = packName?.trim() || packNameFromQuestRoot(book.root);
+    // 目录名像"加载器+版本号"时它不算整合包名，退回任务书标题（多数整合包的任务书
+    // 标题就是包名，如"落幕曲"）—— 否则任务书父级会显示成 `1.21.11-Fabric 0.19.2`
+    const group = !raw || LOADERISH_DIR_RE.test(raw) ? book.bookTitle || raw : raw;
+    return {
+      key: zipPath ? `gd-${zipPath}::${ch.fileAbs}` : `gd-${ch.fileAbs}`,
+      kind: "quest",
+      name: ch.title,
+      fileName: zipName ? `${zipName} · ${ch.fileRel}` : ch.fileRel,
+      sourcePath: ch.fileAbs,
+      expanded: false,
+      checked: true,
+      height: 480,
+      entries: ch.entries.map((e) => ({ ...e, selected: e.selected ?? true })),
+      langFormat: "json",
+      gameVersion: group,
+      questFile: {
+        bookTitle: book.bookTitle,
+        fileRel: ch.fileRel,
+        fileAbs: ch.fileAbs,
+        questsRoot: book.root,
+        packName: group,
+        ...(zipPath ? { zipPath, prefix: book.root } : {}),
+      },
+    };
+  }
+
+  /** 直接导入任务书目录（config / ftbquests / quests）：
+   *  解析为「章节 = 内容包」入队并跳到任务书页；直接导入不产生"游戏版本"层级。 */
+  async function importQuestRoots(roots: string[]) {
+    setParsing(true);
+    try {
+      const addedAll: PackItem[] = [];
+      let dup = 0;
+      const seen = new Set(queue.map((x) => x.sourcePath));
+      for (const root of roots) {
+        try {
+          const book = await api.parseQuestBook(root);
+          for (const ch of book.chapters) {
+            if (ch.entries.length === 0) continue;
+            if (seen.has(ch.fileAbs)) {
+              dup += 1;
+              continue;
+            }
+            seen.add(ch.fileAbs);
+            addedAll.push(makeQuestPackItem(book, ch, null, null));
+          }
+        } catch (e) {
+          message.error(String(e));
+        }
+      }
+      if (addedAll.length > 0) {
+        setQueue((prev) => [...prev, ...addedAll]);
+        setWorkMode("free");
+        startTransition(() => setActiveTab("quest"));
+        message.success(t("app.questImported", { n: addedAll.length }));
+        if (dup > 0) message.info(t("app.questImportedDup", { n: dup }));
+      } else if (dup > 0) {
+        message.info(t("app.questImportedDup", { n: dup }));
+      }
+    } finally {
+      setParsing(false);
     }
   }
 
@@ -1582,7 +1800,10 @@ function AppInner({
   }
 
   async function addFiles(paths: string[]) {
-    // 导入路由：文件夹 → 切换游戏目录并扫描；内容包文件 → 自由导入
+    // 导入路由：
+    //   config / ftbquests / quests 等任务书目录 → 直接解析任务书（不跳游戏目录）
+    //   其余文件夹（完整游戏目录等） → 原有游戏目录扫描（任务书在那里归入版本分组）
+    //   jar / zip 文件 → 先检测 zip 内任务书，命中则按任务书解析，否则原有逻辑
     const dirPaths: string[] = [];
     const filePaths: string[] = [];
     for (const p of paths) {
@@ -1590,8 +1811,18 @@ function AppInner({
       else filePaths.push(p);
     }
     if (dirPaths.length > 0) {
-      setWorkMode("gamedir");
-      setGamedirAutoScan(dirPaths[0]);
+      const questRoots: string[] = [];
+      const gameDirs: string[] = [];
+      for (const d of dirPaths) {
+        const qr = await api.detectQuestRoot(d).catch(() => null);
+        if (qr) questRoots.push(qr);
+        else gameDirs.push(d);
+      }
+      if (questRoots.length > 0) await importQuestRoots(questRoots);
+      if (gameDirs.length > 0) {
+        setWorkMode("gamedir");
+        setGamedirAutoScan(gameDirs[0]);
+      }
       if (filePaths.length === 0) return;
     }
     const files = filePaths.filter(
@@ -1604,6 +1835,7 @@ function AppInner({
     setParsing(true);
     const added: PackItem[] = [];
     const importFailures: { name: string; reason: string }[] = [];
+    let zipQuestBooks = 0;
     // 大批量导入时默认收缩卡片：展开会为每个包挂载表格，几百个包时严重卡顿甚至崩溃
     const autoExpand = files.length <= AUTO_EXPAND_MAX;
     let pending: PackItem[] = [];
@@ -1615,6 +1847,32 @@ function AppInner({
     };
     for (const p of files) {
       try {
+        // 整合包 zip：先检测任务书（宽松前缀 + 严格核心，光影/资源包/普通模组不会误诊）；
+        // 检测不到 → 按原有逻辑继续（对普通 zip 的导入零影响）
+        if (p.toLowerCase().endsWith(".zip")) {
+          const books = await api.detectQuestBooksInZip(p).catch(() => []);
+          if (books.length > 0) {
+            const parsed = await api.parseQuestBookZip(p);
+            const zipName = p.split(/[\\/]/).pop() ?? p;
+            const packName = zipName.replace(/\.zip$/i, "");
+            for (const book of parsed) {
+              for (const ch of book.chapters) {
+                if (ch.entries.length === 0) continue;
+                const item = makeQuestPackItem(book, ch, p, zipName, packName);
+                if (queue.some((x) => x.key === item.key)) continue;
+                item.expanded = autoExpand;
+                added.push(item);
+                pending.push(item);
+              }
+            }
+            if (pending.length >= IMPORT_FLUSH_CHUNK) {
+              flush();
+              await new Promise((r) => setTimeout(r, 0));
+            }
+            zipQuestBooks += books.length;
+            continue;
+          }
+        }
         const item = await parseFile(p);
         item.expanded = autoExpand;
         // 条目默认参与汉化
@@ -1642,6 +1900,10 @@ function AppInner({
       }
     }
     flush();
+    if (zipQuestBooks > 0) {
+      message.success(t("app.questZipImported", { n: zipQuestBooks }));
+      startTransition(() => setActiveTab("quest"));
+    }
     // 自动深度扫描：模组与插件分别受「模组深度扫描」「插件深度扫描」开关控制
     let deepFound = 0;
     for (const it of added) {
@@ -1842,9 +2104,12 @@ function AppInner({
   }, []);
 
   function toggleAll(checked: boolean) {
-    // 全选只作用于当前内容类型页（模组/光影包/资源包互不影响）
+    // 全选 = 当前内容类型页 + **当前筛选结果**（搜索词 + 状态标签筛选后的命中集）。
+    // 累加式：被筛选条件隐藏、但已手动勾选的包保持原状 ——
+    // "搜索 A 勾 5 个 → 搜索 B 再勾 3 个 → 5+3 都在"，批量操作以实际勾选为准。
+    const keys = new Set(filteredQueue.map((it) => it.key));
     setQueue((prev) =>
-      prev.map((it) => (it.kind === activeTab ? { ...it, checked } : it)),
+      prev.map((it) => (keys.has(it.key) ? { ...it, checked } : it)),
     );
   }
 
@@ -1895,13 +2160,16 @@ function AppInner({
       return;
     }
     // 本地推理档不要求 API Key（Ollama 服务端忽略 Key、llama.cpp 默认免鉴权）
-    if (!settings.provider.apiKey && !isLocalProvider(settings.provider.provider, settings.provider.baseUrl)) {
+    if (!settings.provider.apiKey && !isLocalProvider(settings.provider.provider, providerBaseUrlOf(settings, settings.provider.provider))) {
       message.warning(t("app.msgApiKeyRequired"));
       setSettingsOpen(true);
       return;
     }
     const provider = {
       ...settings.provider,
+      // Base URL 按"当前服务商"取自己名下的那份（旧设置没有映射表时回退到
+      // provider.baseUrl）—— 否则填过自定义地址后，请求会带着别人的地址发出去
+      baseUrl: providerBaseUrlOf(settings, settings.provider.provider),
       temperature:
         settings.provider.temperature == null
           ? 0.7
@@ -1989,7 +2257,7 @@ function AppInner({
         source: e.source,
       }));
       const ctx: TranslateContext = {
-        modName: item.name,
+        modName: item.kind === "quest" ? item.questFile?.bookTitle ?? item.name : item.name,
         modid: item.kind === "mod" ? item.modFile?.modid ?? "mod" : item.kind,
         mcVersion: item.modFile?.mcVersion ?? null,
         loader: item.modFile ? LOADER_LABEL[item.modFile.loader] : t(KIND_META[item.kind].labelKey),
@@ -2019,7 +2287,9 @@ function AppInner({
                   ? "光影包"
                   : item.kind === "plugin"
                     ? "插件"
-                    : "资源包"}·${item.fileName}`
+                    : item.kind === "quest"
+                      ? "任务书"
+                      : "资源包"}·${item.kind === "quest" ? item.name : item.fileName}`
           : undefined;
         const results = await api.runTranslation(
           provider,
@@ -2368,7 +2638,7 @@ function AppInner({
     // 本地推理服务上下文小、单并发，一批 20 个包名容易漏项，缩到 5
     const localProvider = isLocalProvider(
       settingsRef.current?.provider.provider,
-      settingsRef.current?.provider.baseUrl,
+      providerBaseUrlOf(settingsRef.current, settingsRef.current?.provider.provider),
     );
     const BATCH = localProvider ? 5 : 20;
     let done = 0;
@@ -2474,7 +2744,7 @@ function AppInner({
     if (missing.length === 0) return { naming, names };
     const cur = settingsRef.current;
     // 本地推理档不需要 API Key，只看模型是否已选
-    const localProvider = isLocalProvider(cur?.provider.provider, cur?.provider.baseUrl);
+    const localProvider = isLocalProvider(cur?.provider.provider, providerBaseUrlOf(cur, cur?.provider.provider));
     if ((!cur?.provider.apiKey && !localProvider) || !cur?.provider.model) {
       message.warning(t("app.aiNameNoKey", { n: missing.length }));
       return { naming, names };
@@ -2498,6 +2768,73 @@ function AppInner({
     return { naming, names: finalNames };
   }
 
+  /** 任务书导出：磁盘来源写回原目录（首次自动 .zhbak 备份）；
+   *  zip 来源（整合包直导）不写回 —— 复制原 zip 仅替换汉化章节成员，另存 _zh_cn。
+   *  有磁盘写回时先弹确认（不可自动撤销的操作必须问一声），取消则什么都不做。 */
+  async function exportQuestPacks(list: PackItem[]): Promise<{ ok: number; skipped: number }> {
+    const disk = new Map<string, { key: string; translation: string }[]>();
+    const zip = new Map<string, { key: string; translation: string }[]>();
+    let skipped = 0;
+    for (const it of list) {
+      const items = (it.entries ?? [])
+        .filter((e) => (e.selected ?? true) && e.translation && e.translation !== e.source)
+        .map((e) => ({ key: e.key, translation: e.translation as string }));
+      if (items.length === 0 || !it.questFile) {
+        skipped += 1;
+        continue;
+      }
+      const target = it.questFile.zipPath ? zip : disk;
+      const root = it.questFile.zipPath ?? it.questFile.questsRoot;
+      const bucket = target.get(root) ?? [];
+      bucket.push(...items);
+      target.set(root, bucket);
+    }
+
+    const runDisk = async () => {
+      for (const [root, items] of disk) {
+        const msg = await api.exportQuestBook(root, items);
+        message.success(msg);
+      }
+    };
+    const runZip = async () => {
+      if (zip.size === 0) return;
+      const dir = asDir(
+        await open({ directory: true, title: "选择导出目录（生成汉化任务书 zip，不覆盖原文件）" }),
+      );
+      if (!dir) return;
+      for (const [zipPath, items] of zip) {
+        const stem = (zipPath.split(/[\\/]/).pop() ?? "quests").replace(/\.zip$/i, "");
+        const dest = await uniqueDest(dir, stem, "_zh_cn", ".zip");
+        const msg = await api.exportQuestZip(zipPath, dest, items);
+        message.success(msg);
+      }
+    };
+
+    if (disk.size > 0) {
+      return new Promise((resolve) => {
+        Modal.confirm({
+          title: "写回任务书原文件？",
+          content: `将把勾选章节的译文直接写回 config/ftbquests 下的源文件（游戏内直接生效）；首次写回前会自动备份原文件（.zhbak）。${zip.size > 0 ? `另有 ${zip.size} 本整合包内任务书将另存为汉化 zip。` : ""}此操作不影响其它目录。`,
+          okText: "写回",
+          cancelText: "取消",
+          onOk: async () => {
+            try {
+              await runDisk();
+              await runZip();
+              resolve({ ok: disk.size + zip.size, skipped });
+            } catch (e) {
+              message.error(String(e));
+              resolve({ ok: 0, skipped: 0 });
+            }
+          },
+          onCancel: () => resolve({ ok: 0, skipped: 0 }),
+        });
+      });
+    }
+    await runZip();
+    return { ok: zip.size, skipped };
+  }
+
   /** 导出（按类型分流） */
   async function handleExport() {
     const checked = queue.filter((it) => it.checked);
@@ -2505,10 +2842,27 @@ function AppInner({
       message.info("请先勾选要导出的内容包");
       return;
     }
-    const hasGamedir = checked.some((it) => it.gameVersion);
-    const kinds = new Set(checked.map((c) => c.kind));
+    // 任务书走"写回原目录"：与 jar/zip 导出完全不同路，先摘出来单独处理。
+    // AI 命名对任务书无意义（不生成新文件），一并排除。
+    const questPacks = checked.filter((it) => it.kind === "quest");
+    const otherPacks = checked.filter((it) => it.kind !== "quest");
+
+    if (otherPacks.length === 0 && questPacks.length > 0) {
+      // 写回确认在 exportQuestPacks 内部（zip 来源不弹写回确认）
+      const { ok, skipped } = await exportQuestPacks(questPacks);
+      if (ok > 0)
+        notifyExport(
+          `已导出 ${ok} 本任务书`,
+          [...new Set(questPacks.map((p) => p.questFile!.zipPath ?? p.questFile!.questsRoot))],
+        );
+      if (skipped > 0) message.warning(`${skipped} 个章节没有需要导出的译文（未翻译或译文未改动）`);
+      return;
+    }
+
+    const hasGamedir = otherPacks.some((it) => it.gameVersion);
+    const kinds = new Set(otherPacks.map((c) => c.kind));
     // AI 命名偏好：先把缺失的名称补齐（含已翻译过、跳过翻译循环的包）
-    const { naming, names: aiNameMap } = await ensureAiNames(checked);
+    const { naming, names: aiNameMap } = await ensureAiNames(otherPacks);
 
     // 混合类型或含游戏目录来源 → 统一按 版本/类别 子文件夹逐包导出
     if (hasGamedir || kinds.size > 1) {
@@ -2526,8 +2880,21 @@ function AppInner({
         shader: "shaderpacks",
         resourcepack: "resourcepacks",
         plugin: "plugins",
+        // 任务书不走此循环（写回原目录，见 exportQuestPacks）；键补全仅为类型完整
+        quest: "questbooks",
       };
+      // 混合导出中的任务书：写回/另存 zip（确认在 exportQuestPacks 内部）
+      if (questPacks.length > 0) {
+        const { ok: qok, skipped: qskip } = await exportQuestPacks(questPacks);
+        if (qok > 0)
+          notifyExport(
+            `已导出 ${qok} 本任务书`,
+            [...new Set(questPacks.map((p) => p.questFile!.zipPath ?? p.questFile!.questsRoot))],
+          );
+        if (qskip > 0) message.warning(`${qskip} 个章节没有需要导出的译文（未翻译或译文未改动）`);
+      }
       for (const it of checked) {
+        if (it.kind === "quest") continue;
         const translated = it.entries.filter((e) => (e.selected ?? true) && e.translation);
         if (translated.length === 0) {
           skipped += 1;
@@ -2565,6 +2932,18 @@ function AppInner({
 
     // 纯自由导入：保留原有分支（光影 / 资源包直接导出，模组走合并/单包弹窗）
     const kind = checked[0].kind;
+
+    if (kind === "quest") {
+      // 写回确认在 exportQuestPacks 内部
+      const { ok, skipped } = await exportQuestPacks(questPacks);
+      if (ok > 0)
+        notifyExport(
+          `已导出 ${ok} 本任务书`,
+          [...new Set(questPacks.map((p) => p.questFile!.zipPath ?? p.questFile!.questsRoot))],
+        );
+      if (skipped > 0) message.warning(`${skipped} 个章节没有需要导出的译文（未翻译或译文未改动）`);
+      return;
+    }
 
     if (kind === "plugin") {
       const dir = asDir(await open({ directory: true, title: "选择导出目录（生成汉化插件 jar）" }));
@@ -2812,6 +3191,40 @@ function AppInner({
       return searchTokens.every((tok) => meta.haystack.includes(tok));
     });
   }, [visibleQueue, translatingKeys, searchTokens, statusFilter, filterActive]);
+
+  /* ── 游戏目录三级树：游戏版本 → 内容包 → 具体条目 ──
+     只有带 gameVersion 的包（游戏目录导入）参与分组；**直接导入的包没有版本层，
+     保持原有平铺展示**。分组按首次出现顺序；搜索/筛选作用于内存数据，
+     与节点是否挂载无关 —— 折叠版本里的包照样能被搜到。 */
+  const versionGroups = useMemo(() => {
+    const groups: { name: string; packs: PackItem[]; total: number; done: number }[] = [];
+    const idx = new Map<string, number>();
+    for (const it of filteredQueue) {
+      if (!it.gameVersion) continue;
+      let i = idx.get(it.gameVersion);
+      if (i === undefined) {
+        i = groups.length;
+        idx.set(it.gameVersion, i);
+        groups.push({ name: it.gameVersion, packs: [], total: 0, done: 0 });
+      }
+      const g = groups[i];
+      g.packs.push(it);
+      const st = entryStats(it.entries);
+      g.total += st.total;
+      g.done += st.done;
+    }
+    return groups;
+  }, [filteredQueue]);
+
+  /** 直接导入（无 gameVersion）的包：保持原有「内容包 → 条目」两层平铺 */
+  const flatPacks = useMemo(() => filteredQueue.filter((it) => !it.gameVersion), [filteredQueue]);
+
+  /** 版本节点展开状态：**默认且始终折叠**（真按需渲染——折叠版本不挂载任何内容包
+   *  卡片）。导入后不自动展开、搜索/筛选命中也不自动展开，只由用户点击决定。
+   *  键带上页签：同一版本名在不同类型页里各自记忆 —— 免得在模组页展开了某版本、
+   *  切到任务书时它已经是展开的（一次挂载几十张章节卡，也违背"默认折叠"）。 */
+  const [versionOpen, setVersionOpen] = useState<Record<string, boolean>>({});
+  const vkey = (name: string) => `${activeTab}:${name}`;
   const clearFilters = useCallback(() => {
     setSearchText("");
     setStatusFilter([]);
@@ -2894,9 +3307,15 @@ function AppInner({
   }, [activeTab, settings, upsertCustomRule, removeCustomRule]);
 
 
+  /** 全选框三态：勾 = 筛选结果全选中；半选 = 部分选中；空 = 一个没选。
+   *  作用域是 filteredQueue（当前类型 + 当前筛选命中），与 toggleAll 一致。 */
   const allChecked = useMemo(
-    () => visibleQueue.length > 0 && visibleQueue.every((it) => it.checked),
-    [visibleQueue],
+    () => filteredQueue.length > 0 && filteredQueue.every((it) => it.checked),
+    [filteredQueue],
+  );
+  const someChecked = useMemo(
+    () => filteredQueue.some((it) => it.checked) && !allChecked,
+    [filteredQueue, allChecked],
   );
   const checkedInTab = useMemo(
     () => visibleQueue.reduce((n, it) => n + (it.checked ? 1 : 0), 0),
@@ -2925,9 +3344,25 @@ function AppInner({
       }));
     });
   }, [activeTab]);
+  /** 实际挂载的包 = 平铺包 + **已展开版本**内的包；折叠版本一个卡片都不创建。
+     渲染上限只数真正挂载的部分（折叠节点的开销只有一行版本头）。 */
+  const mountedPacks = useMemo(() => {
+    // 顺序**与渲染顺序一致**（版本组在前、平铺包在后）：否则「显示更多」按
+    // 数组前段取，会在渲染顺序里切成"版本 A 只挂一半"的怪样子。
+    const out: PackItem[] = [];
+    // 展开状态一律**只看用户自己的操作** —— 导入后、搜索/筛选后都不自动展开
+    // （筛选命中数写在父级行上，要不要展开由用户决定）。
+    for (const g of versionGroups) {
+      if (versionOpen[vkey(g.name)]) out.push(...g.packs);
+    }
+    out.push(...flatPacks);
+    return out;
+    // vkey 依赖 activeTab，这里一并列入依赖（切页签重算挂载集）
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flatPacks, versionGroups, versionOpen, activeTab]);
   const shownQueue = useMemo(
-    () => (filteredQueue.length > packRenderLimit ? filteredQueue.slice(0, packRenderLimit) : filteredQueue),
-    [filteredQueue, packRenderLimit],
+    () => (mountedPacks.length > packRenderLimit ? mountedPacks.slice(0, packRenderLimit) : mountedPacks),
+    [mountedPacks, packRenderLimit],
   );
 
   const selectedEntry = useMemo(() => {
@@ -3151,6 +3586,29 @@ function AppInner({
                   setGdAddProgress({ done: i, total: packs.length, current: gp.fileName });
                   if (existing.has(gp.path)) {
                     skipped += 1;
+                    continue;
+                  }
+                  // 任务书：一个 quests 根 = 一本书 = N 个章节内容包。
+                  // 在同一处展开入队，进度条当前项显示书名。
+                  if (gp.kind === "quest") {
+                    try {
+                      const qb = await api.parseQuestBook(gp.path);
+                      let addedChapters = 0;
+                      for (const ch of qb.chapters) {
+                        if (ch.entries.length === 0) continue;
+                        if (existing.has(ch.fileAbs)) {
+                          skipped += 1;
+                          continue;
+                        }
+                        existing.add(ch.fileAbs);
+                        added.push(makeQuestPackItem(qb, ch, null, null, gp.gameVersion));
+                        addedChapters += 1;
+                      }
+                      if (addedChapters === 0) skipped += 1;
+                    } catch (e) {
+                      skipped += 1;
+                      failed.push(`${gp.fileName}：${String(e).slice(0, 80)}`);
+                    }
                     continue;
                   }
                   try {
@@ -3409,7 +3867,7 @@ function AppInner({
                 <Tooltip title={iconOnly ? t("app.checkAll") : undefined}>
                   <Checkbox
                     checked={allChecked}
-                    indeterminate={visibleQueue.some((it) => it.checked) && !allChecked}
+                    indeterminate={someChecked}
                     onChange={(e) => toggleAll(e.target.checked)}
                     disabled={translating}
                   >
@@ -3487,7 +3945,7 @@ function AppInner({
                 onScroll={(e) => {
                   const el = e.currentTarget;
                   if (
-                    packRenderLimit < filteredQueue.length &&
+                    packRenderLimit < mountedPacks.length &&
                     el.scrollTop + el.clientHeight >= el.scrollHeight - 400
                   ) {
                     bumpRenderLimit();
@@ -3504,38 +3962,164 @@ function AppInner({
                   </div>
                 ) : (
                   <>
-                {shownQueue.map((it) => (
-                  <PackCard
-                    key={it.key}
-                    item={it}
-                    translating={translating}
-                    thisTranslating={!!translatingKeys[it.key]}
-                    packProgress={packProgress[it.key]}
-                    onToggleExpanded={toggleExpanded}
-                    onToggleChecked={toggleChecked}
-                    onEdit={editTranslation}
-                    onSelect={setSelectedKey}
-                    onClear={clearTranslation}
-                    onToggleSelected={toggleSelected}
-                    onToggleAllSelected={toggleAllSelected}
-                    onToggleManySelected={toggleManySelected}
-                    onResize={startResize}
-                    onDeepScan={handleCardDeepScan}
-                    onToggleDeepGroup={toggleDeepGroup}
-                    deepScanningKey={deepScanningKey}
-                    deepScanSummary={deepScanSummaryOf(it)}
-                    onOpenDeepRules={setDeepRulesFor}
-                    ruleTools={keyRuleTools}
-                    onToggleTagFilter={toggleSearchToken}
-                    onToggleStatusFilter={toggleStatusChip}
-                    isTagOn={isTagOn}
-                    isStatusOn={isStatusOn}
-                  />
-                ))}
-                {filteredQueue.length > shownQueue.length && (
+                {(() => {
+                  /* PackCard 的属性清单三处复用（平铺 / 版本组内），收敛成一个渲染函数 */
+                  const renderPack = (it: PackItem) => (
+                    <PackCard
+                      key={it.key}
+                      item={it}
+                      translating={translating}
+                      thisTranslating={!!translatingKeys[it.key]}
+                      packProgress={packProgress[it.key]}
+                      onToggleExpanded={toggleExpanded}
+                      onToggleChecked={toggleChecked}
+                      onEdit={editTranslation}
+                      onSelect={setSelectedKey}
+                      onClear={clearTranslation}
+                      onToggleSelected={toggleSelected}
+                      onToggleAllSelected={toggleAllSelected}
+                      onToggleManySelected={toggleManySelected}
+                      onResize={startResize}
+                      onDeepScan={handleCardDeepScan}
+                      onToggleDeepGroup={toggleDeepGroup}
+                      deepScanningKey={deepScanningKey}
+                      deepScanSummary={deepScanSummaryOf(it)}
+                      onOpenDeepRules={setDeepRulesFor}
+                      ruleTools={keyRuleTools}
+                      onToggleTagFilter={toggleSearchToken}
+                      onToggleStatusFilter={toggleStatusChip}
+                      isTagOn={isTagOn}
+                      isStatusOn={isStatusOn}
+                    />
+                  );
+                  /* 三级树的第一级：游戏版本节点。**折叠时不挂载任何内容包卡片** ——
+                     open 为 false 时该版本在 shownQueue 里的包根本不在 mountedPacks 里，
+                     这里只需渲染版本头一行；展开才把包真正创建进 DOM。 */
+                  const shownByVersion = new Map<string, PackItem[]>();
+                  for (const it of shownQueue) {
+                    if (!it.gameVersion) continue;
+                    const arr = shownByVersion.get(it.gameVersion);
+                    if (arr) arr.push(it);
+                    else shownByVersion.set(it.gameVersion, [it]);
+                  }
+                  /* 最上层父级节点：**视觉上必须与内容包拉开档次**（父级是"容器"，
+                     不是同级条目）—— 左侧强调边 + 更大字号 + 更重字重 + 更松的上下留白，
+                     勾选框放在最左。
+                     勾选框 = 一键全选/取消该父级旗下**当前筛选范围内**的全部内容包
+                     （筛选之外的隐藏包不受影响）。三态：全选 → 勾；部分 → 半选；
+                     全未选 → 空。点击时"未全选则全选、已全选则全取消"（部分也全选）。
+                     任务书页签的父级是整合包名，其余类型是游戏版本 —— 视觉与交互一致。 */
+                  const isQuestTab = activeTab === "quest";
+                  const setGroupChecked = (keys: string[], checked: boolean) => {
+                    const ks = new Set(keys);
+                    setQueue((prev) => prev.map((it) => (ks.has(it.key) ? { ...it, checked } : it)));
+                  };
+                  /* 切换内容类型时的入场：父级行按序错峰上浮（复用列表项入场的
+                     motion-rise，与本项目其它列表同一套语言）。**key = activeTab**
+                     让整块在切页时重挂载，动画才会重播；只作用于父级行与两个"段"，
+                     不逐个包挂动画 —— 上千张卡各播一次既无意义又浪费帧。
+                     延迟封顶 8 档（约 300ms），类型下版本很多时不会拖成一条长龙。 */
+                  const animDelay = (i: number) => `${Math.min(i, 8) * 38}ms`;
+                  return (
+                    <div key={activeTab}>
+                      {versionGroups.map((g, gi) => {
+                        const open = !!versionOpen[vkey(g.name)];
+                        return (
+                          <div key={`ver:${g.name}`} className="anim-list-item" style={{ animationDelay: animDelay(gi) }}>
+                            <div
+                              className="pack-version-row"
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 8,
+                                /* 父级：勾选框在最左、字号更大、字重更重、上下留白更多，
+                                   左侧一条强调边把它与内容包明确分成两层 */
+                                padding: "10px 12px",
+                                marginBottom: open && (shownByVersion.get(g.name)?.length ?? 0) > 0 ? 8 : 14,
+                                marginTop: 2,
+                                border: "1px solid var(--border-color, #E6E8EB)",
+                                borderLeft: `3px solid ${isQuestTab ? KIND_META.quest.color : "var(--ant-color-primary, #4A90D9)"}`,
+                                borderRadius: 10,
+                                background: "var(--card-bg)",
+                                cursor: "pointer",
+                                transition: "background 0.2s ease",
+                                flexWrap: "wrap",
+                              }}
+                              onClick={() =>
+                                setVersionOpen((prev) => ({
+                                  ...prev,
+                                  [vkey(g.name)]: !prev[vkey(g.name)],
+                                }))
+                              }
+                            >
+                              {(() => {
+                                const keys = g.packs.map((p) => p.key);
+                                const all = keys.length > 0 && g.packs.every((p) => p.checked);
+                                const some = !all && g.packs.some((p) => p.checked);
+                                return (
+                                  <Checkbox
+                                    checked={all}
+                                    indeterminate={some}
+                                    style={{ flexShrink: 0 }}
+                                    onClick={(e) => e.stopPropagation()}
+                                    onChange={(e) => {
+                                      e.stopPropagation();
+                                      setGroupChecked(keys, !all);
+                                    }}
+                                  />
+                                );
+                              })()}
+                              {open ? <DownOutlined style={{ fontSize: 12 }} /> : <RightOutlined style={{ fontSize: 12 }} />}
+                              <Typography.Text strong style={{ fontSize: 14, fontWeight: 600 }}>
+                                {g.name}
+                              </Typography.Text>
+                              <Tag style={{ marginRight: 0 }}>
+                                {t("app.versionPackCount", { n: g.packs.length })}
+                              </Tag>
+                              <Typography.Text type="secondary" style={{ marginLeft: "auto", fontSize: 12 }}>
+                                {g.done}/{g.total} {t("app.translatedCount")}
+                              </Typography.Text>
+                            </div>
+                            {/* 版本展开后才挂载包卡片；条目由 PackCard 自身的展开态按需挂载 */}
+                            {open && (shownByVersion.get(g.name) ?? []).map(renderPack)}
+                          </div>
+                        );
+                      })}
+                      {/* 直接导入的包：保持原有平铺两层，不套版本节点。
+                          与上面的"游戏目录"分组之间加一条明确的分隔 —— 否则自由导入的
+                          卡片紧贴在最后一个版本的卡片后面，看起来像属于那个版本。 */}
+                      {versionGroups.length > 0 && shownQueue.some((it) => !it.gameVersion) && (
+                        <div
+                          className="anim-list-item"
+                          style={{
+                            animationDelay: animDelay(versionGroups.length),
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 10,
+                            margin: "18px 0 10px",
+                          }}
+                        >
+                          <span style={{ flex: 1, height: 1, background: "var(--border-color, #E6E8EB)" }} />
+                          <Typography.Text type="secondary" style={{ fontSize: 12, whiteSpace: "nowrap" }}>
+                            {t("app.directImportSection")}
+                          </Typography.Text>
+                          <span style={{ flex: 1, height: 1, background: "var(--border-color, #E6E8EB)" }} />
+                        </div>
+                      )}
+                      {/* 直接导入的整组一起入场（不逐个挂动画） */}
+                      <div
+                        className="anim-list-item"
+                        style={{ animationDelay: animDelay(versionGroups.length + 1) }}
+                      >
+                        {shownQueue.filter((it) => !it.gameVersion).map(renderPack)}
+                      </div>
+                    </div>
+                  );
+                })()}
+                {mountedPacks.length > shownQueue.length && (
                   <div style={{ textAlign: "center", padding: "10px 0 16px" }}>
                     <Button size="small" onClick={bumpRenderLimit}>
-                      显示更多（已显示 {shownQueue.length} / {filteredQueue.length}）
+                      显示更多（已显示 {shownQueue.length} / {mountedPacks.length}）
                     </Button>
                   </div>
                 )}

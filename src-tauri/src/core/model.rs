@@ -111,6 +111,9 @@ pub struct ModFile {
     pub loader: Loader,
     /// MC 版本提示（依赖声明中提取）
     pub mc_version: Option<String>,
+    /// 作者列表（fabric.mod.json authors / mods.toml authors / mcmod.info authorList）
+    #[serde(default)]
+    pub authors: Vec<String>,
     /// 语言文件格式
     pub lang_format: LangFormat,
     /// 模组是否自带中文（zh_cn）

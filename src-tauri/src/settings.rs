@@ -128,6 +128,38 @@ pub struct Settings {
   /// AI 汉化名称缓存（key = "文件名|大小"），仅在选择 AI 命名偏好时生成
   #[serde(default)]
   pub ai_names: HashMap<String, String>,
+  /// 各服务商分别保存的 Base URL（键 = provider id）。
+  /// 修复 Base URL 串号：此前整个设置只有一个 provider.baseUrl 槽位，
+  /// 填自定义的地址会把 Ollama / llama.cpp 已保存的地址覆盖掉。
+  #[serde(default)]
+  pub provider_base_urls: HashMap<String, String>,
+  /// 保存的多个自定义服务商（每条独立：名称 / Base URL / Key / 模型）。
+  /// 旧版本只支持一个 provider=custom；load 时迁移为列表项（id 固定 "custom"）。
+  #[serde(default)]
+  pub custom_providers: Vec<CustomProviderEntry>,
+}
+
+/// 一条自定义服务商配置
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CustomProviderEntry {
+    pub id: String,
+    pub name: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+}
+
+impl Default for CustomProviderEntry {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            base_url: String::new(),
+            api_key: String::new(),
+            model: String::new(),
+        }
+    }
 }
 
 impl Default for Settings {
@@ -156,6 +188,8 @@ impl Default for Settings {
             legacy_deep_scan: None,
             legacy_deep_scan_plugin: None,
             ai_names: HashMap::new(),
+            provider_base_urls: HashMap::new(),
+            custom_providers: Vec::new(),
         }
     }
 }
@@ -246,6 +280,58 @@ impl Settings {
         }
         self.deep_scan_rules.mod_rules.normalize();
         self.deep_scan_rules.plugin.normalize();
+
+        // 旧版"单一自定义服务商"迁移：provider=custom 的 key / 模型 / 地址
+        // 收进 custom_providers 列表（id 固定 "custom"，前端按同一 id 展示与编辑，
+        // 因此对旧配置零破坏 —— 仍指向同一个 id）。列表里已有 "custom" 时不重复迁移。
+        let has_custom_data = self.provider.provider == "custom"
+            || self.provider_api_keys.get("custom").is_some_and(|k| !k.trim().is_empty())
+            || self.provider_models.get("custom").is_some_and(|m| !m.trim().is_empty());
+        if has_custom_data && !self.custom_providers.iter().any(|c| c.id == "custom") {
+            let key = self
+                .provider_api_keys
+                .get("custom")
+                .cloned()
+                .unwrap_or_else(|| {
+                    if self.provider.provider == "custom" {
+                        self.provider.api_key.clone()
+                    } else {
+                        String::new()
+                    }
+                });
+            let model = self
+                .provider_models
+                .get("custom")
+                .cloned()
+                .unwrap_or_else(|| {
+                    if self.provider.provider == "custom" {
+                        self.provider.model.clone().unwrap_or_default()
+                    } else {
+                        String::new()
+                    }
+                });
+            let base_url = self
+                .provider_base_urls
+                .get("custom")
+                .cloned()
+                .unwrap_or_else(|| {
+                    if self.provider.provider == "custom" {
+                        self.provider.base_url.clone().unwrap_or_default()
+                    } else {
+                        String::new()
+                    }
+                });
+            self.custom_providers.insert(
+                0,
+                CustomProviderEntry {
+                    id: "custom".to_string(),
+                    name: String::new(),
+                    base_url,
+                    api_key: key,
+                    model,
+                },
+            );
+        }
     }
 
     /// 整份序列化落盘（仅测试使用；生产路径走 patch_settings 的按需合并写，
@@ -262,6 +348,44 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 旧版"单一自定义服务商"迁移：provider=custom 的 key/模型/地址收进 custom_providers
+    #[test]
+    fn legacy_custom_provider_migrates_into_list() {
+        let dir = std::env::temp_dir().join("settings_custom_migrate_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        fs::write(
+            &path,
+            r#"{
+  "provider": { "provider": "custom", "apiKey": "sk-legacy", "model": "my-model", "baseUrl": "https://relay.example.com/v1", "temperature": 0.7, "maxRetries": 2 },
+  "providerApiKeys": { "ollama": "" },
+  "providerModels": { "ollama": "" },
+  "userGlossary": [],
+  "batchSize": 40,
+  "extractGlossary": true
+}"#,
+        )
+        .unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        if let Err(e) = serde_json::from_str::<Settings>(&raw) {
+            panic!("JSON 解析失败：{e}");
+        }
+        let s = Settings::load(&path);
+        assert_eq!(s.provider.provider, "custom", "设置文件本身应能正常解析");
+        assert_eq!(s.custom_providers.len(), 1);
+        let c = &s.custom_providers[0];
+        assert_eq!(c.id, "custom");
+        assert_eq!(c.api_key, "sk-legacy");
+        assert_eq!(c.model, "my-model");
+        assert_eq!(c.base_url, "https://relay.example.com/v1");
+        // 已有列表时不重复迁移
+        let mut s2 = s.clone();
+        s2.migrate();
+        assert_eq!(s2.custom_providers.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// 损坏的设置文件必须被改名留档（否则一次读取失败 + 一次保存就把用户数据清空）
     #[test]

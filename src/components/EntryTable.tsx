@@ -60,14 +60,20 @@ function rowBg(e: LangEntry): string | undefined {
   }
 }
 
-/** 按 § 格式码渲染文本效果（颜色/粗体/斜体/下划线/删除线），深色背景便于预览 */
+/** 是否含 MC 格式/颜色码（§ 与 & 两种前缀都认 —— FTB 任务书用 & 码） */
+function hasMcCodes(t: string | null | undefined): boolean {
+  return !!t && /[§&][0-9a-fklmnor]/i.test(t);
+}
+
+/** 按格式码渲染文本效果（颜色/粗体/斜体/下划线/删除线），深色背景便于预览。
+ *  FTB 任务书源文本普遍带 & 色码（&6 标题、{@pagebreak} 分页等），模组 .lang 用 §。 */
 function McFormatPreview({ text }: { text: string }) {
   const nodes: React.ReactNode[] = [];
-  const tokens = text.split(/(§[0-9a-fklmnor])/i);
+  const tokens = text.split(/([§&][0-9a-fklmnor])/i);
   let style: React.CSSProperties = { color: "#FFFFFF" };
   let key = 0;
   for (const tok of tokens) {
-    const m = /^§([0-9a-fklmnor])$/i.exec(tok);
+    const m = /^[§&]([0-9a-fklmnor])$/i.exec(tok);
     if (m) {
       const c = m[1].toLowerCase();
       if (MC_COLORS[c]) {
@@ -191,7 +197,7 @@ function TranslationInput({
     />
   );
 
-  const hasFormat = local.includes("§");
+  const hasFormat = hasMcCodes(local);
   return hasFormat ? (
     <Tooltip title={<McFormatPreview text={local} />} placement="topLeft">
       {input}
@@ -448,6 +454,15 @@ export const EntryTable = memo(function EntryTable({
       dataIndex: "source",
       width: 300,
       ellipsis: true,
+      // 原文带格式码（任务书源文本普遍如此）→ 悬停给出渲染预览
+      render: (source: string) =>
+        hasMcCodes(source) ? (
+          <Tooltip title={<McFormatPreview text={source} />} placement="topLeft">
+            <span style={{ cursor: "help" }}>{source}</span>
+          </Tooltip>
+        ) : (
+          source
+        ),
     },
     {
       title: tr("components.colTranslation"),

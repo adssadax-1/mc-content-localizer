@@ -20,16 +20,18 @@ import {
   SunOutlined,
 } from "@ant-design/icons";
 import { api } from "../api";
+import { QuestIcon } from "./QuestIcon";
 import type { PromptTemplate, Settings } from "../types";
 import { useTranslationContext } from "../i18n";
 
-type PackKind = "mod" | "shader" | "resourcepack" | "plugin";
+type PackKind = "mod" | "shader" | "resourcepack" | "plugin" | "quest";
 
 const KIND_LABEL: Record<PackKind, string> = {
   mod: "promptEditor.tabMod",
   shader: "promptEditor.tabShader",
   resourcepack: "promptEditor.tabResourcepack",
   plugin: "promptEditor.tabPlugin",
+  quest: "promptEditor.tabQuest",
 };
 
 /** 与内容包类型页（侧栏导航）同款图标，保持视觉一致 */
@@ -38,6 +40,7 @@ const KIND_ICON: Record<PackKind, React.ReactNode> = {
   shader: <SunOutlined />,
   resourcepack: <PictureOutlined />,
   plugin: <CloudServerOutlined />,
+  quest: <QuestIcon size={14} />,
 };
 
 interface Props {

@@ -95,7 +95,16 @@
       "opened": "已打开日志文件夹",
       "folderFailed": "无法打开日志文件夹",
       "sensitive": "日志已自动隐去 API Key 等敏感信息，可直接分享。"
-    }
+    },
+    "quest": "任务书",
+    "clickSelectQuest": "点击选择游戏目录 / 整合包 / 任务书文件夹",
+    "dragOverQuest": "松开即扫描其中的任务书",
+    "questDesc": "识别 FTB Quests 任务书（config/ftbquests）：书名、章节、任务描述等逐条翻译，导出时直接写回原文件",
+    "questImported": "已导入 {n} 个章节到任务书列表",
+    "questImportedDup": "{n} 个章节已在列表中，已跳过",
+    "questZipImported": "从整合包导入 {n} 本任务书",
+    "versionPackCount": "{n} 个内容包",
+    "directImportSection": "以下为直接导入的内容包（不属于上面的游戏目录）"
   },
   "settings": {
     "title": "设置",
@@ -137,7 +146,14 @@
       "hintOpenrouter": "OpenRouter：一个 Key 调全平台，模型 ID 带 vendor 前缀（如 google/gemini-2.5-flash）",
       "hintOllama": "Ollama：本地推理，无需 API Key。先在本机运行 ollama serve（默认 11434）并用 ollama pull 拉取模型，再点「获取模型列表」选择。注意：上下文长度由 Modelfile 的 num_ctx 决定（OpenAI 兼容接口无法设置），自动档批次已按本地推理封顶，建议线程数保持 1–2，译文需人工校对。",
       "hintLlamacpp": "llama.cpp：本地推理，默认免鉴权。先启动 llama-server（默认 127.0.0.1:8080，用 --ctx-size 指定上下文、--alias 给模型起易读的名字），再点「获取模型列表」选择。自动档批次已按本地推理封顶，建议线程数保持 1–2，译文需人工校对。",
-      "hintCustom": "自定义：填入任意 OpenAI 兼容端点（Base URL + 模型名）"
+      "hintCustom": "自定义：填入任意 OpenAI 兼容端点（Base URL + 模型名）",
+      "addCustom": "添加自定义服务商",
+      "customUnnamed": "未命名服务商",
+      "customName": "服务商名称",
+      "customNamePlaceholder": "给这个自定义服务商起个名字（如：自建中转）",
+      "deleteCustom": "删除该服务商",
+      "deleteConfirm": "确定删除这个自定义服务商？只删除这一条，不影响其它服务商配置。",
+      "baseUrlSlotTip": "每个服务商的 Base URL 独立保存；修改这里的地址不会影响 Ollama / llama.cpp 等其它服务商。"
     },
     "params": {
       "groupTitle": "翻译参数",
@@ -556,14 +572,15 @@
     "tabMod": "模组",
     "tabShader": "光影包",
     "tabResourcepack": "资源包",
-    "tabPlugin": "插件"
+    "tabPlugin": "插件",
+    "tabQuest": "任务书"
   },
   "gamedir": {
     "open": "打开游戏目录",
     "scanHint": "选择 .minecraft 目录（或任意游戏目录 / 版本文件夹），自动向下扫描 mods、resourcepacks、shaderpacks",
     "cancel": "取消扫描",
     "publicDir": "公共目录",
-    "counts": "模组 {mods} · 资源包 {rp} · 光影 {sp} · 插件 {plug}",
+    "counts": "模组 {mods} · 资源包 {rp} · 光影 {sp} · 插件 {plug} · 任务书 {quest}",
     "search": "搜索内容包",
     "addToQueue": "解析并加入列表（{n}）",
     "addToQueueHint": "加入后切到「自由导入」页开始翻译；跨版本重复的包将自动复用译文",
@@ -596,7 +613,8 @@
     "rescanTip": "忽略缓存，重新扫描当前游戏目录",
     "addToQueueTip": "加入后自动切到「自由导入」；跨版本重复包复用译文",
     "scannedAt": "扫描于 {time}",
-    "cacheTag": "缓存"
+    "cacheTag": "缓存",
+    "kindQuest": "任务书"
   },
   "deepGroup": {
     "message": "消息文本",

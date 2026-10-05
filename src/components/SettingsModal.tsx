@@ -10,6 +10,7 @@ import {
   message,
   Modal,
   notification,
+  Popconfirm,
   Radio,
   Select,
   Space,
@@ -39,13 +40,14 @@ import { api } from "../api";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type {
   ClearResult,
+  CustomProviderEntry,
   DeepScanRules,
   ModelInfo,
   ProviderConfig,
   Settings,
   StorageUsage,
 } from "../types";
-import { PROVIDER_PRESETS, isLocalProvider, LOCAL_PROVIDERS } from "../types";
+import { PROVIDER_PRESETS, isCustomProviderId, isLocalProvider, LOCAL_PROVIDERS } from "../types";
 import { ProviderGrid, PROVIDER_HINTS } from "./ProviderIcon";
 import { PromptEditorModal } from "./PromptEditorModal";
 import { DeepScanRulesModal } from "./DeepScanRulesModal";
@@ -123,6 +125,8 @@ interface FormValues {
   apiKey: string;
   model?: string;
   baseUrl?: string;
+  /** 自定义服务商的显示名（仅自定义 id 时可见可填） */
+  customName?: string;
   temperature: number;
   batchSize: number;
   batchSizeAuto: boolean;
@@ -135,6 +139,10 @@ interface FormValues {
   providerModels?: Record<string, string>;
   /** 各服务商缓存的模型列表（隐藏字段） */
   providerModelOptions?: Record<string, ModelInfo[]>;
+  /** 各服务商保存的 Base URL（隐藏字段；修复自定义地址覆盖 Ollama 等的串号） */
+  providerBaseUrls?: Record<string, string>;
+  /** 保存的自定义服务商列表（隐藏字段） */
+  customProviders?: CustomProviderEntry[];
   /** 多线程翻译 */
   threadingEnabled?: boolean;
   threadCount?: number;
@@ -158,7 +166,7 @@ interface FormValues {
  *  只有它的 Promise 失败时才会显示这个值。
  *  **升版本时要跟 tauri.conf.json / package.json / Cargo.toml 一起改** ——
  *  它曾经长期停在旧版本号上，一旦 getVersion() 失败就会在「关于」里显示一个假版本。 */
-const FALLBACK_VERSION = "3.3.0";
+const FALLBACK_VERSION = "4.0.0";
 
 /** 字节数 → 可读体积 */
 function fmtBytes(n: number): string {
@@ -220,6 +228,28 @@ export function SettingsModal({
      用户把本地档的地址改成局域网地址后，isLocal 会变 false，
      但 Base URL 仍然必须可编辑 —— 否则改完就再也改不回来）。 */
   const isLocalPreset = !!provider && (LOCAL_PROVIDERS as readonly string[]).includes(provider);
+  /** 当前是否选中自定义服务商（legacy "custom" 或多自定义 "custom:<id>"） */
+  const isCustom = isCustomProviderId(provider);
+  /** 表单里当前的自定义服务商列表（隐藏字段优先，回退到已保存设置） */
+  const customProvidersField: CustomProviderEntry[] =
+    (Form.useWatch("customProviders", form) as CustomProviderEntry[] | undefined) ??
+    settings?.customProviders ??
+    [];
+  /** 新建一个自定义服务商：追加空白条目并选中它，字段由切换联动填空；保存时才真正落盘 */
+  const handleAddCustomProvider = useCallback(() => {
+    const id = `custom:${Date.now().toString(36)}${Math.floor(Math.random() * 1296).toString(36)}`;
+    const list: CustomProviderEntry[] = [
+      ...(customProvidersField ?? []),
+      { id, name: "", baseUrl: "", apiKey: "", model: "" },
+    ];
+    form.setFieldsValue({ customProviders: list, provider: id });
+  }, [customProvidersField, form]);
+  /** 删除当前选中的自定义服务商：只移除这一条，随后回到智谱预设 */
+  const handleDeleteCustomProvider = useCallback(() => {
+    if (!isCustom) return;
+    const list = (customProvidersField ?? []).filter((c) => c.id !== provider);
+    form.setFieldsValue({ customProviders: list, provider: "zhipu" });
+  }, [isCustom, provider, customProvidersField, form]);
   const [modelOptions, setModelOptions] = useState<ModelInfo[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
   const [testingModel, setTestingModel] = useState(false);
@@ -415,12 +445,20 @@ export function SettingsModal({
     const prev = prevProviderRef.current;
     prevProviderRef.current = provider;
     if (prev === undefined || provider === undefined || provider === prev) return;
-    // 切换服务商：key / 模型 / 模型列表全部联动到该服务商保存的值
+    // 切换服务商：key / 模型 / 模型列表 / Base URL / 名称全部联动到该服务商自己的值。
+    // Base URL 必须跟着切 —— 这是"自定义地址覆盖 Ollama 地址"串号 bug 的修法之一半
+    // （另一半在保存处：地址按服务商分槽写进 providerBaseUrls）。
     const keys: Record<string, string> = form.getFieldValue("providerApiKeys") ?? {};
     const models: Record<string, string> = form.getFieldValue("providerModels") ?? {};
     const opts: Record<string, ModelInfo[]> = form.getFieldValue("providerModelOptions") ?? {};
-    form.setFieldValue("apiKey", keys[provider] ?? "");
-    form.setFieldValue("model", models[provider] ?? PROVIDER_PRESETS[provider]?.model ?? "");
+    const baseUrls: Record<string, string> = form.getFieldValue("providerBaseUrls") ?? {};
+    const entry: CustomProviderEntry | undefined = (form.getFieldValue("customProviders") ?? []).find(
+      (c: CustomProviderEntry) => c.id === provider,
+    );
+    form.setFieldValue("apiKey", keys[provider] ?? entry?.apiKey ?? "");
+    form.setFieldValue("model", models[provider] ?? entry?.model ?? PROVIDER_PRESETS[provider]?.model ?? "");
+    form.setFieldValue("baseUrl", baseUrls[provider] ?? entry?.baseUrl ?? PROVIDER_PRESETS[provider]?.baseUrl ?? "");
+    form.setFieldValue("customName", entry?.name ?? "");
     setModelOptions(opts[provider] ?? []);
   }, [provider, open, form]);
 
@@ -453,7 +491,6 @@ export function SettingsModal({
         provider: settings.provider.provider,
         apiKey: settings.provider.apiKey,
         model: settings.provider.model ?? "",
-        baseUrl: settings.provider.baseUrl ?? "",
         temperature: settings.provider.temperature ?? 0.7,
         batchSize: settings.batchSize,
         batchSizeAuto: settings.batchSizeAuto ?? true,
@@ -466,6 +503,13 @@ export function SettingsModal({
         userGlossary: settings.userGlossary.length ? settings.userGlossary : [],
         providerApiKeys: settings.providerApiKeys ?? {},
         providerModels: settings.providerModels ?? {},
+        providerBaseUrls: settings.providerBaseUrls ?? {},
+        customProviders: settings.customProviders ?? [],
+        // Base URL 初始值：优先该服务商自己名下的地址（分槽映射），兼容旧设置回退 provider.baseUrl
+        baseUrl:
+          settings.providerBaseUrls?.[settings.provider.provider] ?? settings.provider.baseUrl ?? "",
+        customName:
+          settings.customProviders?.find((c) => c.id === settings.provider.provider)?.name ?? "",
         // 主题 / 语言 / 无字模式不在这里：它们已搬到顶栏快捷开关（点一下即写盘）。
         // 表单不持有这三项，「确定」时就不会拿一份可能过期的快照把它们覆盖回去。
         closeBehavior: settings.closeBehavior === "minimize" ? "minimize" : "exit",
@@ -509,7 +553,7 @@ export function SettingsModal({
       apiKey: apiKey ?? "",
       model,
       baseUrl:
-        providerName === "custom" || localNow ? baseUrlRaw || null : null,
+        isCustomProviderId(providerName) || localNow ? baseUrlRaw || null : null,
       temperature: 0,
       maxRetries: 0,
     };
@@ -538,7 +582,7 @@ export function SettingsModal({
       model: null,
       // 本地档要带上用户填的地址（留空则后端回退到预设端口）
       baseUrl:
-        providerName === "custom" || localNow ? baseUrlRaw || null : null,
+        isCustomProviderId(providerName) || localNow ? baseUrlRaw || null : null,
       temperature: 0.7,
       maxRetries: 2,
     };
@@ -581,10 +625,30 @@ export function SettingsModal({
       message.error(t("settings.msg.providerMissing"));
       return;
     }
-    const custom = v.provider === "custom";
+    const customId = isCustomProviderId(v.provider);
     // Base URL 只对「自定义」与「本地档」有意义：本地档需要它来换端口 /
     // 指向局域网里的另一台机器。云端预设仍不接受（防历史遗留值把请求打歪）。
-    const keepBaseUrl = custom || isLocalProvider(v.provider, v.baseUrl);
+    const keepBaseUrl = customId || isLocalProvider(v.provider, v.baseUrl);
+    // Base URL 按服务商**分槽**保存（providerBaseUrls 映射）——这是串号 bug 的根治点：
+    // 改自定义的地址只写 custom 自己的槽，Ollama / llama.cpp 的槽一字不动。
+    const providerBaseUrls: Record<string, string> = { ...(v.providerBaseUrls ?? {}) };
+    if (keepBaseUrl) {
+      providerBaseUrls[v.provider] = v.baseUrl?.trim() ?? "";
+    }
+    // 自定义服务商：名称 / 地址 / Key / 模型写回**这一条**条目（其它条目与内置预设不受影响）
+    let customProviders = v.customProviders ?? [];
+    if (customId) {
+      const entry: CustomProviderEntry = {
+        id: v.provider,
+        name: v.customName?.trim() ?? "",
+        baseUrl: v.baseUrl?.trim() ?? "",
+        apiKey: v.apiKey.trim(),
+        model: v.model?.trim() ?? "",
+      };
+      const idx = customProviders.findIndex((c) => c.id === v.provider);
+      customProviders =
+        idx >= 0 ? customProviders.map((c, i) => (i === idx ? entry : c)) : [...customProviders, entry];
+    }
     // 温度强制 2 位小数（智谱要求），防多位小数入库
     const temperature = Math.round((v.temperature ?? 0.7) * 100) / 100;
     // 该服务商的 key / 模型单独保存，切换服务商不串
@@ -616,6 +680,8 @@ export function SettingsModal({
         temperature,
         maxRetries: 2,
       },
+      providerBaseUrls,
+      customProviders,
       providerApiKeys,
       providerModels,
       providerModelOptions,
@@ -709,11 +775,15 @@ export function SettingsModal({
 
               <PanelBlock index={1}>
                 <Form.Item name="provider" label={t("settings.provider.label")}>
-                  <ProviderGrid iconOnly={iconOnly} />
+                  <ProviderGrid
+                    iconOnly={iconOnly}
+                    customProviders={customProvidersField}
+                    onAdd={handleAddCustomProvider}
+                  />
                 </Form.Item>
               </PanelBlock>
 
-              {/* 隐藏字段：各服务商保存的 key / 模型 / 模型列表 */}
+              {/* 隐藏字段：各服务商保存的 key / 模型 / 模型列表 / Base URL / 自定义服务商列表 */}
               <Form.Item name="providerApiKeys" hidden>
                 <Input />
               </Form.Item>
@@ -721,6 +791,12 @@ export function SettingsModal({
                 <Input />
               </Form.Item>
               <Form.Item name="providerModelOptions" hidden>
+                <Input />
+              </Form.Item>
+              <Form.Item name="providerBaseUrls" hidden>
+                <Input />
+              </Form.Item>
+              <Form.Item name="customProviders" hidden>
                 <Input />
               </Form.Item>
 
@@ -733,18 +809,40 @@ export function SettingsModal({
                     这些段落是"第一次配置时的引导"，逐条都在讲怎么把服务跑起来；
                     无字模式下用户要的就是省地方，成段说明只会把表单往下推。
                     句句仍是**常规模式**的首屏引导，一个字没删。 */}
-                {provider && PROVIDER_HINTS[provider] && (
-                  <Typography.Paragraph
-                    type="secondary"
-                    className="io-hide"
-                    style={{ fontSize: 12, marginTop: -8, marginBottom: 12 }}
-                  >
-                    {t(PROVIDER_HINTS[provider])}
-                  </Typography.Paragraph>
-                )}
+                {(() => {
+                  // 自定义服务商的 id 是 custom / custom:<id>，提示按"自定义"那条取
+                  const hintKey = isCustom ? PROVIDER_HINTS.custom : provider ? PROVIDER_HINTS[provider] : undefined;
+                  return hintKey ? (
+                    <Typography.Paragraph
+                      type="secondary"
+                      className="io-hide"
+                      style={{ fontSize: 12, marginTop: -8, marginBottom: 12 }}
+                    >
+                      {t(hintKey)}
+                    </Typography.Paragraph>
+                  ) : null;
+                })()}
               </PanelBlock>
 
-              <PanelBlock index={1}>
+              {/* 自定义服务商：名称可编辑（网格卡片与悬停提示都显示它）。
+                  只对自定义 id 出现；预设档没有名称一说。 */}
+              {isCustom && (
+                <PanelBlock index={1}>
+                  <Form.Item
+                    name="customName"
+                    label={t("settings.provider.customName")}
+                    style={{ marginBottom: 8 }}
+                  >
+                    <Input
+                      maxLength={30}
+                      placeholder={t("settings.provider.customNamePlaceholder")}
+                      allowClear
+                    />
+                  </Form.Item>
+                </PanelBlock>
+              )}
+
+              <PanelBlock index={2}>
               <Form.Item
                 name="apiKey"
                 label={
@@ -790,7 +888,7 @@ export function SettingsModal({
               </Form.Item>
               </PanelBlock>
 
-              <PanelBlock index={2}>
+              <PanelBlock index={3}>
               <Form.Item
                 name="model"
                 label={
@@ -893,7 +991,7 @@ export function SettingsModal({
               </Form.Item>
               </PanelBlock>
 
-              <PanelBlock index={3}>
+              <PanelBlock index={4}>
               {/* 连接验证（链接样式小按钮）+ 选中模型为免费时标注 */}
               <div
                 style={{
@@ -917,17 +1015,19 @@ export function SettingsModal({
               </div>
               </PanelBlock>
 
-              <PanelBlock index={4}>
+              <PanelBlock index={5}>
               {/* Base URL 展示：自定义与本地档可编辑；其余预设只读灰色 + 官网跳转。
                   本地档必须可编辑 —— 换端口（11434→11500）或把服务跑在另一台机器上
                   是常见用法，锁死就只能改用「自定义」重配一遍。 */}
-              {provider === "custom" || isLocalPreset ? (
+              {isCustom || isLocalPreset ? (
                 <Form.Item
                   name="baseUrl"
                   label={t("settings.provider.baseUrl")}
-                  /* 无字模式收起：本地档（Ollama / llama.cpp）专属的灰字说明，
+                  /* 自定义档：提示"分槽保存" —— 用户在意的正是"改这里会不会影响别人"。
+                     无字模式收起：本地档（Ollama / llama.cpp）专属的灰字说明，
                      与上面那条服务商说明同属"引导性灰字"。用条件渲染而不是 CSS ——
                      antd 的 Form.Item extra 没有稳定的外部类名可挂钩（同 model 那条）。 */
+                  tooltip={isCustom ? t("settings.provider.baseUrlSlotTip") : undefined}
                   extra={
                     isLocalPreset && !iconOnly
                       ? t("settings.provider.baseUrlLocalExtra")
@@ -961,6 +1061,26 @@ export function SettingsModal({
                 )
               )}
               </PanelBlock>
+
+              {/* 删除当前自定义服务商：只删这一条，其它自定义与内置预设不受影响。
+                  二次确认放在确认气泡里（内容为纯文案，不踩 Modal.confirm 的上下文坑） */}
+              {isCustom && (
+                <PanelBlock index={6}>
+                  <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                    <Popconfirm
+                      title={t("settings.provider.deleteConfirm")}
+                      okText={t("settings.provider.deleteCustom")}
+                      okButtonProps={{ danger: true }}
+                      cancelText={t("settings.storage.cancel")}
+                      onConfirm={handleDeleteCustomProvider}
+                    >
+                      <Button danger size="small" icon={<DeleteOutlined />}>
+                        {t("settings.provider.deleteCustom")}
+                      </Button>
+                    </Popconfirm>
+                  </div>
+                </PanelBlock>
+              )}
               </div>
             </div>
             )}

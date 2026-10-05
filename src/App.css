@@ -66,6 +66,22 @@ body {
   box-shadow: 0 2px 10px var(--hover-shadow);
 }
 
+/* 三级树的最上层父级行（游戏版本 / 任务书的整合包）。
+   它是个"容器"，视觉上必须与内容包卡片分成两层：更大的字号与留白、
+   左侧强调边（在 JSX 里给），hover 用底色而非阴影 —— 阴影属于"可拖动的卡片"，
+   父级只需要"可点开"的反馈。 */
+.pack-version-row {
+  transition: background 0.2s ease;
+}
+
+.pack-version-row:hover {
+  background: rgba(74, 144, 217, 0.06);
+}
+
+[data-theme="dark"] .pack-version-row:hover {
+  background: rgba(108, 179, 255, 0.1);
+}
+
 /* 折叠的内容包卡片：视口外的卡片跳过渲染（Chromium/WebView2 支持 content-visibility），
    上千个内容包时显著降低首次布局与滚动开销；contain-intrinsic-size 提供高度占位，
    用 auto 关键字让浏览器记住上次实测高度，避免滚动条跳动 */

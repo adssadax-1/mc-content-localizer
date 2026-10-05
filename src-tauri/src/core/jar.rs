@@ -34,6 +34,7 @@ struct ModMeta {
     version: Option<String>,
     mc_version: Option<String>,
     loader: Loader,
+    authors: Vec<String>,
 }
 
 /// 语言文件路径匹配：assets/<modid>/lang/<name>.<ext>
@@ -229,6 +230,7 @@ pub fn parse_jar(path: &Path) -> Result<ModFile, JarError> {
             loader: meta.loader,
             version: meta.version,
             mc_version: meta.mc_version,
+            authors: meta.authors.clone(),
             lang_format,
             has_zh: false,
             zh_count: 0,
@@ -250,6 +252,7 @@ pub fn parse_jar(path: &Path) -> Result<ModFile, JarError> {
         version: meta.version,
         loader: meta.loader,
         mc_version: meta.mc_version,
+        authors: meta.authors.clone(),
         lang_format,
         has_zh: zh_count > 0,
         zh_count,
@@ -462,12 +465,27 @@ fn read_mod_metadata(
                             .and_then(|x| x.as_str())
                             .map(String::from),
                         loader: Loader::Quilt,
+                        authors: loader_obj
+                            .and_then(|l| l.get("metadata"))
+                            .and_then(|m| m.get("contributors"))
+                            .and_then(|c| c.as_object())
+                            .map(|o| o.keys().cloned().collect())
+                            .unwrap_or_default(),
                     };
                     merge_meta(&mut meta, parsed, Loader::Quilt);
                 }
             }
             "fabric.mod.json" => {
                 if let Ok(v) = serde_json::from_slice::<serde_json::Value>(strip_bom(&buf)) {
+                    let authors = v.get("authors").and_then(|x| x.as_array()).map(|arr| {
+                        arr.iter()
+                            .filter_map(|a| {
+                                a.as_str().map(String::from).or_else(|| {
+                                    a.get("name").and_then(|n| n.as_str()).map(String::from)
+                                })
+                            })
+                            .collect()
+                    });
                     let parsed = ModMeta {
                         modid: v.get("id").and_then(|x| x.as_str()).map(String::from),
                         name: v.get("name").and_then(|x| x.as_str()).map(String::from),
@@ -478,6 +496,7 @@ fn read_mod_metadata(
                             .and_then(|m| m.as_str())
                             .map(String::from),
                         loader: Loader::Fabric,
+                        authors: authors.unwrap_or_default(),
                     };
                     merge_meta(&mut meta, parsed, Loader::Fabric);
                 }
@@ -486,6 +505,15 @@ fn read_mod_metadata(
                 if let Ok(v) = serde_json::from_slice::<serde_json::Value>(strip_bom(&buf)) {
                     if let Some(arr) = v.as_array() {
                         if let Some(first) = arr.first() {
+                            let authors = first
+                                .get("authorList")
+                                .and_then(|x| x.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|a| a.as_str().map(String::from))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
                             let parsed = ModMeta {
                                 modid: first.get("modid").and_then(|x| x.as_str()).map(String::from),
                                 name: first.get("name").and_then(|x| x.as_str()).map(String::from),
@@ -495,6 +523,7 @@ fn read_mod_metadata(
                                     .map(String::from),
                                 mc_version: None,
                                 loader: Loader::Forge,
+                                authors,
                             };
                             merge_meta(&mut meta, parsed, Loader::Forge);
                         }
@@ -537,6 +566,13 @@ fn parse_mods_toml(buf: &[u8]) -> ModMeta {
                 meta.name.get_or_insert(v);
             } else if let Some(v) = kv(line, "version") {
                 meta.version.get_or_insert(v);
+            } else if let Some(v) = kv(line, "authors") {
+                // 逗号分隔的作者清单
+                meta.authors = v
+                    .split(',')
+                    .map(|a| a.trim().to_string())
+                    .filter(|a| !a.is_empty())
+                    .collect();
             }
         } else if let Some(dep) = dep_mod_id.clone() {
             // 依赖块内：modId 行更新当前依赖，minecraft 依赖记录版本范围
@@ -579,6 +615,9 @@ fn merge_meta(meta: &mut ModMeta, parsed: ModMeta, loader: Loader) {
     }
     if meta.loader == Loader::Unknown {
         meta.loader = loader;
+    }
+    if meta.authors.is_empty() {
+        meta.authors = parsed.authors;
     }
 }
 

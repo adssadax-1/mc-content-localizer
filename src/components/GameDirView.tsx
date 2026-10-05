@@ -27,13 +27,14 @@ interface Props {
   onSettingsUpdate: (s: Settings) => void;
   /** 「解析并加入列表」的解析进度（App 注入循环回传） */
   addProgress?: { done: number; total: number; current: string } | null;
-  /** 将勾选的内容包解析并注入原有队列（App 实现：解析 + 去重 + 入队 + 跳转） */
+  /** 将勾选的内容包解析并注入原有队列（App 实现：解析 + 去重 + 入队 + 跳转）。
+   *  任务书的 path 是 quests 根目录，App 侧展开为一本任务的多个章节内容包。 */
   onAddToQueue: (
     packs: {
       path: string;
       fileName: string;
       size: number;
-      kind: "mod" | "shader" | "resourcepack" | "plugin";
+      kind: "mod" | "shader" | "resourcepack" | "plugin" | "quest";
       gameVersion: string;
     }[],
   ) => Promise<{ added: number; skipped: number }>;
@@ -49,6 +50,7 @@ const KIND_LABEL_KEY: Record<Kind, string> = {
   shader: "gamedir.kindShader",
   resourcepack: "gamedir.kindRp",
   plugin: "gamedir.kindPlugin",
+  quest: "gamedir.kindQuest",
 };
 
 /**
@@ -83,11 +85,12 @@ function packsOf(g: GameVersionGroup, kind: Kind): GamePackEntry[] {
   if (kind === "mod") return g.mods;
   if (kind === "plugin") return g.plugins;
   if (kind === "resourcepack") return g.resourcepacks;
+  if (kind === "quest") return g.questbooks ?? [];
   return g.shaderpacks;
 }
 
 function groupAllPacks(g: GameVersionGroup): GamePackEntry[] {
-  return [...g.mods, ...g.resourcepacks, ...g.shaderpacks, ...g.plugins];
+  return [...g.mods, ...g.resourcepacks, ...g.shaderpacks, ...g.plugins, ...(g.questbooks ?? [])];
 }
 
 /**
@@ -321,7 +324,7 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
         path: pack.path,
         fileName: pack.fileName,
         size: pack.size,
-        kind: kind as "mod" | "shader" | "resourcepack",
+        kind: kind as "mod" | "shader" | "resourcepack" | "plugin" | "quest",
         gameVersion: group.name,
       }));
     setAdding(true);
@@ -586,7 +589,7 @@ export function GameDirView({ settings, onSettingsUpdate, addProgress, onAddToQu
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontWeight: activeGroup === row.key ? 600 : 400 }}>{row.name}</div>
                     <div style={{ fontSize: 11, opacity: 0.8 }}>
-                      {t("gamedir.counts", { mods: row.group.mods.length, rp: row.group.resourcepacks.length, sp: row.group.shaderpacks.length, plug: row.group.plugins.length })}
+                      {t("gamedir.counts", { mods: row.group.mods.length, rp: row.group.resourcepacks.length, sp: row.group.shaderpacks.length, plug: row.group.plugins.length, quest: row.group.questbooks?.length ?? 0 })}
                     </div>
                   </div>
                 </div>

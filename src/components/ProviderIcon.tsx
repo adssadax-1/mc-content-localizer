@@ -1,6 +1,7 @@
+import { PlusOutlined } from "@ant-design/icons";
 import { Tooltip } from "antd";
 import { useTranslationContext } from "../i18n";
-import { PROVIDER_PRESETS } from "../types";
+import { PROVIDER_PRESETS, type CustomProviderEntry } from "../types";
 
 /** 服务商品牌色（近似官方主色，纯离线 SVG，无网络依赖） */
 const BRAND: Record<string, string | [string, string]> = {
@@ -144,17 +145,121 @@ export function ProviderIcon({ id, size = 30 }: { id: string; size?: number }) {
  *
  * 常规档刻意**不挂 Tooltip**：那时名称就写在卡片上，再弹一层是纯噪声。
  * 同理，常规档也不需要 aria-label —— 可见文字本身就是最好的无障碍名。
+ *
+ * 自定义服务商：预设卡片之后按保存顺序追加（每个一条，齿轮图标 + 用户命名），
+ * 最后是一张「添加」卡片 —— 点击新建一个空白条目并选中它去填。
  */
 export function ProviderGrid({
   value,
   onChange,
   iconOnly,
+  customProviders = [],
+  onAdd,
 }: {
   value?: string;
   onChange?: (v: string) => void;
   iconOnly?: boolean;
+  /** 已保存的自定义服务商（追加在预设之后） */
+  customProviders?: CustomProviderEntry[];
+  /** 点击「添加自定义服务商」卡片（不传则不渲染该卡片） */
+  onAdd?: () => void;
 }) {
   const { t } = useTranslationContext();
+  const customName = (e: CustomProviderEntry) =>
+    e.name.trim() || (e.id === "custom" ? t("providers.custom") : t("settings.provider.customUnnamed"));
+
+  const renderCard = (
+    key: string,
+    name: string,
+    active: boolean,
+    pick: () => void,
+    iconId: string,
+    addTile = false,
+  ) => {
+    const cardStyle: React.CSSProperties = {
+      borderRadius: 10,
+      border: `1.5px solid ${active ? "#4A90D9" : "var(--border-color, #E6E8EB)"}`,
+      background: active ? "rgba(74,144,217,0.08)" : "transparent",
+      cursor: "pointer",
+      transition: "all 0.15s",
+      userSelect: "none",
+    };
+
+    if (!iconOnly) {
+      return (
+        <div
+          key={key}
+          className="provider-grid-card"
+          onClick={pick}
+          style={{
+            ...cardStyle,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: 6,
+            padding: "12px 4px 8px",
+          }}
+        >
+          {addTile ? (
+            <span style={{ height: 30, display: "flex", alignItems: "center", color: "var(--ant-color-text-secondary, #8c8c8c)" }}>
+              <PlusOutlined style={{ fontSize: 22 }} />
+            </span>
+          ) : (
+            <ProviderIcon id={iconId} size={30} />
+          )}
+          <span
+            style={{
+              fontSize: 12,
+              textAlign: "center",
+              lineHeight: 1.2,
+              color: active ? "#1F2937" : "inherit",
+              fontWeight: active ? 600 : 400,
+              /* 名称超长（用户自取）时省略，不把整行网格撑变形 */
+              maxWidth: "100%",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {name}
+          </span>
+        </div>
+      );
+    }
+
+    return (
+      <Tooltip key={key} title={name} mouseEnterDelay={0.15}>
+        <div
+          className="provider-grid-card"
+          role="button"
+          tabIndex={0}
+          aria-label={name}
+          aria-pressed={active}
+          onClick={pick}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              pick();
+            }
+          }}
+          style={{
+            ...cardStyle,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: "10px 4px",
+          }}
+        >
+          {addTile ? (
+            <PlusOutlined style={{ fontSize: 20, color: "var(--ant-color-text-secondary, #8c8c8c)" }} />
+          ) : (
+            <ProviderIcon id={iconId} size={28} />
+          )}
+        </div>
+      </Tooltip>
+    );
+  };
+
   return (
     <div
       style={{
@@ -167,74 +272,14 @@ export function ProviderGrid({
       {Object.entries(PROVIDER_PRESETS).map(([id, p]) => {
         const active = value === id;
         const name = t(`providers.${id}`) !== `providers.${id}` ? t(`providers.${id}`) : p.label;
-        const cardStyle: React.CSSProperties = {
-          borderRadius: 10,
-          border: `1.5px solid ${active ? "#4A90D9" : "var(--border-color, #E6E8EB)"}`,
-          background: active ? "rgba(74,144,217,0.08)" : "transparent",
-          cursor: "pointer",
-          transition: "all 0.15s",
-          userSelect: "none",
-        };
-
-        if (!iconOnly) {
-          return (
-            <div
-              key={id}
-              className="provider-grid-card"
-              onClick={() => onChange?.(id)}
-              style={{
-                ...cardStyle,
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: 6,
-                padding: "12px 4px 8px",
-              }}
-            >
-              <ProviderIcon id={id} size={30} />
-              <span
-                style={{
-                  fontSize: 12,
-                  textAlign: "center",
-                  lineHeight: 1.2,
-                  color: active ? "#1F2937" : "inherit",
-                  fontWeight: active ? 600 : 400,
-                }}
-              >
-                {name}
-              </span>
-            </div>
-          );
-        }
-
-        return (
-          <Tooltip key={id} title={name} mouseEnterDelay={0.15}>
-            <div
-              className="provider-grid-card"
-              role="button"
-              tabIndex={0}
-              aria-label={name}
-              aria-pressed={active}
-              onClick={() => onChange?.(id)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  onChange?.(id);
-                }
-              }}
-              style={{
-                ...cardStyle,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                padding: "10px 4px",
-              }}
-            >
-              <ProviderIcon id={id} size={28} />
-            </div>
-          </Tooltip>
-        );
+        return renderCard(id, name, active, () => onChange?.(id), id);
       })}
+      {/* 已保存的自定义服务商：每条独立卡片；id 走 is_custom_id 判据（custom / custom:<id>） */}
+      {customProviders.map((e) =>
+        renderCard(e.id, customName(e), value === e.id, () => onChange?.(e.id), "custom"),
+      )}
+      {onAdd &&
+        renderCard("__add__", t("settings.provider.addCustom"), false, onAdd, "custom", true)}
     </div>
   );
 }

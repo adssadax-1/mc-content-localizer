@@ -916,6 +916,98 @@ pub fn parse_resource_pack(path: String) -> Result<crate::core::pack::ResourcePa
     Ok(rp)
 }
 
+/// 解析任务书（FTB Quests：config/ftbquests/quests）。
+/// `path` 为 quests 根目录；返回书名与逐章条目（一个章节 = 队列里的一个内容包）。
+#[tauri::command]
+pub fn parse_quest_book(path: String) -> Result<crate::core::quest_book::QuestBookParse, String> {
+    crate::core::quest_book::parse(std::path::Path::new(&path))
+}
+
+/// 判断目录是否应"直接作为任务书导入"（config / ftbquests / quests 等浅层形态）。
+/// 返回 quests 根目录；None = 走原有导入路由（游戏目录扫描 / 内容包文件）。
+#[tauri::command]
+pub fn detect_quest_root(path: String) -> Option<String> {
+    crate::core::quest_zip::find_direct_import_root(std::path::Path::new(&path))
+}
+
+/// 检测整合包 ZIP 内的任务书（可含多本，按 quests 前缀区分）。
+/// 返回空列表 = 该 zip 没有任务书，按原有逻辑导入。
+#[tauri::command]
+pub fn detect_quest_books_in_zip(path: String) -> Result<Vec<crate::core::quest_zip::ZipQuestBook>, String> {
+    let books = crate::core::quest_zip::detect_in_zip(std::path::Path::new(&path))?;
+    if !books.is_empty() {
+        crate::logging::info(&format!(
+            "整合包 {} 检测到 {} 本任务书",
+            path,
+            books.len()
+        ));
+    }
+    Ok(books)
+}
+
+/// 解析整合包 ZIP 内的全部任务书（一个章节 = 队列里的一个内容包）。
+/// QuestBookParse.root = zip 内 quests 前缀，chapter.fileAbs = zip 内成员路径
+/// （前端写回导出时按它组 key）。
+#[tauri::command]
+pub fn parse_quest_book_zip(
+    path: String,
+) -> Result<Vec<crate::core::quest_book::QuestBookParse>, String> {
+    let books = crate::core::quest_zip::detect_in_zip(std::path::Path::new(&path))?;
+    let mut out = Vec::new();
+    for b in books {
+        let parsed = crate::core::quest_zip::parse_zip_book(std::path::Path::new(&path), &b.prefix)?;
+        crate::logging::info(&format!(
+            "解析整合包任务书 {} · {}：{} 个章节",
+            path,
+            parsed.book_title,
+            parsed.chapters.len()
+        ));
+        out.push(parsed);
+    }
+    Ok(out)
+}
+
+/// 汉化任务书 zip 导出：复制原 zip，仅替换有译文的章节成员。
+/// items 的 key 为 `<zip 内章节路径>#<指针>`。
+#[tauri::command]
+pub fn export_quest_zip(
+    source: String,
+    dest: String,
+    items: Vec<crate::core::quest_book::QuestWriteItem>,
+) -> Result<String, String> {
+    let (written, skipped, files) =
+        crate::core::quest_zip::export_zip(std::path::Path::new(&source), std::path::Path::new(&dest), &items)?;
+    crate::logging::info(&format!(
+        "导出汉化任务书 zip → {dest}（{written} 条 / {files} 文件）"
+    ));
+    let mut msg = format!("已导出 {written} 条文本到 {files} 个章节（其余成员原样保留）");
+    if skipped > 0 {
+        msg.push_str(&format!("；{skipped} 条因结构变化跳过"));
+    }
+    Ok(msg)
+}
+
+/// 任务书写回导出：把译文按指针原位写回章节 SNBT 文件（首次写回前自动备份 .zhbak）。
+/// 返回人类可读的结果说明。
+#[tauri::command]
+pub fn export_quest_book(
+    root: String,
+    items: Vec<crate::core::quest_book::QuestWriteItem>,
+) -> Result<String, String> {
+    let (written, skipped, files) =
+        crate::core::quest_book::write_back(std::path::Path::new(&root), &items)?;
+    if skipped > 0 {
+        crate::logging::warn(&format!(
+            "任务书写回完成：{written} 条写入 / {skipped} 条跳过（文件结构已变化）/{files} 个文件"
+        ));
+        Ok(format!(
+            "已写回 {written} 条文本到 {files} 个文件；{skipped} 条因文件结构变化被跳过。原文件已备份为 .zhbak"
+        ))
+    } else {
+        Ok(format!("已写回 {written} 条文本到 {files} 个文件（原文件已备份为 .zhbak）"))
+    }
+}
+
 /// 导出汉化光影包（复制原 zip + 写入 shaders/lang/zh_CN.lang）
 #[tauri::command]
 pub fn export_shader_zh(

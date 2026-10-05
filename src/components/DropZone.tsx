@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { LoadingOutlined, SunOutlined, PictureOutlined, AppstoreOutlined, CloudServerOutlined } from "@ant-design/icons";
+import { QuestIcon } from "./QuestIcon";
 import { Spin, Tooltip, Typography } from "antd";
 import { useTranslationContext } from "../i18n";
 
-export type DropKind = "mod" | "shader" | "resourcepack" | "plugin";
+export type DropKind = "mod" | "shader" | "resourcepack" | "plugin" | "quest";
 
 interface Props {
   dragOver: boolean;
@@ -42,6 +43,14 @@ const KIND_TEXT: Record<
     title: "app.clickSelectPlugin",
     dragTitle: "app.dragOverPlugin",
     desc: "app.pluginDesc",
+  },
+  quest: {
+    // 任务书没有"单文件"形态：它的入口是游戏目录 / 整合包 / ftbquests 文件夹，
+    // 点击与拖入都走同一个"选文件夹 → 逐级扫描"的路（App.addFiles 的文件夹分支）
+    icon: <QuestIcon size={56} />,
+    title: "app.clickSelectQuest",
+    dragTitle: "app.dragOverQuest",
+    desc: "app.questDesc",
   },
 };
 

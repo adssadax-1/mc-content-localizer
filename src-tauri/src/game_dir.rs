@@ -37,6 +37,9 @@ pub struct GameVersionGroup {
     pub shaderpacks: Vec<GamePackEntry>,
     /// 服务器插件（服务器根目录 plugins/ 下）
     pub plugins: Vec<GamePackEntry>,
+    /// 任务书（config/ftbquests/quests 等目录；path = quests 根目录）
+    #[serde(default)]
+    pub questbooks: Vec<GamePackEntry>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -226,6 +229,35 @@ fn scan_dir_packs_direct(
     (mods, rps, sps, pls)
 }
 
+/// 扫描一个 quests 根目录的体积（只统计 .snbt 文件，不解析内容）
+fn quest_book_size(quests_root: &std::path::Path) -> u64 {
+    fn walk_dir(dir: &std::path::Path, total: &mut u64) {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk_dir(&p, total);
+                } else if p.extension().and_then(|x| x.to_str()).map(|x| x.eq_ignore_ascii_case("snbt")).unwrap_or(false) {
+                    *total += e.metadata().map(|m| m.len()).unwrap_or(0);
+                }
+            }
+        }
+    }
+    let mut total = 0u64;
+    walk_dir(quests_root, &mut total);
+    total
+}
+
+/// 组装一个任务书扫描条目（path = quests 根目录；size = 全部 snbt 体积）
+fn quest_book_entry(quests_root: &std::path::Path) -> GamePackEntry {
+    GamePackEntry {
+        path: quests_root.to_string_lossy().to_string(),
+        file_name: crate::core::quest_book::book_display_name(quests_root),
+        size: quest_book_size(quests_root),
+        kind: "quest".to_string(),
+    }
+}
+
 /// 递归向下扫描：找到所有含 mods / resourcepacks / shaderpacks 的文件夹作为版本分组
 fn collect_groups(
     dir: &std::path::Path,
@@ -243,6 +275,22 @@ fn collect_groups(
     pls.extend(extra_pls);
     let mut rps = scan_dir_packs(&dir.join("resourcepacks"), "resourcepack");
     let mut sps = scan_dir_packs(&dir.join("shaderpacks"), "shader");
+    // 任务书：实例根目录下的 config/ftbquests/quests（FTB Quests 的固定布局）。
+    // 递归进入 config 内部时不再重复检测（否则每个子目录都会命中）；
+    // 任务书归入它实际所属的版本分组，绝不另立"版本"。
+    // depth == 0 额外容忍"直接选中任务书相关目录"：quests 根本身、其上层
+    // ftbquests/ 或 quests/ 子目录形态 —— 用于"把任务书文件夹拖进来"的导入方式。
+    let mut questbooks: Vec<GamePackEntry> = Vec::new();
+    let cfg_quests = dir.join("config/ftbquests/quests");
+    if crate::core::quest_book::is_quests_root(&cfg_quests) {
+        questbooks.push(quest_book_entry(&cfg_quests));
+    } else if depth == 0 {
+        if let Some(qr) = crate::core::quest_book::find_quests_root(dir) {
+            if qr != cfg_quests {
+                questbooks.push(quest_book_entry(&qr));
+            }
+        }
+    }
     // 仅扫描根目录：把根文件夹直接包含的 .jar/.zip 并入根分组
     // （用户直接指向 mods 等内容包文件夹时也能识别；子层级不扫描，避免把
     //   processedMods 等杂文件夹误判为版本分组）
@@ -262,7 +310,8 @@ fn collect_groups(
             pls.sort_by(cmp);
         }
     }
-    let has = !mods.is_empty() || !rps.is_empty() || !sps.is_empty() || !pls.is_empty();
+    let has =
+        !mods.is_empty() || !rps.is_empty() || !sps.is_empty() || !pls.is_empty() || !questbooks.is_empty();
 
     if has {
         let dir_name = rel.split('/').next_back().unwrap_or(rel).to_string();
@@ -277,6 +326,7 @@ fn collect_groups(
             resourcepacks: rps,
             shaderpacks: sps,
             plugins: pls,
+            questbooks,
         });
         let _ = app.emit(
             "game-scan-progress",
@@ -368,6 +418,7 @@ pub async fn scan_game_dir(app: AppHandle, root: String) -> Result<GameDirScan, 
             || !g.resourcepacks.is_empty()
             || !g.shaderpacks.is_empty()
             || !g.plugins.is_empty()
+            || !g.questbooks.is_empty()
     });
     for g in &mut groups {
         if !g.rel_path.is_empty() {
@@ -386,7 +437,9 @@ pub async fn scan_game_dir(app: AppHandle, root: String) -> Result<GameDirScan, 
 
     let packs: usize = groups
         .iter()
-        .map(|g| g.mods.len() + g.resourcepacks.len() + g.shaderpacks.len() + g.plugins.len())
+        .map(|g| {
+            g.mods.len() + g.resourcepacks.len() + g.shaderpacks.len() + g.plugins.len() + g.questbooks.len()
+        })
         .sum();
     crate::logging::info(&format!(
         "游戏目录扫描 {root}：{} 个版本分组 / {packs} 个内容包",

@@ -32,8 +32,8 @@ export interface LangEntry {
   deepGroup?: string;
 }
 
-/** 内容包类型 */
-export type PackType = "mod" | "shader" | "resourcepack" | "plugin";
+/** 内容包类型（任务书 quest 为第五类：FTB Quests 等整合包任务/剧情文本） */
+export type PackType = "mod" | "shader" | "resourcepack" | "plugin" | "quest";
 
 export interface ModFile {
   fileName: string;  modName: string;
@@ -41,6 +41,8 @@ export interface ModFile {
   version: string | null;
   loader: Loader;
   mcVersion: string | null;
+  /** 作者列表（fabric.mod.json / mods.toml / mcmod.info；供搜索） */
+  authors?: string[];
   langFormat: LangFormat;
   /** 是否自带中文（zh_cn） */
   hasZh?: boolean;
@@ -166,8 +168,8 @@ export interface TranslateContext {
   modid: string;
   mcVersion: string | null;
   loader: string;
-  /** 内容包类型：mod / shader / resourcepack / plugin（决定翻译提示词） */
-  packType: "mod" | "shader" | "resourcepack" | "plugin";
+  /** 内容包类型：mod / shader / resourcepack / plugin / quest（决定翻译提示词） */
+  packType: "mod" | "shader" | "resourcepack" | "plugin" | "quest";
   /** 用户自定义可编辑提示词段（null = 用默认） */
   customPrompt: string | null;
   userGlossary: [string, string][];
@@ -311,8 +313,22 @@ export interface Settings {
   autoLog?: boolean;
   /** AI 汉化名称缓存（key = "文件名|大小"） */
   aiNames?: Record<string, string>;
+  /** 各服务商分别保存的 Base URL（键 = provider id；修复 Base URL 串号） */
+  providerBaseUrls?: Record<string, string>;
+  /** 保存的多个自定义服务商（每条独立：名称 / Base URL / Key / 模型） */
+  customProviders?: CustomProviderEntry[];
   /** 最近打开的游戏目录（游戏目录模式快速重选） */
   recentGameDirs: string[];
+}
+
+/** 一条自定义服务商配置 */
+export interface CustomProviderEntry {
+  /** 稳定标识："custom"（旧版单一自定义迁移而来）或 "custom:<时间戳>" */
+  id: string;
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
 }
 
 /** 游戏目录模式：扫描结果 */
@@ -320,7 +336,7 @@ export interface GamePackEntry {
   path: string;
   fileName: string;
   size: number;
-  kind: 'mod' | 'shader' | 'resourcepack' | 'plugin';
+  kind: 'mod' | 'shader' | 'resourcepack' | 'plugin' | 'quest';
 }
 
 export interface GameVersionGroup {
@@ -336,12 +352,42 @@ export interface GameVersionGroup {
   shaderpacks: GamePackEntry[];
   /** 服务器插件（服务器根目录 plugins/ 下） */
   plugins: GamePackEntry[];
+  /** 任务书（config/ftbquests/quests；path = quests 根目录） */
+  questbooks: GamePackEntry[];
 }
 
 export interface GameDirScan {
   root: string;
   /** 相对路径 "" = 公共目录（排最前） */
   groups: GameVersionGroup[];
+}
+
+/** 任务书：一个章节的解析结果（一个章节 = 队列里的一个内容包） */
+export interface QuestChapter {
+  /** 相对 quests 根的路径（如 chapters/2.snbt） */
+  fileRel: string;
+  /** 绝对路径（写回目标） */
+  fileAbs: string;
+  /** 章节标题 */
+  title: string;
+  count: number;
+  entries: LangEntry[];
+}
+
+/** ZIP 内检测到的一本任务书（概要） */
+export interface ZipQuestBook {
+  prefix: string;
+  bookTitle: string;
+  chapterCount: number;
+  entryCount: number;
+}
+
+/** 任务书解析结果（config/ftbquests/quests） */
+export interface QuestBookParse {
+  /** quests 根目录（绝对路径） */
+  root: string;
+  bookTitle: string;
+  chapters: QuestChapter[];
 }
 
 /** 多线程翻译配置（实验性） */
@@ -468,12 +514,10 @@ export const PROVIDER_PRESETS: Record<string, { label: string; model: string; ba
     baseUrl: "http://127.0.0.1:8080/v1",
     website: "https://github.com/ggml-org/llama.cpp",
   },
-  custom: {
-    label: "自定义",
-    model: "",
-    baseUrl: "",
-    website: "",
-  },
+  /* 这里**刻意没有** "custom" 条目：自定义服务商不再是"一个内置预设槽位"，
+     而是用户点「添加自定义服务商」逐条创建的（custom_providers 列表）。
+     曾把 custom 留在预设表里 → 旧配置迁移出的那张列表卡与这张内置卡同时渲染，
+     界面上出现两个"自定义"（已修）。 */
 };
 
 /** 本地推理服务标识（与 Rust 侧 LOCAL_PROVIDERS 一一对应） */
@@ -500,6 +544,14 @@ export function isLocalUrl(url: string | null | undefined): boolean {
 }
 
 /**
+ * 是否为自定义服务商形态：遗留的 "custom"，或多自定义的 "custom:<id>"。
+ * 与 Rust 侧 ProviderConfig::is_custom_id 同一判据。
+ */
+export function isCustomProviderId(id: string | undefined | null): boolean {
+  return !!id && (id === "custom" || id.startsWith("custom:"));
+}
+
+/**
  * 是否为本地推理服务 —— 与 Rust 侧 `ProviderConfig::is_local` 同一套判据：
  * provider 标识命中，或**自定义**端点的地址落在本机。
  *
@@ -513,7 +565,7 @@ export function isLocalProvider(
 ): boolean {
   if (!id) return false;
   if ((LOCAL_PROVIDERS as readonly string[]).includes(id)) return true;
-  if (id === "custom") return isLocalUrl(baseUrl);
+  if (isCustomProviderId(id)) return isLocalUrl(baseUrl);
   return false;
 }
 

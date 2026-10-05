@@ -95,7 +95,16 @@
       "opened": "Log folder opened",
       "folderFailed": "Could not open the log folder",
       "sensitive": "API keys and other secrets are redacted automatically, so logs are safe to share."
-    }
+    },
+    "quest": "Quest Book",
+    "clickSelectQuest": "Pick a game dir / modpack / quest-book folder",
+    "dragOverQuest": "Drop to scan for quest books inside",
+    "questDesc": "Detects FTB Quests books (config/ftbquests): book title, chapters and quest descriptions are translated entry by entry and written back to the source files on export",
+    "questImported": "Imported {n} chapters into the quest-book tab",
+    "questImportedDup": "{n} chapters were already in the list and were skipped",
+    "questZipImported": "Imported {n} quest books from the modpack",
+    "versionPackCount": "{n} packs",
+    "directImportSection": "Directly imported packs below (not part of the game dirs above)"
   },
   "settings": {
     "title": "Settings",
@@ -137,7 +146,14 @@
       "hintOpenrouter": "OpenRouter: one key for every platform; model IDs carry vendor prefixes (e.g. google/gemini-2.5-flash)",
       "hintOllama": "Ollama: local inference, no API key needed. Run ollama serve on this machine (default port 11434), pull a model with ollama pull, then click \"Fetch models\" to pick it. Note: context length comes from the Modelfile's num_ctx (the OpenAI-compatible endpoint cannot set it). Auto batching is capped for local inference — keep 1–2 threads and proofread the output.",
       "hintLlamacpp": "llama.cpp: local inference, no auth by default. Start llama-server first (default 127.0.0.1:8080; use --ctx-size for context and --alias to give the model a readable name), then click \"Fetch models\" to pick it. Auto batching is capped for local inference — keep 1–2 threads and proofread the output.",
-      "hintCustom": "Custom: any OpenAI-compatible endpoint (Base URL + model name)"
+      "hintCustom": "Custom: any OpenAI-compatible endpoint (Base URL + model name)",
+      "addCustom": "Add custom provider",
+      "customUnnamed": "Unnamed provider",
+      "customName": "Provider name",
+      "customNamePlaceholder": "Name this custom provider (e.g. My relay)",
+      "deleteCustom": "Delete provider",
+      "deleteConfirm": "Delete this custom provider? Only this one entry is removed; other providers stay untouched.",
+      "baseUrlSlotTip": "Each provider keeps its own Base URL; editing here never touches Ollama / llama.cpp or other providers."
     },
     "params": {
       "groupTitle": "Translation Parameters",
@@ -556,14 +572,15 @@
     "tabMod": "Mods",
     "tabShader": "Shaders",
     "tabResourcepack": "Resource packs",
-    "tabPlugin": "Plugins"
+    "tabPlugin": "Plugins",
+    "tabQuest": "Quest Book"
   },
   "gamedir": {
     "open": "Open game directory",
     "scanHint": "Pick a .minecraft folder (or any game / version folder) — mods, resourcepacks and shaderpacks are scanned recursively",
     "cancel": "Cancel scan",
     "publicDir": "Common directory",
-    "counts": "Mods {mods} · RP {rp} · Shaders {sp} · Plugins {plug}",
+    "counts": "Mods {mods} · Resource packs {rp} · Shaders {sp} · Plugins {plug} · Quests {quest}",
     "search": "Search packs",
     "addToQueue": "Parse & add to list ({n})",
     "addToQueueHint": "After adding, switch to \"Free import\" to start translating; duplicate packs across versions reuse translations",
@@ -596,7 +613,8 @@
     "rescanTip": "Ignore the cache and rescan the current game directory",
     "addToQueueTip": "After adding, switches to \"Free import\"; duplicates across versions reuse translations",
     "scannedAt": "Scanned at {time}",
-    "cacheTag": "Cached"
+    "cacheTag": "Cached",
+    "kindQuest": "Quest Book"
   },
   "deepGroup": {
     "message": "Messages",

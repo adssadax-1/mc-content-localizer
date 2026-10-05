@@ -28,11 +28,27 @@ import type {
   ClearResult,
   GameDirScan,
   LogEntry,
+  QuestBookParse,
+  ZipQuestBook,
 } from "./types";
 
 export const api = {
   parseJar: (path: string) => invoke<ModFile>("parse_jar", { path }),
   parsePluginJar: (path: string) => invoke<PluginFile>("parse_plugin_jar", { path }),
+  /** 任务书（FTB Quests）：path 为 quests 根目录（config/ftbquests/quests） */
+  parseQuestBook: (path: string) => invoke<QuestBookParse>("parse_quest_book", { path }),
+  /** 任务书写回导出：译文按指针原位写回章节 SNBT（首次写回前自动备份 .zhbak） */
+  exportQuestBook: (root: string, items: { key: string; translation: string }[]) =>
+    invoke<string>("export_quest_book", { root, items }),
+  /** 目录是否应直接作为任务书导入（config / ftbquests / quests）；null = 走原有路由 */
+  detectQuestRoot: (path: string) => invoke<string | null>("detect_quest_root", { path }),
+  /** 检测整合包 zip 内的任务书（可多本）；空数组 = 无任务书，按原有逻辑导入 */
+  detectQuestBooksInZip: (path: string) => invoke<ZipQuestBook[]>("detect_quest_books_in_zip", { path }),
+  /** 解析整合包 zip 内的全部任务书（每章一个内容包） */
+  parseQuestBookZip: (path: string) => invoke<QuestBookParse[]>("parse_quest_book_zip", { path }),
+  /** 汉化任务书 zip 导出：复制原 zip 仅替换有译文的章节成员 */
+  exportQuestZip: (source: string, dest: string, items: { key: string; translation: string }[]) =>
+    invoke<string>("export_quest_zip", { source, dest, items }),
 
   runTranslation: (
     config: ProviderConfig,

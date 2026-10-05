@@ -282,6 +282,22 @@ const EDITABLE_RESOURCE_DEFAULT: &str = r#"你是一位《我的世界》(Minecr
 资源包信息：
 - 资源包名：{mod_name}"#;
 
+/// 任务书可编辑段（默认；用户可自定义覆盖）
+const EDITABLE_QUEST_DEFAULT: &str = r#"你是一位资深的《我的世界》(Minecraft) 整合包任务书（Quest Book，FTB Quests）本地化翻译专家，任务是把整合包「{mod_name}」的任务书文本从英文翻译成简体中文。
+
+这些文本是玩家在任务书界面读到的内容：任务标题、副标题、多行描述（剧情、指引、提示）、章节分组名、图片悬停提示等，文风通常是整合包作者写给玩家的"第二人称叙事 + 操作指引"。
+
+翻译要求：
+1. 叙事文本（剧情、世界观、角色台词）要译出讲故事的味道，符合整合包整体氛围；指引文本（怎么完成任务、去哪里、需要什么物品）要准确清晰、步骤感明确。
+2. 物品、方块、生物、结构名称优先使用 Minecraft 官方中文译名与社区通用译名（如要塞 Fortress、末影之眼 Eye of Ender）。
+3. 严格保留任务书格式标记：&0-&f/&k-&o/&r 颜色与格式码、{@pagebreak} 分页标记、<br> 等，位置与数量都不能变。
+4. 保留原文的换行结构：一行一条描述，不要把多行合并成一段。
+5. 章节与任务标题简短有力（受任务书界面宽度限制），描述可适当展开。
+6. 同一专有名词全文译名一致。
+
+任务书信息：
+- 所属整合包/任务书：{mod_name}"#;
+
 /// 核心段（系统保留，不可修改；所有类型共用，含自动注入的术语表）
 const CORE_RULES_TEMPLATE: &str = r#"技术规则（必须遵守）：
 - 保持所有占位符与格式码原样：%s、%1$s、%d、%f、%%、\n、\t、§ 后跟颜色/格式码（如 §a）等，绝不能增删改，也不能改变 %1$s 这类带编号占位符的顺序。
@@ -311,6 +327,7 @@ pub fn prompt_template(pack_type: &str) -> PromptTemplate {
         "shader" => EDITABLE_SHADER_DEFAULT.to_string(),
         "resourcepack" => EDITABLE_RESOURCE_DEFAULT.to_string(),
         "plugin" => EDITABLE_PLUGIN_DEFAULT.to_string(),
+        "quest" => EDITABLE_QUEST_DEFAULT.to_string(),
         _ => EDITABLE_MOD_DEFAULT.to_string(),
     };
     PromptTemplate {
@@ -337,6 +354,7 @@ fn build_translate_system(ctx: &TranslateContext, glossary: &[(String, String)])
         "shader" => EDITABLE_SHADER_DEFAULT,
         "resourcepack" => EDITABLE_RESOURCE_DEFAULT,
         "plugin" => EDITABLE_PLUGIN_DEFAULT,
+        "quest" => EDITABLE_QUEST_DEFAULT,
         _ => EDITABLE_MOD_DEFAULT,
     };
     let editable = match ctx.custom_prompt.as_deref() {
