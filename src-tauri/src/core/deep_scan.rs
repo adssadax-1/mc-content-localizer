@@ -135,7 +135,10 @@ fn is_source_or_zh_locale(code: &str) -> bool {
 }
 
 /// 分组判定：语种 → 代码内嵌 → 库文本 → 路径 → 普通/消息文本
-fn group_key(file: &str, json_path: &str, text: &str, ctx: &ScanCtx) -> &'static str {
+///
+/// `allow_labels` ＝ 单字标签闸门（见 [`class_has_label_prefix`]）；**只对 `const:` 条目有意义**，
+/// 其余来源一律传 `true`。标签前缀不受闸门限制（它本身就是"这个类在做 UI"的证据）。
+fn group_key(file: &str, json_path: &str, text: &str, ctx: &ScanCtx, allow_labels: bool) -> &'static str {
     if ctx.rules.only_source_locale {
         if let Some(code) = locale_of(file) {
             if !is_source_or_zh_locale(&code) {
@@ -144,9 +147,16 @@ fn group_key(file: &str, json_path: &str, text: &str, ctx: &ScanCtx) -> &'static
         }
     }
     if json_path.starts_with("const:") {
-        // 代码内嵌：开启「需可见标记」时，像消息的归入消息组（默认勾选），其余归代码组
+        // 代码内嵌：开启「需可见标记」时，像消息的归入消息组（默认勾选），其余归代码组。
+        // 单词型标签（`Armour` / `Shown`）与标签前缀（`Scope: `）本身就是玩家可见的按钮
+        // 文本，与「成句」「带颜色码」同级看待 —— 否则它们会落进默认不勾的
+        // 「代码内嵌·其他」，扫到了也等于没翻，界面照样是英文。
         if ctx.rules.class_needs_marker {
-            return if has_visible_marker(text) || looks_like_sentence(text) {
+            return if has_visible_marker(text)
+                || looks_like_sentence(text)
+                || (allow_labels && looks_like_label(text))
+                || is_label_prefix(text, json_path)
+            {
                 "message"
             } else {
                 "class_text"
@@ -195,48 +205,103 @@ fn looks_like_sentence(t: &str) -> bool {
     t.chars().count() >= 8 && t.contains(' ') && t.split_whitespace().count() >= 2
 }
 
-/// 解析 .class 常量池中的 CONSTANT_Utf8 字符串（插件硬编码文本的主要来源）。
+/// 形态上是界面标签、实际是数据/格式名的词，一律不碰（宁可漏翻不可错翻）
+const RESERVED_LABELS: &[&str] = &[
+    "True", "False", "Null", "None", "Yes", "No", "On", "Off", "Auto", "Default", "Nan", "Inf",
+    "Utf", "Utf8", "Ascii", "Json", "Yaml", "Xml", "Csv", "Md5", "Sha1", "Sha256",
+];
+
+/// 单词型 UI 标签：`Armour` / `Shown` / `Hidden` / `Glint` / `Helmet` / `Nametags` ——
+/// 按钮文字与枚举显示名的主力形态。
+///
+/// 它们没有空格、没有颜色码也没有占位符，靠原有打分最多只拿得到「首字母大写」那 1 分，
+/// 被 `score >= 2` 的门槛**整条丢掉** —— 注意这不是解析失败，是压根没进条目列表。
+/// 典型症状就是「浮窗都汉化了、按钮还是英文」：浮窗文本成句能过门槛，按钮是单个词过不了；
+/// 而按钮文字又常常由 `literal(label).append(literal("Shown"))` 拼出来，两半都是短词。
+///
+/// 判定刻意收紧成「Title 词」这一种形态：
+/// - **纯 ASCII 字母** —— 排掉 `Ljava/…`、`a.b.c` 这类描述符与键名；
+/// - **首字母大写且含小写字母** —— 排掉全大写常量（`ENABLED` / `ALL`，多是枚举名或字段名）
+///   与全小写数据串（`elytra` / `status`）；
+/// - **3~24 字** —— 排掉 `X`、`✔` 这类符号与超长文本。
+///
+/// 「首字母大写」这一条同时是最关键的安全阀：布尔与空值字面量是 `"true"` / `"false"` /
+/// `"null"` / `"on"` / `"off"`，**全是小写**，天然进不来。它们在常量池里与按钮标签长得
+/// 一模一样（都是只被 `CONSTANT_String` 引用的 Utf8），但一旦被改写就会让
+/// `"true".equals(x)` 这类比较静默失配 —— 宁可漏翻不可错翻。
+fn looks_like_label(t: &str) -> bool {
+    let t = t.trim();
+    let n = t.chars().count();
+    if !(3..=24).contains(&n) || !t.chars().all(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    if !t.chars().next().map_or(false, |c| c.is_ascii_uppercase()) {
+        return false;
+    }
+    if !t.chars().any(|c| c.is_ascii_lowercase()) {
+        return false;
+    }
+    !RESERVED_LABELS.iter().any(|w| t.eq_ignore_ascii_case(w))
+}
+
+/// 标签前缀的**形态**判据：`Scope: ` / `Armour: ` —— 去尾空格、剥掉尾部冒号后若是个标签词，
+/// 就按标签处理。（是否开口子由调用方按来源决定，见 [`is_label_prefix`]。）
+fn looks_like_prefix(t: &str) -> bool {
+    let head = t.trim_end().trim_end_matches(':').trim_end();
+    head.len() < t.len() && looks_like_label(head)
+}
+
+/// 标签前缀：`Scope: ` / `Armour: ` —— 形态像键名，其实是拼在值前面的显示文本
+/// （`literal("Scope: ").append(literal("Self"))` → 界面上的「Scope: Self」）。
+/// **只在代码内嵌文本上开这个口子**，常规 JSON 的「含冒号即键名」判定一字不动。
+fn is_label_prefix(t: &str, json_path: &str) -> bool {
+    json_path.starts_with("const:") && looks_like_prefix(t)
+}
+
+/// 单字标签的**放行闸门**：同一个 `.class` 里必须还存在 `Xxx: ` 形式的标签前缀。
+///
+/// 理由（实测，13 个真模组）：去掉闸门后 `Armour`/`Shown` 这类按钮词能过关，但
+/// **NBT / 数据键会同批通关** —— `Name`×20、`SkullOwner`×16、`Color`×13、`Lore`×13、
+/// `SpawnData`、`Patterns`、`EntityTag`、`Enchantments`… 合计 +930 条，单模组最多 +736。
+/// 它们全都通过了安全过滤，也就是**真会被改写**，一旦翻成中文，
+/// `stack.getTag().getString("Name")` 这类查表就会静默失配。
+///
+/// 三种收敛手段的实测对比（同一批模组 + hiddenarmour 回归）：
+/// - NBT 键 denylist（手写 192 词）→ 只砍 **27%**，尾巴太长，不划算；
+/// - 「同文件需存在句子/标记文本」→ 砍 **0%**，数据类里同样有成句文本，无区分度；
+/// - **本闸门** → 砍 **95%（888/930）**，且 hiddenarmour 两个 UI 类的标签 **100% 保住**。
+///
+/// 另一条本可更准的路是"看调用点"（该字面量是否被 `Component.literal(...)` 消费），
+/// 但 Fabric 产物里是 **intermediary 名**（`net/minecraft/class_XXXX`），按名字匹配
+/// 找不到 `Component`，故不可行。
+///
+/// 语义上也说得通：真实的 GUI 标签总是成组出现（一个 `Armour: ` 前缀拖着一个
+/// `Shown`/`Hidden` 值）；数据键则从不带这种前缀。付出的代价是"前缀与标签分处两个类"
+/// 的模组会漏翻这几个词 —— 属于「宁可漏翻不可错翻」。
+fn class_has_label_prefix(items: &[(usize, String)]) -> bool {
+    items.iter().any(|(_, s)| looks_like_prefix(s))
+}
+
+/// 解析 .class 常量池中**可安全改写**的 `CONSTANT_Utf8` 文本（代码内嵌文本的来源）。
 /// 只读常量池，不做类加载；格式参考 JVM 规范第 4 章。
-fn extract_class_strings(buf: &[u8]) -> Vec<String> {
-    let mut out = Vec::new();
-    if buf.len() < 10 || buf[0..4] != [0xCA, 0xFE, 0xBA, 0xBE] {
-        return out;
-    }
-    let mut i = 8usize; // 跳过 magic(4) + minor(2) + major(2)
-    if i + 2 > buf.len() {
-        return out;
-    }
-    let count = u16::from_be_bytes([buf[i], buf[i + 1]]) as usize;
-    i += 2;
-    let mut slot = 1usize;
-    while slot < count && i < buf.len() {
-        let tag = buf[i];
-        i += 1;
-        match tag {
-            1 => {
-                // CONSTANT_Utf8：u16 长度 + 修改版 UTF-8 字节
-                if i + 2 > buf.len() {
-                    break;
-                }
-                let len = u16::from_be_bytes([buf[i], buf[i + 1]]) as usize;
-                i += 2;
-                if i + len > buf.len() {
-                    break;
-                }
-                out.push(String::from_utf8_lossy(&buf[i..i + len]).into_owned());
-                i += len;
-                slot += 1;
-            }
-            5 | 6 => i += 8, // long / double 占两个常量槽
-            7 | 8 | 16 | 19 | 20 => i += 2,
-            15 => i += 3,
-            _ => i += 4, // 9/10/11/12/17/18 等引用型
-        }
-        if tag != 5 && tag != 6 {
-            slot += 1;
-        }
-    }
-    out
+///
+/// 返回 `(Utf8 序号, 文本)`，序号与「池内第几个 Utf8」一一对应。
+///
+/// 实现放在 `core::class_pool`，与**导出侧的字节码改写**共用同一套解析 ——
+/// 这是硬要求：扫描时看到的"第 N 个 Utf8"必须与改写时定位的那个是同一个，
+/// 否则条目键里的 `#const:N` 就会指到别的常量上去。两边各写一遍解析必然漂移。
+///
+/// 顺带修掉旧实现的一个计数 bug：旧 walk 里 Utf8 每项被计了**两次**槽位、
+/// `long`/`double` 又完全不占槽，于是循环条件提前满足、半个常量池读不到
+/// （实测 `HiddenArmourClient.class` 只扫出 62 个 Utf8，实际有 101 个）。
+///
+/// 同时把"只被 `CONSTANT_String` 引用、且不被当作名字"这一条**提到扫描侧**：
+/// JVM 内部名（`Code` / `LineNumberTable` / `SourceFile` / `StackMapTable` …）在池里
+/// 同样是 Utf8，形态与按钮标签一模一样，能过打分门槛混进列表，却注定在改写时被
+/// 按名字拒绝。让用户为这些永远落不了地的条目花 API 钱，正是"已翻译覆盖率"虚高的
+/// 来源之一。过滤条件与 [`super::class_pool::ClassPool::safe_literals`] 完全一致。
+fn extract_class_strings(buf: &[u8]) -> Vec<(usize, String)> {
+    super::class_pool::scan_safe_strings(buf)
 }
 
 fn is_binary(name: &str) -> bool {
@@ -251,7 +316,9 @@ fn is_binary(name: &str) -> bool {
 
 /// 判定一条文本是否可翻译，返回分数（< 阈值不采用）。
 /// 先按规则做剔除（SQL / 类型描述符 / 日志句 / 标识符 / 自定义正则），再过原有黑名单与打分。
-fn score_text(text: &str, json_path: &str, ctx: &ScanCtx) -> Option<i32> {
+///
+/// `allow_labels` ＝ 单字标签闸门，见 [`class_has_label_prefix`]。
+fn score_text(text: &str, json_path: &str, ctx: &ScanCtx, allow_labels: bool) -> Option<i32> {
     let t = text.trim();
     if t.is_empty() {
         return None;
@@ -265,6 +332,11 @@ fn score_text(text: &str, json_path: &str, ctx: &ScanCtx) -> Option<i32> {
         return None;
     }
     let has_marker = has_visible_marker(t);
+    // 代码内嵌的单词型标签 / 标签前缀，先算出来：它们既要豁免「含冒号即键名」的误杀，
+    // 又要在下面补分。
+    let is_class = json_path.starts_with("const:");
+    let class_label = is_class && allow_labels && looks_like_label(t);
+    let class_label_prefix = is_class && is_label_prefix(t, json_path);
     // 降噪规则（有可见标记的文本通常面向玩家，不做丢弃）
     if !has_marker {
         if ctx.rules.drop_sql && looks_like_sql(t) {
@@ -276,7 +348,8 @@ fn score_text(text: &str, json_path: &str, ctx: &ScanCtx) -> Option<i32> {
         if ctx.rules.drop_log && looks_like_log_line(t) {
             return None;
         }
-        if ctx.rules.drop_ident && looks_like_identifier(t) {
+        // 标签前缀（`Scope: `）会被 looks_like_identifier 的「含冒号即键名」误杀
+        if ctx.rules.drop_ident && looks_like_identifier(t) && !class_label_prefix {
             return None;
         }
     }
@@ -327,6 +400,12 @@ fn score_text(text: &str, json_path: &str, ctx: &ScanCtx) -> Option<i32> {
     }
     if t.contains('%') || t.contains('§') {
         score += 1;
+    }
+    // 单词型标签没有空格也没有标记，原本只拿得到「首字母大写」那 1 分，到不了门槛。
+    // 补 2 分让它进来；**只对代码内嵌条目生效**，常规 JSON / 语言文件 / 配置文件的分词
+    // 与打分一个字节都不动。
+    if class_label || class_label_prefix {
+        score += 2;
     }
     if score >= 2 {
         Some(score)
@@ -415,10 +494,34 @@ fn looks_like_identifier(t: &str) -> bool {
 }
 
 fn consider(text: &str, json_path: &str, file: &str, ctx: &ScanCtx, out: &mut Vec<ScanItem>) {
+    // 非 .class 来源没有闸门概念（单字标签规则本身就只对 const: 生效）
+    consider_inner(text, json_path, file, ctx, true, out);
+}
+
+/// `.class` 常量池条目的入口：`allow_labels` 由该类的 [`class_has_label_prefix`] 决定。
+fn consider_class(
+    text: &str,
+    json_path: &str,
+    file: &str,
+    ctx: &ScanCtx,
+    allow_labels: bool,
+    out: &mut Vec<ScanItem>,
+) {
+    consider_inner(text, json_path, file, ctx, allow_labels, out);
+}
+
+fn consider_inner(
+    text: &str,
+    json_path: &str,
+    file: &str,
+    ctx: &ScanCtx,
+    allow_labels: bool,
+    out: &mut Vec<ScanItem>,
+) {
     let trimmed = text.trim();
     // score_text 的分值只用于「是否保留」门槛（>=2），本身不参与后续排序/分组
-    if score_text(trimmed, json_path, ctx).is_some() {
-        let group = group_key(file, json_path, trimmed, ctx);
+    if score_text(trimmed, json_path, ctx, allow_labels).is_some() {
+        let group = group_key(file, json_path, trimmed, ctx, allow_labels);
         out.push(ScanItem {
             source: trimmed.to_string(),
             file: file.to_string(),
@@ -591,8 +694,11 @@ fn scan_zip<R: Read + Seek>(
             }
             let mut buf = Vec::new();
             if f.read_to_end(&mut buf).is_ok() {
-                for (i, s) in extract_class_strings(&buf).into_iter().enumerate() {
-                    consider(&s, &format!("const:{}", i), &name, ctx, out);
+                let strings = extract_class_strings(&buf);
+                // 单字标签闸门：先看这个类有没有 `Xxx: ` 前缀，再决定要不要放行裸标签
+                let allow_labels = class_has_label_prefix(&strings);
+                for (i, s) in strings {
+                    consider_class(&s, &format!("const:{}", i), &name, ctx, allow_labels, out);
                 }
             }
             continue;
@@ -860,16 +966,10 @@ step one
     }
 
     /// 构造一个极简 .class：仅含常量池两个 Utf8 字符串（解析器读到常量池结束即停）
+    /// 构造极简 .class 夹具。交给 `class_pool` 统一实现 —— 扫描侧现在只认
+    /// 「被 CONSTANT_String 引用且不被当作名字」的 Utf8，手搓裸常量池会一个都扫不出来。
     fn fake_class(strings: &[&str]) -> Vec<u8> {
-        let mut b = vec![0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x34];
-        b.extend_from_slice(&((strings.len() + 1) as u16).to_be_bytes());
-        for s in strings {
-            b.push(1); // CONSTANT_Utf8
-            let bytes = s.as_bytes();
-            b.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
-            b.extend_from_slice(bytes);
-        }
-        b
+        super::super::class_pool::fake_class(strings)
     }
 
     #[test]
@@ -1023,5 +1123,182 @@ other=Bring me 3 apples
         assert!(inc[0].contains("village elder"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 单词型按钮标签（`Armour` / `Shown` / `Scope: `）过去被打分门槛整条丢掉 ——
+    /// 表现为「浮窗都汉化了、按钮还是英文」。此测试把判据、打分与分组一起钉住。
+    #[test]
+    fn class_label_words_are_scanned_and_default_checked() {
+        // ① 形态判据：只有「Title 词」才算标签
+        for ok in ["Armour", "Shown", "Hidden", "Glint", "Nametags", "Elytra", "All"] {
+            assert!(looks_like_label(ok), "「{ok}」应判为标签");
+        }
+        // 全大写常量（多是枚举名 / 字段名）、全小写数据串、描述符、键名、纯符号一律不是
+        for no in [
+            "ENABLED", "DISABLED", "ALL", "true", "false", "off", "elytra", "status",
+            "Ljava/lang/Object;", "key.hiddenarmour.toggle", "a.b.c", "X", "✔", "a b",
+        ] {
+            assert!(!looks_like_label(no), "「{no}」不应判为标签");
+        }
+        // 保留词：形态像标签，但常被拿去和 equals / valueOf 比较，宁可漏翻
+        assert!(!looks_like_label("True"));
+        assert!(!looks_like_label("Null"));
+        // 已知边界：不含斜杠的 TitleCase 类名（理论上会命中）。实际常量池里的类名都带
+        // 包路径（`haage/hiddenarmour/...`），命不中；这是刻意接受的极小过匹配面。
+        assert!(looks_like_label("HiddenArmourScreen"));
+
+        // ② 标签前缀只在代码内嵌条目上开口子
+        assert!(is_label_prefix("Scope: ", "const:344"));
+        assert!(is_label_prefix("Armour: ", "const:309"));
+        assert!(!is_label_prefix("Scope: ", "button.armour"), "非 const 路径不开口子");
+        assert!(!is_label_prefix("minecraft:", "const:1"), "全小写 → 不是标签");
+        assert!(!is_label_prefix("Scope", "const:344"), "没有冒号可剥");
+
+        // ③ 打分：过去只拿 1 分被丢，现在补 2 分能过门槛；**非 const 路径一字不改**
+        let ctx = ScanCtx::new(&DeepScanRules::recommended(true));
+        for s in ["Armour", "Shown", "Scope: "] {
+            assert!(
+                score_text(s, "const:344", &ctx, true).is_some(),
+                "「{s}」应被保留"
+            );
+            assert!(
+                score_text(s, "button.armour", &ctx, true).is_none(),
+                "「{s}」在常规 JSON 路径下不应被放行（新规则只作用于 const: 条目）"
+            );
+        }
+
+        // ③b 闸门：裸标签必须在「同类里还有 Xxx: 前缀」时才放行；**前缀本身不受闸门限制**
+        for lab in ["Armour", "Shown"] {
+            assert!(
+                score_text(lab, "const:344", &ctx, false).is_none(),
+                "「{lab}」在无前缀的 class 里不应被放行（否则 NBT 键会成批通关）"
+            );
+        }
+        assert!(
+            score_text("Scope: ", "const:344", &ctx, false).is_some(),
+            "标签前缀是『这个类在做 UI』的证据，自己不受闸门限制"
+        );
+        assert!(class_has_label_prefix(&[(1, "Armour".to_string()), (2, "Scope: ".to_string())]));
+        assert!(!class_has_label_prefix(&[(1, "Name".to_string()), (2, "Lore".to_string())]));
+
+        // ④ 分组：标签与标签前缀都归「消息文本」（默认勾选），
+        //    否则会落进默认不勾的「代码内嵌·其他」，扫到了也等于没翻
+        assert_eq!(
+            group_key("HiddenArmourScreen.class", "const:309", "Armour", &ctx, true),
+            "message"
+        );
+        assert_eq!(
+            group_key("HiddenArmourScreen.class", "const:344", "Scope: ", &ctx, true),
+            "message"
+        );
+        assert_eq!(
+            group_key("HiddenArmourScreen.class", "const:1", "Ljava/lang/Object;", &ctx, true),
+            "class_text"
+        );
+        assert_eq!(
+            group_key("SomeData.class", "const:309", "Armour", &ctx, false),
+            "class_text",
+            "闸门关闭时裸标签不得进默认勾选组"
+        );
+    }
+
+    /// 拿**真模组目录**把「标签闸门」收紧前后的条目数 A/B 出来（默认静默跳过）。
+    ///
+    /// 设 `MCL_MODS_PROBE` = 存放若干 jar 的目录，可选 `MCL_MODS_PROBE_OUT` = 落一份文本，
+    /// 因为 libtest 吞 println、`mcl.sh test` 又不透传 `--nocapture`。
+    ///
+    /// 口径说明：两侧都只统计 **`.class` 常量池里被保留的条目**（`const:N`），
+    /// 左边＝不装闸门（`allow_labels = true`，即本轮之前的行为），右边＝装了闸门。
+    /// 期望：右侧显著更少，且真 UI 类（同类带 `Xxx: ` 前缀）的标签一个不丢。
+    #[test]
+    fn probes_real_mods_label_gate_when_requested() {
+        let Ok(dir) = std::env::var("MCL_MODS_PROBE") else {
+            return; // 未设环境变量 → 静默跳过
+        };
+        let out_path = std::env::var("MCL_MODS_PROBE_OUT").ok();
+        let mut lines: Vec<String> = Vec::new();
+
+        let ctx = ScanCtx::new(&DeepScanRules::recommended(true));
+        let mut jars: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .expect("无法读取模组目录")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().map_or(false, |x| x.eq_ignore_ascii_case("jar")))
+            .collect();
+        jars.sort();
+
+        let (mut sum_open, mut sum_gated) = (0usize, 0usize);
+        let mut dropped_words: std::collections::HashMap<String, usize> = Default::default();
+        let mut kept_words: std::collections::HashMap<String, usize> = Default::default();
+
+        for jar in &jars {
+            let Ok(f) = std::fs::File::open(jar) else { continue };
+            let Ok(mut z) = zip::ZipArchive::new(f) else { continue };
+            let (mut n_open, mut n_gated) = (0usize, 0usize);
+            for i in 0..z.len() {
+                let Ok(mut e) = z.by_index(i) else { continue };
+                let name = e.name().to_string();
+                if !name.to_lowercase().ends_with(".class") {
+                    continue;
+                }
+                let mut buf = Vec::new();
+                if std::io::Read::read_to_end(&mut e, &mut buf).is_err() {
+                    continue;
+                }
+                let strings = extract_class_strings(&buf);
+                let allow = class_has_label_prefix(&strings);
+                for (ord, s) in &strings {
+                    let jp = format!("const:{}", ord);
+                    let open = score_text(s, &jp, &ctx, true).is_some();
+                    let gated = score_text(s, &jp, &ctx, false).is_some();
+                    if open {
+                        n_open += 1;
+                    }
+                    if gated {
+                        n_gated += 1;
+                    }
+                    if open && !gated {
+                        *dropped_words.entry(s.clone()).or_default() += 1;
+                    }
+                    if allow && looks_like_label(s) {
+                        *kept_words.entry(s.clone()).or_default() += 1;
+                    }
+                }
+            }
+            sum_open += n_open;
+            sum_gated += n_gated;
+            lines.push(format!(
+                "{:34} 不装闸门 {:>5}  装闸门 {:>5}  砍掉 {:>5}",
+                jar.file_name().unwrap_or_default().to_string_lossy(),
+                n_open,
+                n_gated,
+                n_open as i64 - n_gated as i64
+            ));
+        }
+
+        lines.push(format!(
+            "\n合计（{} 个模组）：不装闸门 {} → 装闸门 {}（砍掉 {}）",
+            jars.len(),
+            sum_open,
+            sum_gated,
+            sum_open as i64 - sum_gated as i64
+        ));
+        let mut dropped: Vec<_> = dropped_words.into_iter().collect();
+        dropped.sort_by(|a, b| b.1.cmp(&a.1));
+        lines.push("\n被闸门砍掉的，出现最多的（前 25）：".into());
+        for (w, c) in dropped.iter().take(25) {
+            lines.push(format!("  {c:>5}×  {w:?}"));
+        }
+        lines.push("\n带前缀的类里被放行的标签（前 25）：".into());
+        let mut kept: Vec<_> = kept_words.into_iter().collect();
+        kept.sort_by(|a, b| b.1.cmp(&a.1));
+        for (w, c) in kept.iter().take(25) {
+            lines.push(format!("  {c:>5}×  {w:?}"));
+        }
+
+        let text = lines.join("\n");
+        if let Some(p) = out_path {
+            let _ = std::fs::write(p, &text);
+        }
+        println!("{text}");
     }
 }

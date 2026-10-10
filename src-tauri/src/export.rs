@@ -186,12 +186,17 @@ pub fn export_resource_pack(
 ///
 /// 复制原 jar 全部内容，在 assets/<modid>/lang/ 下新增 zh_cn.json / zh_cn.lang，
 /// 若原 jar 已有同名文件则替换。
+///
+/// `rewrite_class` = true 时额外处理**代码内嵌文本**：写死在 `.class` 常量池里的
+/// 字面量（`ldc "Player Render"` 这类）只有把字节改掉才能汉化，语言文件和资源包
+/// 都够不着它。默认 false —— 不开启时产物与历史版本逐字节一致。
 pub fn export_mod_jar(
     source: &Path,
     dest: &Path,
     modid: &str,
     entries: &[LangEntry],
     lang_format: LangFormat,
+    rewrite_class: bool,
 ) -> Result<String, String> {
     let translated: Vec<&LangEntry> = entries
         .iter()
@@ -201,7 +206,7 @@ pub fn export_mod_jar(
         return Err("没有可导出的内容：当前勾选项中没有\"已翻译完成\"的条目。请确认：① 已勾选要导出的条目；② 这些条目的翻译状态不是红色（失败）。".to_string());
     }
 
-    let lang_path = format!(
+    let lang_rel = format!(
         "assets/{}/lang/zh_cn.{}",
         modid,
         if lang_format == LangFormat::LegacyLang {
@@ -211,16 +216,35 @@ pub fn export_mod_jar(
         }
     );
 
-    // 硬编码条目：按 (文件路径 -> [(json路径, 译文)]) 组织，写 jar 时替换原 json 值
+    // 硬编码条目分两条通道：
+    //   · 数据文件里的文本（json/toml/…）→ 按 json 路径替换原值；
+    //   · **代码内嵌文本**（.class 常量池）→ 走字节码改写，键里的
+    //     `const:N` 只是个记号，真正靠"原文内容"去常量池里匹配。
+    // 两者判据就是宿主文件后缀：写在代码里的只有改字节码一途，
+    // 写在数据文件里的本来就该直接改文件。
     let mut hardcoded_changes: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut class_tables: HashMap<String, HashMap<Vec<u8>, String>> = HashMap::new();
     for e in translated.iter() {
         if !e.hardcoded {
+            continue;
+        }
+        let Some(tr) = e.translation.clone() else {
+            continue;
+        };
+        if e.file_path.to_lowercase().ends_with(".class") {
+            if rewrite_class {
+                // 用修改版 UTF-8 编码去匹配常量池里的原始字节：
+                // BMP 无 NUL 时与标准 UTF-8 一致，非 BMP 才会分叉（那时本来就匹配不上）。
+                class_tables
+                    .entry(e.file_path.clone())
+                    .or_default()
+                    .insert(crate::core::class_pool::mutf8_encode(&e.source), tr);
+            }
             continue;
         }
         let Some((path, json_path)) = e.key.split_once('#') else {
             continue;
         };
-        let tr = e.translation.clone().unwrap();
         hardcoded_changes
             .entry(path.to_string())
             .or_default()
@@ -229,6 +253,15 @@ pub fn export_mod_jar(
 
     let src_file = File::open(source).map_err(|e| format!("无法打开源 jar: {}", e))?;
     let mut src = zip::ZipArchive::new(src_file).map_err(|e| e.to_string())?;
+    // 扫描侧存的是**归一化后**的路径（"整个内容套一层文件夹"的 jar 会剥掉公共前缀），
+    // 而导出侧此前比对的是 zip 里的原始名字 → 前缀一非空就永不命中，
+    // 该 jar 的全部硬编码条目静默失效。这里用同一套口径（core::pack）对齐两边。
+    let all_names: Vec<String> = (0..src.len())
+        .filter_map(|i| src.by_index(i).ok().map(|f| f.name().to_string()))
+        .collect();
+    let root_prefix = crate::core::pack::common_root_prefix(&all_names);
+    let lang_path = format!("{}{}", root_prefix.as_deref().unwrap_or(""), lang_rel);
+
     if let Some(parent) = dest.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -241,19 +274,43 @@ pub fn export_mod_jar(
     })?;
     let mut out = zip::ZipWriter::new(dest_file);
 
+    let mut cls_rewritten = 0usize;
+    let mut cls_shadowed = 0usize;
+    let mut cls_unmatched = 0usize;
+
     // 复制原 jar 全部条目（跳过将写入的 zh_cn，防止重复）
     for i in 0..src.len() {
         let mut f = src.by_index(i).map_err(|e| e.to_string())?;
-        let name = f.name().to_string();
-        if name == lang_path {
+        let raw_name = f.name().to_string();
+        let name = crate::core::pack::strip_root(&raw_name, root_prefix.as_deref());
+        if name == lang_rel {
             continue;
         }
         let opts = SimpleFileOptions::default().compression_method(f.compression());
-        out.start_file(name.clone(), opts).map_err(|e| e.to_string())?;
-        // 硬编码目标 json：应用替换后写回
-        if let Some(changes) = hardcoded_changes.get(&name) {
-            let mut buf = Vec::new();
-            f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+        out.start_file(raw_name, opts).map_err(|e| e.to_string())?;
+        let class_hit = class_tables.get(&name);
+        let json_hit = hardcoded_changes.get(&name);
+
+        if class_hit.is_none() && json_hit.is_none() {
+            std::io::copy(&mut f, &mut out).map_err(|e| e.to_string())?;
+            continue;
+        }
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+
+        // ① 代码内嵌文本：字节码常量池改写。任何一步不放心就写回原字节，
+        //    绝不产出一个"半改"的 class（那会让游戏 ClassFormatError）。
+        if let Some(table) = class_hit {
+            let (new_bytes, stat) = crate::core::class_pool::apply_translations(&buf, table);
+            cls_rewritten += stat.rewritten;
+            cls_shadowed += stat.shadowed;
+            cls_unmatched += stat.unmatched;
+            out.write_all(&new_bytes).map_err(|e| e.to_string())?;
+            continue;
+        }
+
+        // ② 数据文件里的硬编码文本：JSON 路径替换
+        if let Some(changes) = json_hit {
             if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&buf) {
                 let mut modified = false;
                 for (jp, tr) in changes {
@@ -268,16 +325,20 @@ pub fn export_mod_jar(
                     continue;
                 }
             }
-            out.write_all(&buf).map_err(|e| e.to_string())?;
-        } else {
-            std::io::copy(&mut f, &mut out).map_err(|e| e.to_string())?;
         }
+        out.write_all(&buf).map_err(|e| e.to_string())?;
     }
 
-    // 写入 zh_cn 语言文件
+    // 写入 zh_cn 语言文件（有公共前缀时写在前缀内，否则会落在包外）
+    //
+    // 开启代码内嵌改写时，把 `.class` 条目的 `路径#const:N` 从语言文件里去掉：
+    // 它本来就不是语言键（是工具为"把译文找个地方存"造出来的记号），
+    // 交给字节码后端之后留在语言文件里只会变成一堆没人查的死键。
+    // 开关关闭时**不做**这层过滤 —— 保证产物与历史版本逐字节一致。
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     let pairs: Vec<(String, String)> = translated
         .iter()
+        .filter(|e| !(rewrite_class && e.hardcoded && e.file_path.to_lowercase().ends_with(".class")))
         .map(|e| (e.key.clone(), e.translation.clone().unwrap()))
         .collect();
     out.start_file(lang_path, options).map_err(|e| e.to_string())?;
@@ -295,25 +356,60 @@ pub fn export_mod_jar(
     if meta.len() == 0 {
         return Err("导出文件为空（写入异常）".to_string());
     }
+    if rewrite_class && (cls_rewritten + cls_shadowed + cls_unmatched) > 0 {
+        crate::logging::info(&format!(
+            "汉化 jar：字节码改写 {cls_rewritten} 处常量池字面量（跳过 {cls_shadowed} 处兼作标识符、{cls_unmatched} 处未匹配）"
+        ));
+    }
     Ok(dest.to_string_lossy().to_string())
 }
 
-/// 按 json 路径（"." 分隔，数组下标为数字）设置字符串值，成功返回 true
+/// 按 json 路径（`.` 分隔，数组下标为数字）设置字符串值，成功返回 true。
+///
+/// ⚠️ **点号未必是分隔符**。模组的 `config/*.json` 里扁平点号键很常见
+/// （`{"msg.welcome": "..."}`），而扫描侧的路径是拿 `{父路径}.{键名}` 拼出来的
+/// （`jar.rs::collect_json_strings`），两者在字符串上完全同形 —— 同一串
+/// `msg.welcome` 既可能是"键名带点"，也可能是"两层嵌套"。
+///
+/// 旧实现一律按 `.` 硬切：扁平键被当成两层 → 父键不存在 → 返回 false →
+/// 调用方静默写回原字节。用户看到的就是"扫出来了、翻译了，但就是没生效"。
+///
+/// 现在的策略是**整段优先 + 全切分点回溯**：
+/// 1. 先看当前对象里有没有一个键**就叫整条路径**（扁平点号键的解法）；
+/// 2. 再在每个 `.` 处切 head/tail 递归下钻（真嵌套的解法）；
+/// 3. 单段路径沿用旧行为（对象上直接写，键不存在则新建）。
+/// 路径确实不存在时仍然返回 false，**不会凭空造键**。
 fn set_json_path(value: &mut serde_json::Value, path: &str, new_val: &str) -> bool {
-    let parts: Vec<&str> = path.split('.').collect();
-    let mut cur = value;
-    for (i, part) in parts.iter().enumerate() {
-        if i == parts.len() - 1 {
-            // 最后一段：设置叶子值
-            if let Some(obj) = cur.as_object_mut() {
+    set_json_path_at(value, path, new_val, 0)
+}
+
+/// 递归深度上限：路径段数本来就是个位数，这里只是防止病态输入把回溯放大。
+const JSON_PATH_MAX_DEPTH: usize = 24;
+
+fn set_json_path_at(
+    value: &mut serde_json::Value,
+    path: &str,
+    new_val: &str,
+    depth: usize,
+) -> bool {
+    if depth > JSON_PATH_MAX_DEPTH {
+        return false;
+    }
+    let single = !path.contains('.');
+    match value {
+        serde_json::Value::Object(obj) => {
+            // 整段命中（含扁平点号键），单段时无论存在与否都写（沿用旧行为）
+            if single || obj.contains_key(path) {
                 obj.insert(
-                    part.to_string(),
+                    path.to_string(),
                     serde_json::Value::String(new_val.to_string()),
                 );
                 return true;
             }
-            if let Ok(idx) = part.parse::<usize>() {
-                if let Some(arr) = cur.as_array_mut() {
+        }
+        serde_json::Value::Array(arr) => {
+            if single {
+                if let Ok(idx) = path.parse::<usize>() {
                     if idx < arr.len() {
                         arr[idx] = serde_json::Value::String(new_val.to_string());
                         return true;
@@ -322,17 +418,27 @@ fn set_json_path(value: &mut serde_json::Value, path: &str, new_val: &str) -> bo
             }
             return false;
         }
-        // 中间段下钻
-        let found: Option<&mut serde_json::Value> = match cur {
-            serde_json::Value::Object(m) => m.get_mut(*part),
-            serde_json::Value::Array(a) => {
-                part.parse::<usize>().ok().and_then(|idx| a.get_mut(idx))
-            }
+        _ => return false,
+    }
+    // 多段：对每个 `.` 位置尝试 head / tail 切分
+    for (i, b) in path.bytes().enumerate() {
+        if b != b'.' {
+            continue;
+        }
+        let head = &path[..i];
+        let tail = &path[i + 1..];
+        if head.is_empty() || tail.is_empty() {
+            continue;
+        }
+        let child = match value {
+            serde_json::Value::Object(m) => m.get_mut(head),
+            serde_json::Value::Array(a) => head.parse::<usize>().ok().and_then(|ix| a.get_mut(ix)),
             _ => None,
         };
-        match found {
-            Some(next) => cur = next,
-            None => return false,
+        if let Some(c) = child {
+            if set_json_path_at(c, tail, new_val, depth + 1) {
+                return true;
+            }
         }
     }
     false
@@ -445,7 +551,7 @@ mod tests {
 
         let entries = vec![sample_entry("item.a.name", "Diamond Sword", Some("钻石剑"))];
         let dest = std::env::temp_dir().join("testmod_zh_cn.jar");
-        export_mod_jar(&src, &dest, "testmod", &entries, LangFormat::Json).unwrap();
+        export_mod_jar(&src, &dest, "testmod", &entries, LangFormat::Json, false).unwrap();
 
         // 验证：en_us 保留、zh_cn 被新译文替换、fabric.mod.json 保留
         let f = File::open(&dest).unwrap();
@@ -537,7 +643,7 @@ mod tests {
             deep_group: None,
         };
         let dest = std::env::temp_dir().join("hc_dest.jar");
-        export_mod_jar(&src, &dest, "hcmod", &[e1, e2], LangFormat::Json).unwrap();
+        export_mod_jar(&src, &dest, "hcmod", &[e1, e2], LangFormat::Json, false).unwrap();
         let f = File::open(&dest).unwrap();
         let mut archive = zip::ZipArchive::new(f).unwrap();
         let mut cfg = String::new();
@@ -549,6 +655,205 @@ mod tests {
         assert!(en.contains("Sword"));
         let _ = std::fs::remove_file(&src);
         let _ = std::fs::remove_file(&dest);
+    }
+    #[test]
+    fn set_json_path_handles_flat_dotted_keys() {
+        // 扁平点号键：整段就是键名（旧实现按 `.` 硬切 → 永远找不到）
+        let mut v = serde_json::json!({"msg.welcome": "old", "other": 1});
+        assert!(set_json_path(&mut v, "msg.welcome", "新"));
+        assert_eq!(v["msg.welcome"], "新");
+        // 真嵌套照旧可用
+        let mut v2 = serde_json::json!({"a": {"b": {"c": "old"}}});
+        assert!(set_json_path(&mut v2, "a.b.c", "新"));
+        assert_eq!(v2["a"]["b"]["c"], "新");
+        // 嵌套里再带点号键
+        let mut v3 = serde_json::json!({"a": {"b.c": "old"}});
+        assert!(set_json_path(&mut v3, "a.b.c", "新"));
+        assert_eq!(v3["a"]["b.c"], "新");
+        // 点号键在父层
+        let mut v4 = serde_json::json!({"a.b": {"c": "old"}});
+        assert!(set_json_path(&mut v4, "a.b.c", "新"));
+        assert_eq!(v4["a.b"]["c"], "新");
+        // 数组下标
+        let mut v5 = serde_json::json!({"a": {"b": ["x", "y"]}});
+        assert!(set_json_path(&mut v5, "a.b.1", "新"));
+        assert_eq!(v5["a"]["b"][1], "新");
+        // 确实不存在 → false，绝不凭空造键
+        let mut v6 = serde_json::json!({"a": 1});
+        assert!(!set_json_path(&mut v6, "nope.deep", "x"));
+    }
+
+    /// 代码内嵌文本（`.class` 常量池）的导出：开关关掉必须与历史版本一致，
+    /// 打开才改字节码，且"兼作标识符"的字面量一律不动。
+    #[test]
+    fn export_mod_jar_rewrites_class_literals() {
+        use crate::core::class_pool;
+        let cls = class_pool::sample_class();
+        let src = std::env::temp_dir().join("cls_source.jar");
+        {
+            let f = File::create(&src).unwrap();
+            let mut w = zip::ZipWriter::new(f);
+            let opts = SimpleFileOptions::default();
+            w.start_file("assets/clsmod/lang/en_us.json", opts).unwrap();
+            w.write_all(br#"{"item.x.name":"Sword"}"#).unwrap();
+            w.start_file("haage/T.class", opts).unwrap();
+            w.write_all(&cls).unwrap();
+            w.finish().unwrap();
+        }
+        let lang = sample_entry("item.x.name", "Sword", Some("剑"));
+        let mut cls_entry = sample_entry("haage/T.class#const:4", "Player Render", Some("玩家渲染"));
+        cls_entry.file_path = "haage/T.class".into();
+        cls_entry.hardcoded = true;
+        cls_entry.deep_group = Some("class_text".into());
+        // 兼作字段名 → 安全策略必须拒绝改写
+        let mut shadowed = sample_entry("haage/T.class#const:6", "Armour", Some("护甲"));
+        shadowed.file_path = "haage/T.class".into();
+        shadowed.hardcoded = true;
+        shadowed.deep_group = Some("class_text".into());
+
+        let all = vec![lang, cls_entry, shadowed];
+
+        // ── 开关关闭：产物与历史版本一致 ──
+        let dest_off = std::env::temp_dir().join("cls_off.jar");
+        export_mod_jar(&src, &dest_off, "clsmod", &all, LangFormat::Json, false).unwrap();
+        {
+            let f = File::open(&dest_off).unwrap();
+            let mut a = zip::ZipArchive::new(f).unwrap();
+            let mut got = Vec::new();
+            a.by_name("haage/T.class").unwrap().read_to_end(&mut got).unwrap();
+            assert_eq!(got, cls, "开关关闭时 class 必须逐字节不变");
+            let mut zh = String::new();
+            a.by_name("assets/clsmod/lang/zh_cn.json")
+                .unwrap()
+                .read_to_string(&mut zh)
+                .unwrap();
+            assert!(zh.contains("const:"), "关闭时保留历史行为：记号仍写进语言文件");
+        }
+
+        // ── 开关打开：真的改字节码 ──
+        let dest_on = std::env::temp_dir().join("cls_on.jar");
+        export_mod_jar(&src, &dest_on, "clsmod", &all, LangFormat::Json, true).unwrap();
+        {
+            let f = File::open(&dest_on).unwrap();
+            let mut a = zip::ZipArchive::new(f).unwrap();
+            let mut got = Vec::new();
+            a.by_name("haage/T.class").unwrap().read_to_end(&mut got).unwrap();
+            assert!(got.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]), "魔数必须完好");
+            let strings = class_pool::scan_strings(&got);
+            assert!(strings.iter().any(|s| s == "玩家渲染"), "字面量应被改写");
+            assert!(strings.iter().any(|s| s == "Armour"), "兼作字段名的字面量必须原样");
+            assert!(!strings.iter().any(|s| s == "护甲"));
+            // 改写后仍是一个结构完好、可安全再改的 class
+            let cp = class_pool::ClassPool::parse(&got).unwrap();
+            cp.name_owned().unwrap();
+            let mut zh = String::new();
+            a.by_name("assets/clsmod/lang/zh_cn.json")
+                .unwrap()
+                .read_to_string(&mut zh)
+                .unwrap();
+            assert!(!zh.contains("const:"), "开启后不再把这些记号写进语言文件");
+            assert!(zh.contains("剑"));
+        }
+
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_file(&dest_off).ok();
+        std::fs::remove_file(&dest_on).ok();
+    }
+
+    /// 「整个内容套一层文件夹」的 jar：扫描侧存归一化路径、导出侧也必须归一化，
+    /// 否则 `hardcoded_changes` 永不命中 → 该 jar 的硬编码条目全部静默失效。
+    #[test]
+    fn export_mod_jar_matches_hardcoded_under_root_prefix() {
+        let src = std::env::temp_dir().join("wrap_source.jar");
+        {
+            let f = File::create(&src).unwrap();
+            let mut w = zip::ZipWriter::new(f);
+            let opts = SimpleFileOptions::default();
+            w.start_file("wrapper/config/demo.json", opts).unwrap();
+            w.write_all(br#"{"message":"Welcome"}"#).unwrap();
+            w.start_file("wrapper/fabric.mod.json", opts).unwrap();
+            w.write_all(br#"{"id":"wrapmod"}"#).unwrap();
+            w.finish().unwrap();
+        }
+        let mut e = sample_entry("config/demo.json#message", "Welcome", Some("欢迎"));
+        e.file_path = "config/demo.json".into(); // 扫描侧存的就是归一化后的路径
+        e.hardcoded = true;
+
+        let dest = std::env::temp_dir().join("wrap_dest.jar");
+        export_mod_jar(&src, &dest, "wrapmod", &[e], LangFormat::Json, false).unwrap();
+        let f = File::open(&dest).unwrap();
+        let mut a = zip::ZipArchive::new(f).unwrap();
+        let mut cfg = String::new();
+        a.by_name("wrapper/config/demo.json")
+            .unwrap()
+            .read_to_string(&mut cfg)
+            .unwrap();
+        assert!(cfg.contains("欢迎"), "带顶层包裹的 jar 也必须命中: {cfg}");
+        // 语言文件必须写在包裹内，否则等于落在包外、游戏读不到
+        assert!(a.by_name("wrapper/assets/wrapmod/lang/zh_cn.json").is_ok());
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_file(&dest).ok();
+    }
+    /// 全链路探针（默认跳过，靠环境变量触发）：
+    ///
+    /// ```text
+    /// MCL_E2E_PROBE=<源 jar> MCL_E2E_PROBE_OUT=<输出 jar> cargo test
+    /// ```
+    ///
+    /// 走一遍真实链路「深度扫描 → 填译文 → 导出汉化 jar（开字节码改写）」。
+    /// 单测里的夹具是手搓的，探针的意义在于用**真实的第三方 jar** 验证
+    /// 扫描侧产出的 `file_path` 与导出侧的匹配口径确实对得上 —— 这是
+    /// "扫出来了却改不到"最容易出问题的地方。
+    #[test]
+    fn end_to_end_probe_on_real_jar() {
+        let (Ok(src), Ok(dst)) = (
+            std::env::var("MCL_E2E_PROBE"),
+            std::env::var("MCL_E2E_PROBE_OUT"),
+        ) else {
+            return;
+        };
+        let rules = crate::core::scan_rules::DeepScanRules::full(false);
+        let res = crate::core::deep_scan::deep_scan_jar(std::path::Path::new(&src), "probe", &rules)
+            .expect("深度扫描失败");
+        let mut entries = res.entries;
+        let mut n_class = 0usize;
+        for e in entries.iter_mut() {
+            e.translation = Some(format!("〔{}〕", e.source));
+            e.status = crate::core::model::EntryStatus::AiTranslated;
+            if e.file_path.to_lowercase().ends_with(".class") {
+                n_class += 1;
+            }
+        }
+        assert!(n_class > 0, "深度扫描应当产出 .class 内嵌文本条目");
+        export_mod_jar(
+            std::path::Path::new(&src),
+            std::path::Path::new(&dst),
+            "probe",
+            &entries,
+            LangFormat::Json,
+            true,
+        )
+        .expect("导出失败");
+        std::fs::write(
+            format!("{dst}.info"),
+            format!("entries={} class_items={n_class}\n", entries.len()),
+        )
+        .ok();
+
+        // 第二段：同一批条目、开关**关闭**再导一次。产物必须与"今天的行为"逐字节一致 ——
+        // 即 `.class` 成员一个字节都不动、语言文件仍照旧带 `#const:N` 伪键。
+        // 这是用户划的界限（"原本能汉化的就不改动，算是极端情况的兜底"）的回归证据。
+        if let Ok(dst_off) = std::env::var("MCL_E2E_PROBE_OUT_OFF") {
+            export_mod_jar(
+                std::path::Path::new(&src),
+                std::path::Path::new(&dst_off),
+                "probe",
+                &entries,
+                LangFormat::Json,
+                false,
+            )
+            .expect("关档导出失败");
+        }
     }
 }
 
@@ -581,21 +886,46 @@ mod serde_tests {
 
 // ── 服务器插件导出 ────────────────────────────────────────────────────────────
 
-/// 插件导出条目：jar 内文件 + 键路径 + 译文
+/// 插件导出条目：jar 内文件 + 键路径 + 译文 +（`.class` 内嵌文本用）原文
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginExportItem {
     pub file_path: String,
     pub key_path: String,
     pub translation: String,
+    /// 原文。只有「代码内嵌文本」（`.class` 常量池）用得上 —— 它靠**内容**去常量池里
+    /// 匹配字面量，而不是靠 `key_path` 里的 `const:N` 序号（序号会随版本漂移）。
+    /// 老前端不传时为空串，此时该类条目按"未匹配"跳过，不会改错。
+    #[serde(default)]
+    pub source: String,
+}
+
+/// 能安全地当文本重写的成员扩展名 —— **白名单**，与插件常规扫描的收口一致
+/// （`core/plugin.rs` 只收 `.yml/.yaml/.properties/.json`）。其余一律原字节复制。
+///
+/// 之所以要立这条规矩：旧实现对所有被翻译的成员都走 `String::from_utf8_lossy`
+/// 再写回，`.class` 落到最后一档"yaml 文本替换"里，有损转换把魔数
+/// `CA FE BA BE` 变成 `EF BF BD EF BF BD`，插件直接 `ClassFormatError`。
+const TEXT_MEMBER_EXTS: &[&str] = &[
+    ".json", ".yml", ".yaml", ".properties", ".lang", ".toml", ".txt",
+];
+
+fn is_text_member(name_lower: &str) -> bool {
+    TEXT_MEMBER_EXTS.iter().any(|e| name_lower.ends_with(e))
 }
 
 /// 导出汉化插件 jar：复制原 jar，仅替换被翻译的成员；其余成员原字节保留
-/// （不重压缩、不破坏插件完整性）。返回摘要（写入/跳过条数）。
+/// （不重压缩、不破坏插件完整性）。返回摘要（写入/跳过/改写条数）。
+///
+/// 成员按类型分流：
+/// * `.class` → 「代码内嵌文本」字节码改写（`rewrite_class` 为真时），否则原字节写回；
+/// * 白名单里的文本扩展 **且** 内容确是合法 UTF-8 → 文本级替换；
+/// * 其余一律原字节写回（二进制永远不碰）。
 pub fn export_plugin_jar(
     source: &Path,
     dest: &Path,
     items: &[PluginExportItem],
+    rewrite_class: bool,
 ) -> Result<String, String> {
     use zip::{ZipArchive, ZipWriter};
 
@@ -615,20 +945,54 @@ pub fn export_plugin_jar(
 
     let mut written = 0usize;
     let mut skipped = 0usize;
+    let mut cls_rewritten = 0usize;
+    let mut cls_skipped = 0usize;
+    let mut cls_disabled = 0usize;
+
     for i in 0..archive.len() {
         let mut f = archive.by_index(i).map_err(|e| e.to_string())?;
         if f.is_dir() {
             continue;
         }
         let name = f.name().to_string();
-        if let Some(list) = by_file.get(name.as_str()).cloned() {
-            // 被翻译的成员：读出 → 文本级替换 → 保留原压缩方式与权限写回
-            let mut buf = Vec::new();
-            std::io::Read::read_to_end(&mut f, &mut buf).map_err(|e| e.to_string())?;
-            let compression = f.compression();
-            let unix_mode = f.unix_mode();
+        let Some(list) = by_file.get(name.as_str()).cloned() else {
+            // 未翻译的成员：原字节复制（不重压缩）
+            w.raw_copy_file(f).map_err(|e| e.to_string())?;
+            continue;
+        };
+
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut f, &mut buf).map_err(|e| e.to_string())?;
+        let compression = f.compression();
+        let unix_mode = f.unix_mode();
+        let lower = name.to_lowercase();
+
+        let payload: Vec<u8> = if lower.ends_with(".class") {
+            if rewrite_class {
+                let mut table: HashMap<Vec<u8>, String> = HashMap::new();
+                for it in &list {
+                    if it.source.is_empty() {
+                        continue;
+                    }
+                    table.insert(
+                        crate::core::class_pool::mutf8_encode(&it.source),
+                        it.translation.clone(),
+                    );
+                }
+                let asked = table.len();
+                let (new_bytes, stat) = crate::core::class_pool::apply_translations(&buf, &table);
+                cls_rewritten += stat.rewritten;
+                cls_skipped += asked.saturating_sub(stat.rewritten);
+                new_bytes
+            } else {
+                cls_disabled += 1;
+                buf
+            }
+        } else if !is_text_member(&lower) || std::str::from_utf8(&buf).is_err() {
+            // 非文本成员，或自称文本其实不是合法 UTF-8 → 原字节写回
+            buf
+        } else {
             let text = String::from_utf8_lossy(&buf).into_owned();
-            let lower = name.to_lowercase();
             let (new_text, rep, miss) = if lower.ends_with(".json") {
                 rewrite_json_text(&text, &list)
             } else if lower.ends_with(".properties") {
@@ -638,25 +1002,33 @@ pub fn export_plugin_jar(
             };
             written += rep;
             skipped += miss;
-            let opts = SimpleFileOptions::default()
-                .compression_method(compression)
-                .unix_permissions(unix_mode.unwrap_or(0o644));
-            w.start_file(name.clone(), opts).map_err(|e| e.to_string())?;
-            w.write_all(new_text.as_bytes()).map_err(|e| e.to_string())?;
-        } else {
-            // 未翻译的成员：原字节复制（不重压缩）
-            w.raw_copy_file(f).map_err(|e| e.to_string())?;
-        }
+            new_text.into_bytes()
+        };
+
+        let opts = SimpleFileOptions::default()
+            .compression_method(compression)
+            .unix_permissions(unix_mode.unwrap_or(0o644));
+        w.start_file(name, opts).map_err(|e| e.to_string())?;
+        w.write_all(&payload).map_err(|e| e.to_string())?;
     }
     w.finish().map_err(|e| e.to_string())?;
-    Ok(format!(
-        "已写入 {written} 条译文{}",
-        if skipped > 0 {
-            format!("（跳过 {skipped} 条：原文件中未找到对应键）")
-        } else {
-            String::new()
-        }
-    ))
+
+    let mut msg = format!("已写入 {written} 条译文");
+    if skipped > 0 {
+        msg.push_str(&format!("，跳过 {skipped} 条（原文件中未找到对应键）"));
+    }
+    if cls_rewritten > 0 {
+        msg.push_str(&format!("；字节码改写 {cls_rewritten} 处代码内嵌文本"));
+    }
+    if cls_skipped > 0 {
+        msg.push_str(&format!("（{cls_skipped} 处未匹配或不可改写，已原样保留）"));
+    }
+    if cls_disabled > 0 {
+        msg.push_str(&format!(
+            "；{cls_disabled} 个 .class 成员未改写（设置 →「个性化设置」里开启「改写代码内嵌文本」后可用）"
+        ));
+    }
+    Ok(msg)
 }
 
 /// YAML 保格式回写：文本级行替换，保留注释、键序、缩进与引号风格。
@@ -891,6 +1263,17 @@ mod plugin_export_tests {
             file_path: fp.into(),
             key_path: kp.into(),
             translation: tr.into(),
+            source: String::new(),
+        }
+    }
+
+    /// 带原文的条目（`.class` 内嵌文本走内容匹配，必须有 source）
+    fn item_src(fp: &str, kp: &str, src: &str, tr: &str) -> PluginExportItem {
+        PluginExportItem {
+            file_path: fp.into(),
+            key_path: kp.into(),
+            translation: tr.into(),
+            source: src.into(),
         }
     }
 
@@ -949,7 +1332,7 @@ mysql:
             item("config.yml", "messages.welcome", "&a欢迎！"),
             item("plugin.yml", "description", "测试插件"),
         ];
-        let summary = export_plugin_jar(&src, &dst, &items).unwrap();
+        let summary = export_plugin_jar(&src, &dst, &items, false).unwrap();
         assert!(summary.contains("已写入 2"), "{}", summary);
 
         // 校验产物：译文写入、注释保留、二进制成员字节一致、成员数不变
@@ -986,5 +1369,74 @@ mysql:
         assert!(out.contains("welcome = 欢迎"));
         assert!(out.contains("prefix: [Server]"));
         assert!(out.contains("# msg"));
+    }
+
+    /// 回归：`from_utf8_lossy` 曾经把 `.class` 写坏（`CA FE BA BE` →
+    /// `EF BF BD EF BF BD`）。二进制成员**永远**原字节保留，无论是否被翻译。
+    #[test]
+    fn plugin_export_never_corrupts_class_members() {
+        use crate::core::class_pool;
+        let cls = class_pool::sample_class();
+        let src = std::env::temp_dir().join("plug_cls_src.jar");
+        let dst = std::env::temp_dir().join("plug_cls_dst.jar");
+        {
+            let f = File::create(&src).unwrap();
+            let mut w = zip::ZipWriter::new(f);
+            let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            w.start_file("config.yml", opts).unwrap();
+            w.write_all(b"messages:\n  welcome: Hi\n").unwrap();
+            w.start_file("com/example/T.class", opts).unwrap();
+            w.write_all(&cls).unwrap();
+            w.finish().unwrap();
+        }
+        // 老前端不传 source 的条目：会被当成"未匹配"跳过，但绝不能写坏文件
+        let items = vec![
+            item("config.yml", "messages.welcome", "你好"),
+            item("com/example/T.class", "const:4", "玩家渲染"),
+        ];
+        let summary = export_plugin_jar(&src, &dst, &items, false).unwrap();
+        assert!(summary.contains("已写入 1"), "{summary}");
+        let f = File::open(&dst).unwrap();
+        let mut a = zip::ZipArchive::new(f).unwrap();
+        let mut got = Vec::new();
+        a.by_name("com/example/T.class").unwrap().read_to_end(&mut got).unwrap();
+        assert_eq!(got, cls, "二进制成员必须逐字节保留");
+        assert!(got.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE]), "魔数不得损坏");
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_file(&dst).ok();
+    }
+
+    /// 开关打开时，插件的 `.class` 也走字节码改写（不再走文本替换）。
+    #[test]
+    fn plugin_export_rewrites_class_literals_when_enabled() {
+        use crate::core::class_pool;
+        let cls = class_pool::sample_class();
+        let src = std::env::temp_dir().join("plug_cls2_src.jar");
+        let dst = std::env::temp_dir().join("plug_cls2_dst.jar");
+        {
+            let f = File::create(&src).unwrap();
+            let mut w = zip::ZipWriter::new(f);
+            let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+            w.start_file("com/example/T.class", opts).unwrap();
+            w.write_all(&cls).unwrap();
+            w.finish().unwrap();
+        }
+        let items = vec![
+            item_src("com/example/T.class", "const:4", "Player Render", "玩家渲染"),
+            item_src("com/example/T.class", "const:6", "Armour", "护甲"), // 兼作字段名 → 拒改
+        ];
+        let summary = export_plugin_jar(&src, &dst, &items, true).unwrap();
+        assert!(summary.contains("字节码改写 1"), "{summary}");
+        let f = File::open(&dst).unwrap();
+        let mut a = zip::ZipArchive::new(f).unwrap();
+        let mut got = Vec::new();
+        a.by_name("com/example/T.class").unwrap().read_to_end(&mut got).unwrap();
+        let strings = class_pool::scan_strings(&got);
+        assert!(strings.iter().any(|s| s == "玩家渲染"));
+        assert!(strings.iter().any(|s| s == "Armour"));
+        assert!(!strings.iter().any(|s| s == "护甲"));
+        class_pool::ClassPool::parse(&got).unwrap().name_owned().unwrap();
+        std::fs::remove_file(&src).ok();
+        std::fs::remove_file(&dst).ok();
     }
 }

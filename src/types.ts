@@ -309,6 +309,18 @@ export interface Settings {
   closeBehavior: 'exit' | 'minimize';
   /** 导出命名偏好：raw 原名 / suffix 原名_zh_cn（默认）/ ai AI 汉化名称 */
   exportNaming?: 'raw' | 'suffix' | 'ai';
+  /**
+   * 导出时改写 `.class` 常量池里的内嵌字面量（「代码内嵌文本」）。
+   *
+   * 兜底开关，默认关闭。只管"不改字节码就永远不生效"的那一类 —— 写死在代码里的
+   * 字面量，语言文件与资源包都够不着。已能生效的部分（lang 键、数据文件硬编码）
+   * 不受影响；关闭时**不做任何 `.class` 改写**。
+   *
+   * 注意别把这句话读成"整个产物逐字节不变"：扫描侧会把新识别出的条目
+   * （单词型 UI 标签，如 `Armour` / `Shown`）照旧写成 `#const:N` 记号进语言文件；
+   * 关档保证的是**字节码一个字节都不动**。
+   */
+  rewriteClassLiterals?: boolean;
   /** 自动记录日志（默认开启；关闭只停止记录，不删除已有日志） */
   autoLog?: boolean;
   /** AI 汉化名称缓存（key = "文件名|大小"） */

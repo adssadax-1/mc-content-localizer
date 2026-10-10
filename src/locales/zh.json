@@ -211,7 +211,9 @@
       "namingSuffix": "原名_zh_cn",
       "namingAi": "AI 汉化名称",
       "autoLog": "自动记录日志",
-      "autoLogTip": "开启后自动记录本次运行的运行日志（保存在软件自己的数据目录，API Key 等敏感信息会自动隐去）。关闭只停止记录，不删除已有日志。"
+      "autoLogTip": "开启后自动记录本次运行的运行日志（保存在软件自己的数据目录，API Key 等敏感信息会自动隐去）。关闭只停止记录，不删除已有日志。",
+      "rewriteClass": "改写代码内嵌文本",
+      "rewriteClassTip": "只影响写死进 .class、不改字节码永远是英文的字面量；关档不碰它，其余一概不变。"
     },
     "about": {
       "title": "MC 汉化工坊",
@@ -292,7 +294,7 @@
         "scopeLang": "非 assets/lang 结构的 .lang 与 .properties 文本（插件常见）。价值高。",
         "scopeText": "toml/ini/cfg/conf/yaml/yml/txt/md。配置文件价值高，但 txt/md 说明文档噪声偏多。",
         "scopeNested": "递归扫描 jar 内的 jar（jar-in-jar 模组）。价值高，但被嵌套的库文本也会进来。",
-        "scopeClass": "解析 .class 常量池里的硬编码文本（玩家可见消息、GUI 标题、物品名称等）；插件消息的主要来源，模组侧噪声较大故默认关闭。",
+        "scopeClass": "解析 .class 常量池里的硬编码文本（玩家可见消息、GUI 标题、物品名称等）；插件消息的主要来源，模组侧噪声较大故默认关闭。也会识别单词型按钮标签（如 Armour / Shown），但为避免把 NBT 数据键（Name、Color、Lore 等）一并扫进来，单词型标签只在同类里存在「Armour: 」这类前缀时才放行。",
         "skipMeta": "META-INF、LICENSE、CHANGELOG 等不可翻译内容，建议保持开启。",
         "skipLangfiles": "语言文件已由常规解析处理，重复扫描会产生重复条目，因此固定开启。",
         "skipLibs": "跳过插件打包进来的第三方库（bukkit/json/google/kotlin 等），实测可去掉约 8% 纯噪声。",
@@ -301,8 +303,8 @@
         "dropSql": "以 SQL 关键字开头或含明显 SQL 子句的字符串（常见于数据存储类），无翻译价值。",
         "dropDescriptor": "形如 Lcom/a/B;、(Ljava/lang/String;)V 的 JVM 内部串与调试签名。",
         "dropLog": "面向服主的日志句式（Failed / Could not / Loading / 异常栈等），不是玩家可见文本。",
-        "dropIdent": "无空格且带分隔符的键名、权限节点、常量名（如 griefprevention.claim.kick）。",
-        "classNeedsMarker": "开启后，代码文本里含颜色码/占位符或成句的归入「消息文本」组并默认勾选，其余归「代码内嵌·其他」默认不勾选。"
+        "dropIdent": "无空格且带分隔符的键名、权限节点、常量名（如 griefprevention.claim.kick）。例外：代码内嵌里的「Armour: 」这类标签前缀形似键名、实为显示文本，不丢弃。",
+        "classNeedsMarker": "开启后，含颜色码/占位符、成句、以及「Armour: 」这类标签前缀，都归入「消息文本」组并默认勾选；单词型标签（Armour、Shown）只在同一个类里还有这类前缀时才一并放行，其余归「代码内嵌·其他」默认不勾选。"
       },
       "kind": {
         "ext": "扩展名",

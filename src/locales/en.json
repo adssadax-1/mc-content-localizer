@@ -211,7 +211,9 @@
       "namingSuffix": "Original_zh_cn",
       "namingAi": "AI name",
       "autoLog": "Auto logging",
-      "autoLogTip": "Records a log of this run in the app own data folder; API keys and other secrets are redacted. Turning it off only stops recording — existing logs are kept."
+      "autoLogTip": "Records a log of this run in the app own data folder; API keys and other secrets are redacted. Turning it off only stops recording — existing logs are kept.",
+      "rewriteClass": "Rewrite code-embedded text",
+      "rewriteClassTip": "Only touches literals baked into .class that would stay English without a bytecode rewrite. Off = nothing rewritten, everything else unchanged."
     },
     "about": {
       "title": "MC Content Localizer",
@@ -292,7 +294,7 @@
         "scopeLang": ".lang and .properties outside assets/lang (common in plugins). High value.",
         "scopeText": "toml/ini/cfg/conf/yaml/yml/txt/md. Configs are valuable; txt/md docs add noise.",
         "scopeNested": "Jars inside jars (jar-in-jar mods). Valuable, but bundled library text comes too.",
-        "scopeClass": "Parse hardcoded strings in the .class constant pool (player-visible messages, GUI titles, item names…); the main source of plugin messages, off by default for mods because of noise.",
+        "scopeClass": "Parse hardcoded strings in the .class constant pool (player-visible messages, GUI titles, item names…); the main source of plugin messages, off by default for mods because of noise. Also picks up single-word button labels (Armour, Shown…), but only when the same class also contains an \"Armour: \" style prefix — otherwise NBT data keys (Name, Color, Lore…) would be swept in too.",
         "skipMeta": "META-INF, LICENSE, CHANGELOG and similar untranslatable content.",
         "skipLangfiles": "Language files are handled by the normal parser; re-scanning duplicates entries, so this stays on.",
         "skipLibs": "Skips bundled third-party libraries (bukkit/json/google/kotlin...) - about 8% pure noise removed in tests.",
@@ -301,8 +303,8 @@
         "dropSql": "Strings starting with SQL keywords or containing SQL clauses (typical in data stores).",
         "dropDescriptor": "JVM internals such as Lcom/a/B; or (Ljava/lang/String;)V.",
         "dropLog": "Console-oriented lines (Failed / Could not / Loading / stack traces) rather than player-facing text.",
-        "dropIdent": "Keys, permission nodes and constants without spaces (e.g. griefprevention.claim.kick).",
-        "classNeedsMarker": "When on, code strings with color codes/placeholders or sentence shape go to \"Messages\" (checked by default); the rest go to \"Code - other\" (unchecked)."
+        "dropIdent": "Keys, permission nodes and constants without spaces (e.g. griefprevention.claim.kick). Exception: \"Armour: \" style label prefixes inside code look like keys but are display text, so they are kept.",
+        "classNeedsMarker": "When on, code strings with color codes/placeholders, sentence shape, or an \"Armour: \" style prefix go to \"Messages\" (checked by default). Single-word labels (Armour, Shown) are only allowed when the same class also has such a prefix; the rest go to \"Code - other\" (unchecked)."
       },
       "kind": {
         "ext": "Extension",

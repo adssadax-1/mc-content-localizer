@@ -705,20 +705,27 @@ pub fn export_resource_pack_multi(
 }
 
 /// 生成汉化后的模组 jar（复制原 jar + 写入 zh_cn，不覆盖原文件）
+///
+/// 是否改写「代码内嵌文本」（`.class` 常量池字面量）由设置项
+/// `rewriteClassLiterals` 决定并从后端统一读取 —— 导出的四个入口里只有"手动导入"
+/// 那一条有弹窗，游戏目录批量导出根本没有问询的机会，所以开关必须落在设置里。
 #[tauri::command]
 pub fn export_mod_jar(
+    app: AppHandle,
     source: String,
     dest: String,
     modid: String,
     entries: Vec<LangEntry>,
     lang_format: LangFormat,
 ) -> Result<String, String> {
+    let rewrite_class = Settings::load(&settings_path(&app)).rewrite_class_literals;
     let r = crate::export::export_mod_jar(
         std::path::Path::new(&source),
         std::path::Path::new(&dest),
         &modid,
         &entries,
         lang_format,
+        rewrite_class,
     );
     match &r {
         Ok(p) => crate::logging::info(&format!("导出汉化 jar → {p}")),
@@ -1282,17 +1289,23 @@ pub fn parse_plugin_jar(path: String) -> Result<crate::core::model::PluginFile, 
     })
 }
 
-/// 导出汉化插件 jar：复制原 jar，仅替换被翻译的成员，其余成员原字节保留
+/// 导出汉化插件 jar：复制原 jar，仅替换被翻译的成员，其余成员原字节保留。
+///
+/// `.class` 成员按设置项 `rewriteClassLiterals` 决定走字节码改写还是原样保留；
+/// **二进制成员永远原字节写回**（旧版把它们当文本 lossy 写回，直接写坏）。
 #[tauri::command]
 pub fn export_plugin_jar(
+    app: AppHandle,
     source: String,
     dest: String,
     items: Vec<crate::export::PluginExportItem>,
 ) -> Result<String, String> {
+    let rewrite_class = Settings::load(&settings_path(&app)).rewrite_class_literals;
     let r = crate::export::export_plugin_jar(
         std::path::Path::new(&source),
         std::path::Path::new(&dest),
         &items,
+        rewrite_class,
     );
     match &r {
         Ok(p) => crate::logging::info(&format!("导出汉化插件 jar → {p}")),
@@ -1385,17 +1398,10 @@ pub fn write_text_file(path: String, content: String) -> Result<(), String> {
 mod tests {
     use super::deep_scan_jar;
 
-    /// 构造一个极简 .class：仅含常量池若干 Utf8 字符串
+    /// 构造极简 .class 夹具。交给 `class_pool` 统一实现 —— 扫描侧只认
+    /// 「被 CONSTANT_String 引用且不被当作名字」的 Utf8，手搓裸常量池会一个都扫不出来。
     fn fake_class(strings: &[&str]) -> Vec<u8> {
-        let mut b = vec![0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x34];
-        b.extend_from_slice(&((strings.len() + 1) as u16).to_be_bytes());
-        for s in strings {
-            b.push(1); // CONSTANT_Utf8
-            let bytes = s.as_bytes();
-            b.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
-            b.extend_from_slice(bytes);
-        }
-        b
+        crate::core::class_pool::fake_class(strings)
     }
 
     fn write_jar(name: &str, manifest: &str, manifest_body: &str) -> std::path::PathBuf {

@@ -2301,7 +2301,7 @@ dependencies = [
 
 [[package]]
 name = "mc-content-localizer"
-version = "4.0.0"
+version = "4.0.1"
 dependencies = [
  "regex",
  "reqwest 0.12.28",

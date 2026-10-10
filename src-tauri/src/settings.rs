@@ -122,6 +122,16 @@ pub struct Settings {
   /// 导出命名偏好：raw（原名）/ suffix（原名_zh_cn，默认）/ ai（AI 汉化名称）
   #[serde(default = "default_export_naming")]
   pub export_naming: String,
+  /// 导出时改写 `.class` 常量池里的内嵌字面量（「代码内嵌文本」）。
+  ///
+  /// 只管**"不改字节码就永远不生效"**的那一类：写死在代码里的字面量，
+  /// 语言文件和资源包都够不着，唯一出路是换掉常量池字节。
+  /// 已经能生效的部分（lang 键、`fabric.mod.json` 这类数据文件硬编码）
+  /// 一个字都不动 —— 算是给极端情况的兜底，不是常规流程。
+  ///
+  /// 默认关闭：关掉时导出产物与历史版本逐字节一致（完全向后兼容 + 可选增强）。
+  #[serde(default)]
+  pub rewrite_class_literals: bool,
   /// 自动记录日志（默认开启；关闭只停止记录，不删除已有日志）
   #[serde(default = "default_auto_log")]
   pub auto_log: bool,
@@ -183,6 +193,7 @@ impl Default for Settings {
             close_behavior: default_close_behavior(),
             recent_game_dirs: Vec::new(),
             export_naming: default_export_naming(),
+            rewrite_class_literals: false,
             auto_log: true,
             deep_scan_rules: DeepScanSettings::default(),
             legacy_deep_scan: None,

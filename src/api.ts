@@ -176,7 +176,9 @@ export const api = {
   exportPluginJar: (
     source: string,
     dest: string,
-    items: { filePath: string; keyPath: string; translation: string }[],
+    // source 是「原文」，只为 `.class` 内嵌文本服务：常量池里的位置会随模组版本
+    // 漂移，靠 const:N 序号去定位会改错字符串，按内容匹配才安全。
+    items: { filePath: string; keyPath: string; translation: string; source: string }[],
   ) => invoke<string>("export_plugin_jar", { source, dest, items }),
 
   exportModJar: (

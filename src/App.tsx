@@ -194,11 +194,16 @@ function withIconOnlyTip(iconOnly: boolean, name: string, node: ReactNode): Reac
 }
 
 /** 插件导出条目：把条目键（file_path#key_path）拆成导出所需的两段 */
-function pluginItems(entries: LangEntry[]): { filePath: string; keyPath: string; translation: string }[] {
+function pluginItems(
+  entries: LangEntry[],
+): { filePath: string; keyPath: string; translation: string; source: string }[] {
   return entries.map((e) => ({
     filePath: e.filePath,
     keyPath: e.key.startsWith(e.filePath + "#") ? e.key.slice(e.filePath.length + 1) : e.key,
     translation: e.translation ?? "",
+    // 原文只给「代码内嵌文本」用：常量池里的位置会随模组版本漂移，
+    // 拿 const:N 序号定位会改错字符串，按内容匹配才安全。
+    source: e.source,
   }));
 }
 
@@ -4498,11 +4503,17 @@ function AppInner({
           type="warning"
           showIcon
           style={{ marginBottom: 12 }}
-          message="该模组包含深度扫描发现的内嵌文本（非语言文件，直接写在 json/配置文件中）。修改这些字段可能影响模组运行。"
+          message="该模组包含深度扫描发现的内嵌文本（非语言文件：直接写在 json / 配置文件 / 代码里）。修改这些字段可能影响模组运行。"
         />
         <Typography.Paragraph type="secondary" style={{ fontSize: 13 }}>
           已勾选 {exportRiskChecked.length} 个模组的深度扫描文本参与导出。请选择处理方式：
         </Typography.Paragraph>
+        {settings?.rewriteClassLiterals && (
+          <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: -8 }}>
+            设置里已开启「改写代码内嵌文本」：选第二项时，写在 .class 里的文本会通过字节码改写真正生效
+            （用作字段名 / 方法名 / 描述符的常量会自动跳过，不会破坏模组运行）。
+          </Typography.Paragraph>
+        )}
         <Space direction="vertical" style={{ width: "100%" }}>
           <Button
             block
@@ -4522,7 +4533,9 @@ function AppInner({
               void doExportJar(exportRiskChecked, false);
             }}
           >
-            仍导出全部（含内嵌文本，不推荐）
+            {settings?.rewriteClassLiterals
+              ? "仍导出全部（含改写代码内嵌文本，不推荐）"
+              : "仍导出全部（含内嵌文本，不推荐）"}
           </Button>
           <Button block onClick={() => setExportRiskOpen(false)}>
             取消

@@ -1,3 +1,4 @@
+pub mod class_pool;
 pub mod deep_scan;
 pub mod jar;
 pub mod json_lang;

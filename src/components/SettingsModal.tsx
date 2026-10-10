@@ -159,6 +159,8 @@ interface FormValues {
   /** 关闭行为：exit / minimize */
   closeBehavior?: "exit" | "minimize";
   exportNaming?: "raw" | "suffix" | "ai";
+  /** 改写代码内嵌文本（.class 常量池字面量）—— 兜底开关，默认关 */
+  rewriteClass?: boolean;
   deepScanPlugin?: boolean;
 }
 
@@ -166,7 +168,7 @@ interface FormValues {
  *  只有它的 Promise 失败时才会显示这个值。
  *  **升版本时要跟 tauri.conf.json / package.json / Cargo.toml 一起改** ——
  *  它曾经长期停在旧版本号上，一旦 getVersion() 失败就会在「关于」里显示一个假版本。 */
-const FALLBACK_VERSION = "4.0.0";
+const FALLBACK_VERSION = "4.0.1";
 
 /** 字节数 → 可读体积 */
 function fmtBytes(n: number): string {
@@ -514,6 +516,7 @@ export function SettingsModal({
         // 表单不持有这三项，「确定」时就不会拿一份可能过期的快照把它们覆盖回去。
         closeBehavior: settings.closeBehavior === "minimize" ? "minimize" : "exit",
         exportNaming: settings.exportNaming ?? "suffix",
+        rewriteClass: settings.rewriteClassLiterals ?? false,
         autoLog: settings.autoLog ?? true,
       });
       // 模型列表：用当前服务商缓存的列表（没拉取过则为空）
@@ -703,6 +706,7 @@ export function SettingsModal({
       closeBehavior: v.closeBehavior === "minimize" ? "minimize" : "exit",
       exportNaming:
         v.exportNaming === "raw" || v.exportNaming === "ai" ? v.exportNaming : "suffix",
+      rewriteClassLiterals: v.rewriteClass ?? false,
       autoLog: v.autoLog ?? true,
     };
     try {
@@ -1399,9 +1403,9 @@ export function SettingsModal({
             </div>
             )}
 
-            {/* ===== 分组：个性化设置（导出命名 / 关闭行为） =====
+            {/* ===== 分组：个性化设置（导出命名 / 关闭行为 / 内嵌文本改写 / 日志） =====
                 主题 / 语言 / 无字模式已搬到顶栏右上角的快捷开关（点一下即改、无需保存），
-                这里只留"需要想一下、且适合一并保存"的两项。 */}
+                这里只留"需要想一下、且适合一并保存"的几项。 */}
             {activeSection === "appearance" && (
             <div>
               <PanelBlock index={0}>
@@ -1433,6 +1437,23 @@ export function SettingsModal({
                 valuePropName="checked"
                 style={{ marginBottom: 8 }}
                 tooltip={t("settings.appearance.autoLogTip")}
+              >
+                <Switch />
+              </Form.Item>
+
+              {/* 改写代码内嵌文本：**兜底开关**，默认关。
+                  为什么不放导出弹窗：四个导出入口里只有"手动导入 → 导出模组"有弹窗，
+                  游戏目录批量导出 / 插件导出 / 合并资源包都没有问询的机会，
+                  放弹窗必然漏掉主力路径。
+                  边界很窄，只碰"不改字节码就永远不生效"的那一类 —— 写死在 .class
+                  常量池里的字面量。语言键、数据文件里的文本一律不受影响；
+                  关闭时产物与历史版本逐字节一致。 */}
+              <Form.Item
+                name="rewriteClass"
+                label={t("settings.appearance.rewriteClass")}
+                valuePropName="checked"
+                style={{ marginBottom: 8 }}
+                tooltip={t("settings.appearance.rewriteClassTip")}
               >
                 <Switch />
               </Form.Item>
